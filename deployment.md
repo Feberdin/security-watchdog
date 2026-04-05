@@ -40,15 +40,23 @@ curl -X POST http://localhost:31337/scan \
 ## Unraid Notes
 
 - If you run this stack directly on Unraid, mount `/var/run/docker.sock` into both `watchdog` and `worker`.
+- On Unraid, prefer `PUID=99` and `PGID=100` unless your share uses different ownership.
 - If you prefer a remote Docker TCP endpoint, set `UNRAID_DOCKER_HOST=tcp://<unraid-host>:2375` and secure it with TLS before using it outside a trusted network.
 - Store persistent Compose data on an Unraid share, not inside ephemeral container layers.
 - If you want a simpler Unraid Community Applications setup, use [unraid/security-watchdog.xml](unraid/security-watchdog.xml). That template enables `RUN_EMBEDDED_SCHEDULER=true`, so one container can handle both the API and scheduled scans.
 
 ## Home Assistant Notes
 
-- Mount the Home Assistant config directory to `HOMEASSISTANT_CONFIG_PATH`.
-- If you want built-in integration manifests resolved too, mount the Home Assistant core components directory to `HOMEASSISTANT_CORE_COMPONENTS_PATH`.
-- `custom_components` and `.storage/core.config_entries` should be readable by the container user.
+- Local mount mode:
+  - Mount the Home Assistant config directory to `HOMEASSISTANT_CONFIG_PATH`.
+  - If you want built-in integration manifests resolved too, mount the Home Assistant core components directory to `HOMEASSISTANT_CORE_COMPONENTS_PATH`.
+  - `custom_components` and `.storage/core.config_entries` should be readable by the container user.
+- Remote API mode for Home Assistant on another device:
+  - Set `HOMEASSISTANT_REMOTE_ENABLED=true`.
+  - Set `HOMEASSISTANT_REMOTE_BASE_URL=https://<your-home-assistant>:8123`.
+  - Create a long-lived access token in the Home Assistant profile page and set `HOMEASSISTANT_REMOTE_TOKEN`.
+  - If your Home Assistant uses a self-signed certificate, either install the CA certificate in the image or set `HOMEASSISTANT_REMOTE_VERIFY_TLS=false`.
+  - In remote mode, `security-watchdog` inventories integrations via `/api/config` and `/api/components`, so no filesystem mount is required.
 
 ## Backup Strategy
 

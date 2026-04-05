@@ -12,7 +12,7 @@ How to debug: Start with `LOG_LEVEL=DEBUG`, inspect `/health`, `/reports`, worke
 - Scans repositories for likely leaked secrets with regex and entropy heuristics.
 - Scans Docker images and Dockerfiles with Trivy and Grype.
 - Discovers running Unraid Docker containers through the Docker API or socket.
-- Discovers Home Assistant integrations from mounted config and component paths.
+- Discovers Home Assistant integrations from mounted config/component paths or from a remote Home Assistant REST API.
 - Correlates dependencies with OSV, NVD, GitHub Security Advisories, and CISA KEV.
 - Collects threat intelligence from RSS, Reddit `r/netsec`, Hacker News RSS, and GitHub issues.
 - Uses an OpenAI-compatible API to extract structured malicious-package signals from unstructured articles.
@@ -48,12 +48,14 @@ python3.12 -m venv .venv
 
 Key environment variables:
 
+- `PUID`, `PGID`: Optional container runtime user/group mapping. On Unraid, `99`/`100` usually matches `nobody:users`.
 - `GITHUB_TOKEN`: GitHub token with access to the repositories you want to monitor.
 - `DATABASE_URL`: PostgreSQL connection string.
 - `REDIS_URL`: Redis instance for lightweight dedupe and job heartbeats.
 - `UNRAID_DOCKER_HOST`: Usually `unix:///var/run/docker.sock` when deployed on Unraid.
 - `HOMEASSISTANT_CONFIG_PATH`: Mounted Home Assistant config directory.
 - `HOMEASSISTANT_CORE_COMPONENTS_PATH`: Optional mounted path for built-in component manifests.
+- `HOMEASSISTANT_REMOTE_*`: Remote Home Assistant URL, long-lived access token, TLS handling, and request timeout.
 - `AI_ENABLED`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`: AI extraction controls.
 - `SLACK_WEBHOOK_URL`, `EMAIL_*`, `GITHUB_ALERT_REPOSITORY`: Alert destinations.
 
@@ -74,21 +76,32 @@ For Unraid Docker coverage:
 
 - Run the stack on Unraid or mount the Unraid Docker socket into the containers.
 - Leave `UNRAID_DOCKER_ENABLED=true`.
-- Ensure the watchdog container user can read the Docker socket.
+- Set `PUID=99` and `PGID=100` on Unraid unless your share permissions require different values.
+- The entrypoint maps the service user to those IDs and adds docker socket group access automatically when `/var/run/docker.sock` is mounted.
 - For a simpler Unraid single-container install, use [unraid/security-watchdog.xml](unraid/security-watchdog.xml) with `RUN_EMBEDDED_SCHEDULER=true`.
 - The repository also contains a GitHub Actions workflow that publishes `ghcr.io/feberdin/security-watchdog:latest` after pushes to `main`.
 
 For Home Assistant coverage:
 
-- Mount your Home Assistant config directory to `HOMEASSISTANT_CONFIG_PATH`.
-- Mount Home Assistant core components to `HOMEASSISTANT_CORE_COMPONENTS_PATH` if you also want built-in integration manifests resolved.
-- The scanner reads `.storage/core.config_entries` plus `custom_components/*/manifest.json`.
+- Local mount mode:
+  - Mount your Home Assistant config directory to `HOMEASSISTANT_CONFIG_PATH`.
+  - Mount Home Assistant core components to `HOMEASSISTANT_CORE_COMPONENTS_PATH` if you also want built-in integration manifests resolved.
+  - The scanner reads `.storage/core.config_entries` plus `custom_components/*/manifest.json`.
+- Remote API mode:
+  - Set `HOMEASSISTANT_REMOTE_ENABLED=true`.
+  - Set `HOMEASSISTANT_REMOTE_BASE_URL` to the Home Assistant root URL, for example `https://homeassistant.local:8123`.
+  - Create a long-lived access token in the Home Assistant profile page and place it in `HOMEASSISTANT_REMOTE_TOKEN`.
+  - Leave `HOMEASSISTANT_SCAN_ENABLED=false` if you do not mount any Home Assistant files into the container.
+- Remote mode inventories loaded integration domains through the official `/api/config` and `/api/components` endpoints. Deep dependency extraction for custom integrations still works best when manifests are mounted locally.
 
 ## Troubleshooting
 
 - `GitHub repos not syncing`: verify `GITHUB_TOKEN` scope and check worker logs for Git clone errors.
 - `Unraid containers missing`: verify `/var/run/docker.sock` is mounted and readable inside `watchdog` and `worker`.
+- `PermissionError: data/repos`: on Unraid, set `PUID=99` and `PGID=100` or another UID/GID pair that can write to your mapped appdata directory.
 - `Home Assistant integrations missing`: check that `.storage/core.config_entries` exists in the mounted config path.
+- `Remote Home Assistant scan fails with 401`: create a fresh long-lived access token and verify `HOMEASSISTANT_REMOTE_TOKEN`.
+- `Remote Home Assistant scan fails with TLS errors`: if you use a self-signed certificate, set `HOMEASSISTANT_REMOTE_VERIFY_TLS=false` or install the CA certificate into the container.
 - `Container findings empty`: confirm `trivy` and `grype` are installed inside the image and the worker can reach image registries.
 - `AI extraction not running`: set `AI_ENABLED=true`, provide `OPENAI_API_KEY`, and inspect worker logs.
 

@@ -15,6 +15,7 @@ How to debug: When in doubt, review mount permissions, token scopes, and alertin
 ## Hardening Recommendations
 
 - Use a dedicated GitHub token with the least repository scope required.
+- Use a dedicated Home Assistant long-lived access token if you enable remote API inventory.
 - Restrict network egress if your environment requires approved outbound destinations only.
 - Mount Home Assistant paths read-only.
 - Protect the Docker socket carefully; anyone controlling the container with that mount can influence the host.
@@ -34,6 +35,7 @@ How to debug: When in doubt, review mount permissions, token scopes, and alertin
 - AI extraction may be disabled or fail due to invalid credentials.
 - Docker image scanning may fail if registries are unreachable.
 - Home Assistant built-in integration manifests may be unavailable unless the core components path is mounted.
+- Remote Home Assistant inventory depends on a reachable `/api/config` and `/api/components` endpoint plus a valid bearer token.
 
 ## Operational Response
 

@@ -239,7 +239,12 @@ class ScanOrchestrator:
             scanner_name="homeassistant_dependency_scan",
             status="success",
             findings_count=len(orm_dependencies),
-            details={"manifest_path": str(manifest_path) if manifest_path else ""},
+            details={
+                "manifest_path": str(manifest_path) if manifest_path else "",
+                "source_type": repository.source_type,
+                "inventory_source": repository.metadata_json.get("inventory_source", "local_files"),
+                "homeassistant_base_url": repository.metadata_json.get("homeassistant_base_url", ""),
+            },
         )
 
         alerts_created = self._correlate_dependencies(session, repository, orm_dependencies)

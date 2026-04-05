@@ -10,7 +10,7 @@ How to debug: Follow the numbered flow to find where data stopped appearing.
 1. **Source inventory**
    - GitHub repository synchronization (`RepositoryScanner`)
    - Unraid Docker inventory (`UnraidScanner`)
-   - Home Assistant integration inventory (`HomeAssistantScanner`)
+   - Home Assistant integration inventory from local mounts or remote REST API (`HomeAssistantScanner`)
 2. **Local collection**
    - Dependency extraction across supported manifest formats
    - Secret scanning with regex and entropy detection
@@ -35,6 +35,7 @@ flowchart LR
   A["GitHub Repositories"] --> B["RepositoryScanner"]
   C["Unraid Docker"] --> D["UnraidScanner"]
   E["Home Assistant Config"] --> F["HomeAssistantScanner"]
+  E2["Home Assistant REST API"] --> F
   B --> G["DependencyExtractor"]
   F --> G
   B --> H["SecretScanner"]
@@ -83,7 +84,7 @@ Core tables:
 
 Design note:
 
-- Unraid containers and Home Assistant integrations are represented as repository-like assets with `source_type` values of `unraid_docker` and `homeassistant`. This keeps downstream correlation, reporting, and alerting consistent across all asset types.
+- Unraid containers and Home Assistant integrations are represented as repository-like assets with `source_type` values such as `unraid_docker`, `homeassistant`, and `homeassistant_remote`. This keeps downstream correlation, reporting, and alerting consistent across all asset types.
 
 ## Scheduling
 

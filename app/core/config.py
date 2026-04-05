@@ -12,7 +12,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, computed_field
+from pydantic import Field, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     homeassistant_config_path: Path = Path("./data/homeassistant-config")
     homeassistant_core_components_path: Path = Path("./data/homeassistant-core/components")
     homeassistant_scan_enabled: bool = True
+    homeassistant_remote_enabled: bool = False
+    homeassistant_remote_base_url: str = ""
+    homeassistant_remote_token: str = ""
+    homeassistant_remote_verify_tls: bool = True
+    homeassistant_remote_timeout_seconds: int = 15
 
     unraid_docker_enabled: bool = True
     unraid_docker_host: str = "unix:///var/run/docker.sock"
@@ -103,15 +108,20 @@ class Settings(BaseSettings):
 
         return self.repo_storage_path.parent / "scan-results"
 
+    @field_validator("homeassistant_remote_base_url")
+    @classmethod
+    def normalize_homeassistant_remote_base_url(cls, value: str) -> str:
+        """Strip whitespace and trailing slashes so API calls compose predictably."""
+
+        return value.strip().rstrip("/")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Return a shared settings instance and ensure required directories exist."""
+    """Return a shared settings instance and ensure only internal writable directories exist."""
 
     settings = Settings()
     settings.repo_storage_path.mkdir(parents=True, exist_ok=True)
     settings.sbom_output_path.mkdir(parents=True, exist_ok=True)
     settings.scans_output_path.mkdir(parents=True, exist_ok=True)
-    settings.homeassistant_config_path.mkdir(parents=True, exist_ok=True)
-    settings.homeassistant_core_components_path.mkdir(parents=True, exist_ok=True)
     return settings

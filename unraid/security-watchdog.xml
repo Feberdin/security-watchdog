@@ -16,7 +16,7 @@ Diese Vorlage startet die Sicherheitsplattform als einzelnes Unraid-Container-De
 - scannt GitHub-Repositories auf Dependency-Risiken
 - erkennt Secrets und Tokens
 - prueft laufende Docker-Container ueber den Docker-Socket
-- liest Home-Assistant-Integrationen aus gemounteten Pfaden
+- liest Home-Assistant-Integrationen aus gemounteten Pfaden oder per REST API von einem anderen Geraet
 - sammelt Threat-Intelligence-Feeds
 - kann optional AI-gestuetzte Threat-Extraktion nutzen
 - erzeugt SBOMs und Alerts
@@ -25,7 +25,8 @@ Hinweise:
 - Diese Vorlage nutzt standardmaessig SQLite im gemounteten Appdata-Verzeichnis fuer einen einfachen Start.
 - Fuer groessere produktive Installationen bleiben PostgreSQL, Redis und ein getrennter Worker per Compose die sauberere Betriebsform.
 - Damit Unraid-Docker erkannt werden kann, muss `/var/run/docker.sock` read-only in den Container gemountet werden.
-- Damit Home-Assistant-Integrationen erkannt werden koennen, sollten das Config-Verzeichnis und optional die Core-Components read-only gemountet werden.
+- Fuer lokale Home-Assistant-Scans sollten das Config-Verzeichnis und optional die Core-Components read-only gemountet werden.
+- Fuer Home Assistant auf einem anderen Geraet kann stattdessen die Remote-REST-API mit URL und Long-Lived Access Token genutzt werden.
   </Overview>
   <Category>Security:Tools:</Category>
   <WebUI>http://[IP]:[PORT:31337]</WebUI>
@@ -41,6 +42,8 @@ Hinweise:
   <Config Name="Home Assistant Config Path" Target="/opt/homeassistant-config" Default="/mnt/user/appdata/homeassistant" Mode="ro" Description="Home-Assistant-Konfigurationsverzeichnis mit `.storage` und optional `custom_components`." Type="Path" Display="always" Required="false" Mask="false">/mnt/user/appdata/homeassistant</Config>
   <Config Name="Home Assistant Core Components" Target="/opt/homeassistant-core/components" Default="/mnt/user/appdata/homeassistant-core/components" Mode="ro" Description="Optionaler Mount fuer eingebaute Home-Assistant-Integrationen." Type="Path" Display="advanced" Required="false" Mask="false">/mnt/user/appdata/homeassistant-core/components</Config>
   <Config Name="Environment" Target="ENVIRONMENT" Default="production" Mode="" Description="Laufzeitmodus." Type="Variable" Display="advanced" Required="true" Mask="false">production</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User-ID fuer den internen App-Prozess. Auf Unraid ist 99 (`nobody`) meist passend fuer Appdata-Shares." Type="Variable" Display="always" Required="true" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group-ID fuer den internen App-Prozess. Auf Unraid ist 100 (`users`) meist passend." Type="Variable" Display="always" Required="true" Mask="false">100</Config>
   <Config Name="Log Level" Target="LOG_LEVEL" Default="INFO" Mode="" Description="DEBUG, INFO, WARNING oder ERROR." Type="Variable" Display="always" Required="true" Mask="false">INFO</Config>
   <Config Name="API Host" Target="API_HOST" Default="0.0.0.0" Mode="" Description="Sollte im Normalfall unveraendert bleiben." Type="Variable" Display="advanced" Required="true" Mask="false">0.0.0.0</Config>
   <Config Name="API Port" Target="API_PORT" Default="31337" Mode="" Description="Interner API-Port passend zum Port-Mapping oben." Type="Variable" Display="advanced" Required="true" Mask="false">31337</Config>
@@ -53,14 +56,20 @@ Hinweise:
   <Config Name="GitHub Alert Repository" Target="GITHUB_ALERT_REPOSITORY" Default="" Mode="" Description="Optional. Format `owner/repo`, falls Alerts als GitHub Issues erstellt werden sollen." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
   <Config Name="Unraid Docker Enabled" Target="UNRAID_DOCKER_ENABLED" Default="true" Mode="" Description="Steuert die Docker-Erkennung auf Unraid." Type="Variable" Display="always" Required="true" Mask="false">true</Config>
   <Config Name="Unraid Docker Host" Target="UNRAID_DOCKER_HOST" Default="unix:///var/run/docker.sock" Mode="" Description="Normalerweise unveraendert lassen." Type="Variable" Display="advanced" Required="true" Mask="false">unix:///var/run/docker.sock</Config>
-  <Config Name="Home Assistant Scan Enabled" Target="HOMEASSISTANT_SCAN_ENABLED" Default="true" Mode="" Description="Scannt installierte Home-Assistant-Integrationen." Type="Variable" Display="always" Required="true" Mask="false">true</Config>
+  <Config Name="Home Assistant Scan Enabled" Target="HOMEASSISTANT_SCAN_ENABLED" Default="false" Mode="" Description="Aktiviert den lokalen Scan ueber gemountete Home-Assistant-Dateien." Type="Variable" Display="always" Required="true" Mask="false">false</Config>
   <Config Name="Home Assistant Config Variable" Target="HOMEASSISTANT_CONFIG_PATH" Default="/opt/homeassistant-config" Mode="" Description="Muss zum gemounteten Pfad oben passen." Type="Variable" Display="advanced" Required="false" Mask="false">/opt/homeassistant-config</Config>
   <Config Name="Home Assistant Core Variable" Target="HOMEASSISTANT_CORE_COMPONENTS_PATH" Default="/opt/homeassistant-core/components" Mode="" Description="Muss zum optionalen Mount oben passen." Type="Variable" Display="advanced" Required="false" Mask="false">/opt/homeassistant-core/components</Config>
+  <Config Name="Home Assistant Remote Enabled" Target="HOMEASSISTANT_REMOTE_ENABLED" Default="false" Mode="" Description="Aktiviert die Remote-Anbindung an ein Home Assistant auf einem anderen Geraet." Type="Variable" Display="always" Required="false" Mask="false">false</Config>
+  <Config Name="Home Assistant Remote URL" Target="HOMEASSISTANT_REMOTE_BASE_URL" Default="" Mode="" Description="Root-URL des entfernten Home Assistant, z. B. `https://homeassistant.local:8123`." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Home Assistant Remote Token" Target="HOMEASSISTANT_REMOTE_TOKEN" Default="" Mode="" Description="Long-Lived Access Token aus dem Home-Assistant-Profil." Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="Home Assistant Remote Verify TLS" Target="HOMEASSISTANT_REMOTE_VERIFY_TLS" Default="true" Mode="" Description="Bei self-signed Zertifikaten ggf. auf false setzen." Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
+  <Config Name="Home Assistant Remote Timeout" Target="HOMEASSISTANT_REMOTE_TIMEOUT_SECONDS" Default="15" Mode="" Description="Timeout fuer API-Aufrufe in Sekunden." Type="Variable" Display="advanced" Required="false" Mask="false">15</Config>
   <Config Name="AI Enabled" Target="AI_ENABLED" Default="false" Mode="" Description="Aktiviert die AI-gestuetzte Analyse unstrukturierter Threat-Feeds." Type="Variable" Display="always" Required="true" Mask="false">false</Config>
   <Config Name="OpenAI API Key" Target="OPENAI_API_KEY" Default="" Mode="" Description="API-Key fuer eine OpenAI-kompatible API." Type="Variable" Display="always" Required="false" Mask="true"></Config>
   <Config Name="OpenAI Base URL" Target="OPENAI_BASE_URL" Default="https://api.openai.com/v1" Mode="" Description="Nur anpassen, wenn ein anderer kompatibler Provider genutzt wird." Type="Variable" Display="advanced" Required="false" Mask="false">https://api.openai.com/v1</Config>
   <Config Name="OpenAI Model" Target="OPENAI_MODEL" Default="gpt-4.1-mini" Mode="" Description="Modell fuer die Threat-Extraktion." Type="Variable" Display="advanced" Required="false" Mask="false">gpt-4.1-mini</Config>
   <Config Name="Email Enabled" Target="EMAIL_ENABLED" Default="false" Mode="" Description="Aktiviert E-Mail-Alerts." Type="Variable" Display="always" Required="false" Mask="false">false</Config>
+  <Config Name="Email From" Target="EMAIL_FROM" Default="watchdog@example.local" Mode="" Description="Absenderadresse fuer E-Mail-Alerts." Type="Variable" Display="advanced" Required="false" Mask="false">watchdog@example.local</Config>
   <Config Name="Email To" Target="EMAIL_TO" Default="" Mode="" Description="Empfaengeradresse fuer Alerts." Type="Variable" Display="always" Required="false" Mask="false"></Config>
   <Config Name="SMTP Host" Target="SMTP_HOST" Default="mailhog" Mode="" Description="SMTP-Server fuer E-Mail-Alerts." Type="Variable" Display="advanced" Required="false" Mask="false">mailhog</Config>
   <Config Name="SMTP Port" Target="SMTP_PORT" Default="1025" Mode="" Description="SMTP-Port." Type="Variable" Display="advanced" Required="false" Mask="false">1025</Config>

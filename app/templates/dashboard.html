@@ -1,0 +1,158 @@
+<!--
+Purpose: Operator dashboard that highlights repositories/assets, alerts, and risk hotspots.
+Input/Output: Loaded by the browser and hydrated with data from the REST API endpoints.
+Important invariants: The page should stay useful on first load even if JavaScript refresh fails.
+Debugging: If the layout renders but data does not, inspect the fetch calls near the bottom first.
+-->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>security-watchdog</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Feberdin Security Operations</p>
+          <h1>security-watchdog</h1>
+          <p class="subtle">
+            Self-hosted monitoring for GitHub repositories, Unraid Docker workloads, and Home
+            Assistant integrations.
+          </p>
+        </div>
+        <div class="hero-actions">
+          <button id="scan-button" class="primary-button">Run Full Scan</button>
+        </div>
+      </section>
+
+      <section class="metrics-grid" id="metrics-grid">
+        <article class="metric-card">
+          <span class="metric-label">Repositories / Assets</span>
+          <strong id="metric-repositories">-</strong>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Dependencies</span>
+          <strong id="metric-dependencies">-</strong>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Vulnerabilities</span>
+          <strong id="metric-vulnerabilities">-</strong>
+        </article>
+        <article class="metric-card danger">
+          <span class="metric-label">Critical Alerts</span>
+          <strong id="metric-critical-alerts">-</strong>
+        </article>
+      </section>
+
+      <section class="panel-grid">
+        <article class="panel">
+          <div class="panel-header">
+            <h2>Highest Risk Assets</h2>
+          </div>
+          <div id="repository-list" class="table-list"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-header">
+            <h2>Recent Alerts</h2>
+          </div>
+          <div id="alert-list" class="table-list"></div>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Top Vulnerabilities</h2>
+        </div>
+        <div id="vulnerability-list" class="table-list"></div>
+      </section>
+    </main>
+
+    <script>
+      async function fetchJson(path) {
+        const response = await fetch(path);
+        if (!response.ok) {
+          throw new Error(`Request failed: ${path}`);
+        }
+        return response.json();
+      }
+
+      function renderRows(targetId, rows, renderer) {
+        const target = document.getElementById(targetId);
+        if (!rows.length) {
+          target.innerHTML = '<p class="empty-state">No data yet.</p>';
+          return;
+        }
+        target.innerHTML = rows.map(renderer).join('');
+      }
+
+      async function loadDashboard() {
+        const report = await fetchJson('/reports');
+        document.getElementById('metric-repositories').textContent = report.repository_count;
+        document.getElementById('metric-dependencies').textContent = report.dependency_count;
+        document.getElementById('metric-vulnerabilities').textContent = report.vulnerability_count;
+        document.getElementById('metric-critical-alerts').textContent = report.critical_alert_count;
+
+        renderRows(
+          'repository-list',
+          report.repository_risk,
+          (row) => `
+            <div class="table-row">
+              <span>${row.full_name}</span>
+              <span>${row.source_type}</span>
+              <span class="risk-pill">${row.risk_score.toFixed(1)}</span>
+            </div>
+          `
+        );
+
+        renderRows(
+          'alert-list',
+          report.recent_alerts,
+          (row) => `
+            <div class="table-row">
+              <span>${row.title}</span>
+              <span>${row.severity}</span>
+              <span class="risk-pill">${row.risk_score.toFixed(1)}</span>
+            </div>
+          `
+        );
+
+        renderRows(
+          'vulnerability-list',
+          report.top_vulnerabilities,
+          (row) => `
+            <div class="table-row">
+              <span>${row.source_identifier}</span>
+              <span>${row.package_name}</span>
+              <span>${row.affected_dependencies}</span>
+            </div>
+          `
+        );
+      }
+
+      async function triggerScan() {
+        const button = document.getElementById('scan-button');
+        button.disabled = true;
+        button.textContent = 'Scanning...';
+        try {
+          await fetch('/scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ include_archived: false, force: true })
+          });
+          await loadDashboard();
+        } finally {
+          button.disabled = false;
+          button.textContent = 'Run Full Scan';
+        }
+      }
+
+      document.getElementById('scan-button').addEventListener('click', triggerScan);
+      loadDashboard().catch((error) => console.error(error));
+      setInterval(() => loadDashboard().catch((error) => console.error(error)), 30000);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,80 @@
+# Purpose: Run the full self-hosted stack with API, worker, PostgreSQL, and Redis.
+# Input/Output: Docker Compose reads this file and starts the required services and volumes.
+# Important invariants: Mount Home Assistant config read-only and only expose the Docker socket if
+# you explicitly want Unraid container discovery inside this stack.
+# Debugging: If scans fail inside Docker, check service health and volume mounts defined here.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: watchdog
+      POSTGRES_USER: watchdog
+      POSTGRES_PASSWORD: watchdog
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U watchdog -d watchdog"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  watchdog:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "31337"]
+    ports:
+      - "31337:31337"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/user/appdata/homeassistant:/opt/homeassistant-config:ro
+      - /mnt/user/appdata/homeassistant-core/components:/opt/homeassistant-core/components:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:31337/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/user/appdata/homeassistant:/opt/homeassistant-config:ro
+      - /mnt/user/appdata/homeassistant-core/components:/opt/homeassistant-core/components:ro
+
+volumes:
+  postgres-data:
+  redis-data:

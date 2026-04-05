@@ -1,0 +1,191 @@
+/*
+Purpose: Visual styling for the security-watchdog dashboard.
+Input/Output: Loaded by the browser; defines layout, typography, spacing, and status styling.
+Important invariants: The page must remain readable on desktop and mobile; color should reinforce
+severity without hiding text contrast.
+Debugging: If the UI looks broken, inspect the CSS variables and responsive grid rules first.
+*/
+
+:root {
+  --bg: #f5f0e8;
+  --surface: rgba(255, 250, 243, 0.92);
+  --surface-strong: #fffdf9;
+  --text: #1f2933;
+  --muted: #596575;
+  --accent: #0d5c63;
+  --accent-soft: #d9f0ef;
+  --danger: #9a3412;
+  --danger-soft: #fbd8c8;
+  --border: rgba(13, 92, 99, 0.16);
+  --shadow: 0 18px 40px rgba(31, 41, 51, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(circle at top left, rgba(13, 92, 99, 0.18), transparent 32%),
+    linear-gradient(145deg, #f7f1e8 0%, #ede6dc 45%, #f4efe7 100%);
+}
+
+.page-shell {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 32px 20px 48px;
+}
+
+.hero,
+.metric-card,
+.panel {
+  backdrop-filter: blur(18px);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 28px;
+  border-radius: 28px;
+}
+
+.eyebrow {
+  margin: 0 0 10px;
+  font-size: 0.82rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(2.4rem, 5vw, 4.1rem);
+  line-height: 0.98;
+}
+
+.subtle {
+  max-width: 640px;
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1.6;
+}
+
+.primary-button {
+  border: none;
+  border-radius: 999px;
+  padding: 14px 22px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: white;
+  background: linear-gradient(135deg, #0d5c63, #137177);
+  cursor: pointer;
+}
+
+.primary-button:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.metrics-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  margin: 24px 0;
+}
+
+.metric-card {
+  border-radius: 22px;
+  padding: 22px;
+}
+
+.metric-card strong {
+  display: block;
+  margin-top: 10px;
+  font-size: 2rem;
+}
+
+.metric-card.danger {
+  background: linear-gradient(180deg, rgba(251, 216, 200, 0.9), rgba(255, 250, 243, 0.95));
+}
+
+.metric-label {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.panel-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.panel {
+  margin-top: 18px;
+  padding: 22px;
+  border-radius: 24px;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.panel h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.table-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.table-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(70px, 0.8fr) minmax(70px, 0.6fr);
+  gap: 12px;
+  align-items: center;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: var(--surface-strong);
+  border: 1px solid rgba(13, 92, 99, 0.08);
+}
+
+.risk-pill {
+  justify-self: end;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.empty-state {
+  color: var(--muted);
+  margin: 0;
+}
+
+@media (max-width: 720px) {
+  .hero {
+    flex-direction: column;
+  }
+
+  .table-row {
+    grid-template-columns: 1fr;
+  }
+
+  .risk-pill {
+    justify-self: start;
+  }
+}

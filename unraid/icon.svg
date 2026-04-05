@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="security-watchdog icon">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b3c49"/>
+      <stop offset="100%" stop-color="#0f766e"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+  <path d="M256 88l120 42v88c0 88-51 169-120 206-69-37-120-118-120-206v-88z" fill="#f8fafc" opacity="0.96"/>
+  <path d="M256 152c-40 0-72 32-72 72v28c-15 8-24 23-24 41v48c0 26 22 48 48 48h96c26 0 48-22 48-48v-48c0-18-9-33-24-41v-28c0-40-32-72-72-72zm-40 72c0-22 18-40 40-40s40 18 40 40v20h-80v-20z" fill="#0f172a"/>
+  <circle cx="256" cy="317" r="18" fill="#14b8a6"/>
+</svg>

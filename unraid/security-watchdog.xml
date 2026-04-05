@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>security-watchdog</Name>
+  <Repository>ghcr.io/feberdin/security-watchdog:latest</Repository>
+  <Registry>https://ghcr.io</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/Feberdin/security-watchdog/issues</Support>
+  <Project>https://github.com/Feberdin/security-watchdog</Project>
+  <Overview>
+security-watchdog fuer Unraid.
+
+Diese Vorlage startet die Sicherheitsplattform als einzelnes Unraid-Container-Deployment mit eingebettetem Scheduler:
+- scannt GitHub-Repositories auf Dependency-Risiken
+- erkennt Secrets und Tokens
+- prueft laufende Docker-Container ueber den Docker-Socket
+- liest Home-Assistant-Integrationen aus gemounteten Pfaden
+- sammelt Threat-Intelligence-Feeds
+- kann optional AI-gestuetzte Threat-Extraktion nutzen
+- erzeugt SBOMs und Alerts
+
+Hinweise:
+- Diese Vorlage nutzt standardmaessig SQLite im gemounteten Appdata-Verzeichnis fuer einen einfachen Start.
+- Fuer groessere produktive Installationen bleiben PostgreSQL, Redis und ein getrennter Worker per Compose die sauberere Betriebsform.
+- Damit Unraid-Docker erkannt werden kann, muss `/var/run/docker.sock` read-only in den Container gemountet werden.
+- Damit Home-Assistant-Integrationen erkannt werden koennen, sollten das Config-Verzeichnis und optional die Core-Components read-only gemountet werden.
+  </Overview>
+  <Category>Security:Tools:</Category>
+  <WebUI>http://[IP]:[PORT:31337]</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/Feberdin/security-watchdog/main/unraid/security-watchdog.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/Feberdin/security-watchdog/main/unraid/icon.svg</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <Requires>Das Docker-Image `ghcr.io/feberdin/security-watchdog:latest` muss in GHCR veroeffentlicht sein. GitHub Actions im Repo publizieren es automatisch nach Pushes auf `main`.</Requires>
+  <Config Name="Web UI Port" Target="31337" Default="31337" Mode="tcp" Description="Port fuer Dashboard und REST-API. 31337 ist absichtlich als security-thematischer Port gewaehlt." Type="Port" Display="always" Required="true" Mask="false">31337</Config>
+  <Config Name="Persistent Data Directory" Target="/app/data" Default="/mnt/user/appdata/security-watchdog" Mode="rw" Description="Hier landen SQLite-Datei, Repo-Checkouts, Scan-Artefakte und SBOMs." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/security-watchdog</Config>
+  <Config Name="Unraid Docker Socket" Target="/var/run/docker.sock" Default="/var/run/docker.sock" Mode="ro" Description="Ermoeglicht die Erkennung laufender Docker-Container auf Unraid." Type="Path" Display="always" Required="true" Mask="false">/var/run/docker.sock</Config>
+  <Config Name="Home Assistant Config Path" Target="/opt/homeassistant-config" Default="/mnt/user/appdata/homeassistant" Mode="ro" Description="Home-Assistant-Konfigurationsverzeichnis mit `.storage` und optional `custom_components`." Type="Path" Display="always" Required="false" Mask="false">/mnt/user/appdata/homeassistant</Config>
+  <Config Name="Home Assistant Core Components" Target="/opt/homeassistant-core/components" Default="/mnt/user/appdata/homeassistant-core/components" Mode="ro" Description="Optionaler Mount fuer eingebaute Home-Assistant-Integrationen." Type="Path" Display="advanced" Required="false" Mask="false">/mnt/user/appdata/homeassistant-core/components</Config>
+  <Config Name="Environment" Target="ENVIRONMENT" Default="production" Mode="" Description="Laufzeitmodus." Type="Variable" Display="advanced" Required="true" Mask="false">production</Config>
+  <Config Name="Log Level" Target="LOG_LEVEL" Default="INFO" Mode="" Description="DEBUG, INFO, WARNING oder ERROR." Type="Variable" Display="always" Required="true" Mask="false">INFO</Config>
+  <Config Name="API Host" Target="API_HOST" Default="0.0.0.0" Mode="" Description="Sollte im Normalfall unveraendert bleiben." Type="Variable" Display="advanced" Required="true" Mask="false">0.0.0.0</Config>
+  <Config Name="API Port" Target="API_PORT" Default="31337" Mode="" Description="Interner API-Port passend zum Port-Mapping oben." Type="Variable" Display="advanced" Required="true" Mask="false">31337</Config>
+  <Config Name="Run Embedded Scheduler" Target="RUN_EMBEDDED_SCHEDULER" Default="true" Mode="" Description="Startet die zeitgesteuerten Scans direkt im selben Container. Fuer die Unraid-Einzelcontainer-Variante empfohlen." Type="Variable" Display="always" Required="true" Mask="false">true</Config>
+  <Config Name="Database URL" Target="DATABASE_URL" Default="sqlite:////app/data/security_watchdog.db" Mode="" Description="SQLite fuer den einfachen Start. Fuer PostgreSQL hier eine externe DB-URL eintragen." Type="Variable" Display="always" Required="true" Mask="false">sqlite:////app/data/security_watchdog.db</Config>
+  <Config Name="Redis URL" Target="REDIS_URL" Default="redis://127.0.0.1:6379/0" Mode="" Description="Optional. Ohne Redis arbeitet das System weiter, nur Heartbeats und Alert-Dedupe werden schwacher." Type="Variable" Display="advanced" Required="false" Mask="false">redis://127.0.0.1:6379/0</Config>
+  <Config Name="GitHub Token" Target="GITHUB_TOKEN" Default="" Mode="" Description="Token mit Zugriff auf die zu ueberwachenden Repositories." Type="Variable" Display="always" Required="true" Mask="true"></Config>
+  <Config Name="GitHub Username" Target="GITHUB_USERNAME" Default="Feberdin" Mode="" Description="GitHub-Nutzer oder Owner fuer die API-Abfragen." Type="Variable" Display="always" Required="true" Mask="false">Feberdin</Config>
+  <Config Name="GitHub Include Private" Target="GITHUB_INCLUDE_PRIVATE" Default="true" Mode="" Description="Wenn true, werden auch private Repositories gescannt, sofern das Token Zugriff hat." Type="Variable" Display="always" Required="true" Mask="false">true</Config>
+  <Config Name="GitHub Alert Repository" Target="GITHUB_ALERT_REPOSITORY" Default="" Mode="" Description="Optional. Format `owner/repo`, falls Alerts als GitHub Issues erstellt werden sollen." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Unraid Docker Enabled" Target="UNRAID_DOCKER_ENABLED" Default="true" Mode="" Description="Steuert die Docker-Erkennung auf Unraid." Type="Variable" Display="always" Required="true" Mask="false">true</Config>
+  <Config Name="Unraid Docker Host" Target="UNRAID_DOCKER_HOST" Default="unix:///var/run/docker.sock" Mode="" Description="Normalerweise unveraendert lassen." Type="Variable" Display="advanced" Required="true" Mask="false">unix:///var/run/docker.sock</Config>
+  <Config Name="Home Assistant Scan Enabled" Target="HOMEASSISTANT_SCAN_ENABLED" Default="true" Mode="" Description="Scannt installierte Home-Assistant-Integrationen." Type="Variable" Display="always" Required="true" Mask="false">true</Config>
+  <Config Name="Home Assistant Config Variable" Target="HOMEASSISTANT_CONFIG_PATH" Default="/opt/homeassistant-config" Mode="" Description="Muss zum gemounteten Pfad oben passen." Type="Variable" Display="advanced" Required="false" Mask="false">/opt/homeassistant-config</Config>
+  <Config Name="Home Assistant Core Variable" Target="HOMEASSISTANT_CORE_COMPONENTS_PATH" Default="/opt/homeassistant-core/components" Mode="" Description="Muss zum optionalen Mount oben passen." Type="Variable" Display="advanced" Required="false" Mask="false">/opt/homeassistant-core/components</Config>
+  <Config Name="AI Enabled" Target="AI_ENABLED" Default="false" Mode="" Description="Aktiviert die AI-gestuetzte Analyse unstrukturierter Threat-Feeds." Type="Variable" Display="always" Required="true" Mask="false">false</Config>
+  <Config Name="OpenAI API Key" Target="OPENAI_API_KEY" Default="" Mode="" Description="API-Key fuer eine OpenAI-kompatible API." Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="OpenAI Base URL" Target="OPENAI_BASE_URL" Default="https://api.openai.com/v1" Mode="" Description="Nur anpassen, wenn ein anderer kompatibler Provider genutzt wird." Type="Variable" Display="advanced" Required="false" Mask="false">https://api.openai.com/v1</Config>
+  <Config Name="OpenAI Model" Target="OPENAI_MODEL" Default="gpt-4.1-mini" Mode="" Description="Modell fuer die Threat-Extraktion." Type="Variable" Display="advanced" Required="false" Mask="false">gpt-4.1-mini</Config>
+  <Config Name="Email Enabled" Target="EMAIL_ENABLED" Default="false" Mode="" Description="Aktiviert E-Mail-Alerts." Type="Variable" Display="always" Required="false" Mask="false">false</Config>
+  <Config Name="Email To" Target="EMAIL_TO" Default="" Mode="" Description="Empfaengeradresse fuer Alerts." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="SMTP Host" Target="SMTP_HOST" Default="mailhog" Mode="" Description="SMTP-Server fuer E-Mail-Alerts." Type="Variable" Display="advanced" Required="false" Mask="false">mailhog</Config>
+  <Config Name="SMTP Port" Target="SMTP_PORT" Default="1025" Mode="" Description="SMTP-Port." Type="Variable" Display="advanced" Required="false" Mask="false">1025</Config>
+  <Config Name="SMTP Username" Target="SMTP_USERNAME" Default="" Mode="" Description="Optionaler SMTP-Benutzername." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="SMTP Password" Target="SMTP_PASSWORD" Default="" Mode="" Description="Optionales SMTP-Passwort." Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+  <Config Name="SMTP Use TLS" Target="SMTP_USE_TLS" Default="false" Mode="" Description="TLS fuer SMTP aktivieren." Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
+  <Config Name="Slack Webhook URL" Target="SLACK_WEBHOOK_URL" Default="" Mode="" Description="Optionaler Slack-Webhook fuer Alerts." Type="Variable" Display="always" Required="false" Mask="true"></Config>
+</Container>

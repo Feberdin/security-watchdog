@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "security-watchdog"
+version = "0.1.0"
+description = "Self-hosted GitHub supply-chain security monitoring platform."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary - internal use until a formal LICENSE is chosen." }
+authors = [
+  { name = "Feberdin" }
+]
+dependencies = [
+  "apscheduler>=3.10.4,<4.0.0",
+  "docker>=7.1.0,<8.0.0",
+  "fastapi>=0.115.0,<1.0.0",
+  "feedparser>=6.0.11,<7.0.0",
+  "httpx>=0.28.0,<1.0.0",
+  "jinja2>=3.1.6,<4.0.0",
+  "packaging>=24.2,<25.0",
+  "pydantic>=2.11.0,<3.0.0",
+  "pydantic-settings>=2.8.0,<3.0.0",
+  "psycopg[binary]>=3.2.0,<4.0.0",
+  "python-dateutil>=2.9.0,<3.0.0",
+  "python-slugify>=8.0.4,<9.0.0",
+  "redis>=5.2.0,<6.0.0",
+  "sqlalchemy>=2.0.40,<3.0.0",
+  "uvicorn[standard]>=0.34.0,<1.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0,<9.0.0",
+  "pytest-cov>=6.0.0,<7.0.0",
+  "pytest-mock>=3.14.0,<4.0.0",
+  "ruff>=0.11.0,<1.0.0"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "S", "RUF"]
+ignore = ["S603", "S607"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]

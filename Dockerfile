@@ -17,10 +17,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git tar \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
-    -o /tmp/trivy.tar.gz \
-    && tar -xzf /tmp/trivy.tar.gz -C /usr/local/bin trivy \
-    && rm /tmp/trivy.tar.gz
+RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+    | sh -s -- -b /usr/local/bin "v${TRIVY_VERSION}"
 
 RUN curl -fsSL "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz" \
     -o /tmp/grype.tar.gz \

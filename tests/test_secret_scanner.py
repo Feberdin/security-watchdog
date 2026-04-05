@@ -12,12 +12,12 @@ from app.scanners.secret_scanner import SecretScanner
 
 def test_detects_regex_based_secret(tmp_path):
     sample = tmp_path / "config.txt"
-    sample.write_text("token = 'ghp_abcdefghijklmnopqrstuvwxyz123456'\n", encoding="utf-8")
+    sample.write_text('password = "SuperSecretDemo123!"\n', encoding="utf-8")
 
     findings = SecretScanner().scan_file(sample, tmp_path)
 
     assert findings
-    assert findings[0].detector == "github_token"
+    assert findings[0].detector == "generic_password"
     assert "..." in findings[0].excerpt
 
 

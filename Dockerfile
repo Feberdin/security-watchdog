@@ -4,7 +4,7 @@
 # non-root user while still being able to read mounted volumes and the Docker socket when allowed.
 # Debugging: If builds fail, verify the pinned release URLs for Trivy and Grype first.
 
-FROM python:3.12-slim
+FROM python:3.12-bookworm
 
 ARG TRIVY_VERSION=0.51.4
 ARG GRYPE_VERSION=0.76.0

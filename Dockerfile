@@ -14,11 +14,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git tar \
+    && apt-get install -y --no-install-recommends ca-certificates curl git tar wget apt-transport-https gnupg lsb-release \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-    | sh -s -- -b /usr/local/bin "v${TRIVY_VERSION}"
+RUN wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+    | gpg --dearmor -o /usr/share/keyrings/trivy.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
+    > /etc/apt/sources.list.d/trivy.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends trivy \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz" \
     -o /tmp/grype.tar.gz \

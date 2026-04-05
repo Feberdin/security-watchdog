@@ -23,4 +23,4 @@ router = APIRouter()
 def dashboard(request: Request) -> HTMLResponse:
     """Render the main dashboard shell."""
 
-    return templates.TemplateResponse("dashboard.html", {"request": request})
+    return templates.TemplateResponse(request, "dashboard.html", {"request": request})

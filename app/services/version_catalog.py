@@ -27,6 +27,8 @@ class LatestVersionRecord:
 
     latest_version: str | None
     source: str
+    checked_at: datetime
+    released_at: datetime | None = None
     note: str = ""
 
 
@@ -61,6 +63,7 @@ class VersionCatalogService:
             record = LatestVersionRecord(
                 latest_version=None,
                 source="lookup_failed",
+                checked_at=now,
                 note=str(error),
             )
 
@@ -84,22 +87,29 @@ class VersionCatalogService:
             return LatestVersionRecord(
                 latest_version=None,
                 source="unsupported",
+                checked_at=datetime.now(UTC),
                 note=f"Automatic lookup is not implemented for ecosystem={ecosystem!r}.",
             )
         return handler(package_name)
 
     def _resolve_pypi(self, package_name: str) -> LatestVersionRecord:
         payload = self._get_json(f"https://pypi.org/pypi/{quote(package_name, safe='')}/json")
+        latest_version = str(payload.get("info", {}).get("version", "")) or None
         return LatestVersionRecord(
-            latest_version=str(payload.get("info", {}).get("version", "")) or None,
+            latest_version=latest_version,
             source="pypi",
+            checked_at=datetime.now(UTC),
+            released_at=self._latest_pypi_release_time(payload, latest_version),
         )
 
     def _resolve_npm(self, package_name: str) -> LatestVersionRecord:
         payload = self._get_json(f"https://registry.npmjs.org/{quote(package_name, safe='@/')}")
+        latest_version = str(payload.get("dist-tags", {}).get("latest", "")) or None
         return LatestVersionRecord(
-            latest_version=str(payload.get("dist-tags", {}).get("latest", "")) or None,
+            latest_version=latest_version,
             source="npm",
+            checked_at=datetime.now(UTC),
+            released_at=self._parse_datetime(payload.get("time", {}).get(latest_version or "")),
         )
 
     def _resolve_maven(self, package_name: str) -> LatestVersionRecord:
@@ -108,6 +118,7 @@ class VersionCatalogService:
             return LatestVersionRecord(
                 latest_version=None,
                 source="maven",
+                checked_at=datetime.now(UTC),
                 note="Expected a Maven coordinate in the form group:artifact.",
             )
 
@@ -121,19 +132,34 @@ class VersionCatalogService:
         )
         docs = payload.get("response", {}).get("docs", [])
         latest_version = str(docs[0].get("latestVersion", "")) if docs else ""
-        return LatestVersionRecord(latest_version=latest_version or None, source="maven")
+        timestamp_value = docs[0].get("timestamp") if docs else None
+        return LatestVersionRecord(
+            latest_version=latest_version or None,
+            source="maven",
+            checked_at=datetime.now(UTC),
+            released_at=self._parse_epoch_milliseconds(timestamp_value),
+        )
 
     def _resolve_packagist(self, package_name: str) -> LatestVersionRecord:
         payload = self._get_json(f"https://repo.packagist.org/p2/{package_name}.json")
         packages = payload.get("packages", {}).get(package_name, [])
-        latest_version = str(packages[0].get("version", "")) if packages else ""
-        return LatestVersionRecord(latest_version=latest_version or None, source="packagist")
+        latest_package = packages[0] if packages else {}
+        latest_version = str(latest_package.get("version", "")) if latest_package else ""
+        return LatestVersionRecord(
+            latest_version=latest_version or None,
+            source="packagist",
+            checked_at=datetime.now(UTC),
+            released_at=self._parse_datetime(latest_package.get("time")),
+        )
 
     def _resolve_crates(self, package_name: str) -> LatestVersionRecord:
         payload = self._get_json(f"https://crates.io/api/v1/crates/{quote(package_name, safe='')}")
+        latest_version = str(payload.get("crate", {}).get("newest_version", "")) or None
         return LatestVersionRecord(
-            latest_version=str(payload.get("crate", {}).get("newest_version", "")) or None,
+            latest_version=latest_version,
             source="crates.io",
+            checked_at=datetime.now(UTC),
+            released_at=self._latest_crate_release_time(payload, latest_version),
         )
 
     def _resolve_go(self, package_name: str) -> LatestVersionRecord:
@@ -141,6 +167,8 @@ class VersionCatalogService:
         return LatestVersionRecord(
             latest_version=str(payload.get("Version", "")) or None,
             source="proxy.golang.org",
+            checked_at=datetime.now(UTC),
+            released_at=self._parse_datetime(payload.get("Time")),
         )
 
     def _get_json(self, url: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -161,3 +189,64 @@ class VersionCatalogService:
             return "", ""
         group_name, artifact_name = package_name.split(":", maxsplit=1)
         return group_name.strip(), artifact_name.strip()
+
+    def _latest_pypi_release_time(
+        self,
+        payload: dict[str, Any],
+        latest_version: str | None,
+    ) -> datetime | None:
+        """Return the most recent upload time for the resolved PyPI version."""
+
+        if not latest_version:
+            return None
+        release_files = payload.get("releases", {}).get(latest_version, [])
+        timestamps = [
+            self._parse_datetime(item.get("upload_time_iso_8601") or item.get("upload_time"))
+            for item in release_files
+        ]
+        timestamps = [timestamp for timestamp in timestamps if timestamp is not None]
+        return max(timestamps, default=None)
+
+    def _latest_crate_release_time(
+        self,
+        payload: dict[str, Any],
+        latest_version: str | None,
+    ) -> datetime | None:
+        """Return the publish time for the newest stable crate version if available."""
+
+        if not latest_version:
+            return None
+        versions = payload.get("versions", [])
+        for version in versions:
+            if str(version.get("num", "")) == latest_version:
+                return self._parse_datetime(version.get("created_at") or version.get("updated_at"))
+        return self._parse_datetime(payload.get("crate", {}).get("updated_at"))
+
+    def _parse_datetime(self, value: Any) -> datetime | None:
+        """Parse common registry date formats into timezone-aware UTC datetimes."""
+
+        if not value:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    def _parse_epoch_milliseconds(self, value: Any) -> datetime | None:
+        """Parse Maven Central millisecond timestamps into aware UTC datetimes."""
+
+        if value in (None, ""):
+            return None
+        try:
+            milliseconds = int(value)
+        except (TypeError, ValueError):
+            return None
+        return datetime.fromtimestamp(milliseconds / 1000, tz=UTC)

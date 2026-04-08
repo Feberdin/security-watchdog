@@ -130,6 +130,16 @@ section below is rendered entirely from that payload.
         });
       }
 
+      function formatShortDate(value) {
+        if (!value) {
+          return 'Unbekannt';
+        }
+        return new Date(value).toLocaleString('de-DE', {
+          dateStyle: 'medium',
+          timeStyle: 'short'
+        });
+      }
+
       function dependencyMatchesQuery(dependency, query) {
         const haystack = [
           dependency.package_name,
@@ -146,6 +156,18 @@ section below is rendered entirely from that payload.
       }
 
       function buildDependencyRow(dependency) {
+        const compromisedMarkup = dependency.was_compromised
+          ? `
+              <span
+                class="compromise-badge"
+                title="Diese Dependency wurde bereits als kompromittiert oder bösartig markiert (${escapeHtml(dependency.compromised_signal || 'security signal')})."
+                aria-label="Kompromittierte Dependency"
+              >
+                &#9888;
+              </span>
+            `
+          : '';
+
         const vulnerabilityMarkup = dependency.vulnerability_ids.length
           ? `<div class="dependency-subline">${dependency.vulnerability_ids.map(escapeHtml).join(', ')}</div>`
           : '<div class="dependency-subline">Keine zugeordneten CVEs oder Advisories.</div>';
@@ -158,13 +180,22 @@ section below is rendered entirely from that payload.
                   ${escapeHtml(dependency.latest_version_status)}
                 </span>
               </div>
+              <div class="dependency-subline">
+                Version vom: ${escapeHtml(formatShortDate(dependency.latest_version_published_at))}
+              </div>
+              <div class="dependency-subline">
+                Quelle: ${escapeHtml(dependency.latest_version_source || 'unknown')}
+              </div>
             `
           : '<span class="muted-inline">Nicht automatisch aufgelöst</span>';
 
         return `
           <div class="dependency-row">
             <div>
-              <div class="dependency-title">${escapeHtml(dependency.package_name)}</div>
+              <div class="dependency-title">
+                <span>${escapeHtml(dependency.package_name)}</span>
+                ${compromisedMarkup}
+              </div>
               <div class="dependency-subline">
                 ${escapeHtml(dependency.ecosystem)} · ${escapeHtml(dependency.manifest_path)}
               </div>
@@ -172,6 +203,9 @@ section below is rendered entirely from that payload.
             </div>
             <div class="version-cell">
               <code>${escapeHtml(dependency.detected_version)}</code>
+              <div class="dependency-subline">
+                Zuletzt geprüft: ${escapeHtml(formatShortDate(dependency.detected_version_checked_at))}
+              </div>
             </div>
             <div class="version-cell">
               ${latestVersionMarkup}

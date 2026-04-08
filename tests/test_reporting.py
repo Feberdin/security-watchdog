@@ -10,6 +10,8 @@ resolver injected into the service first.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -26,7 +28,12 @@ class FakeVersionCatalog:
     def resolve_latest_version(self, ecosystem: str, package_name: str) -> LatestVersionRecord:
         assert ecosystem == "pypi"
         assert package_name == "requests"
-        return LatestVersionRecord(latest_version="2.32.3", source="unit-test")
+        return LatestVersionRecord(
+            latest_version="2.32.3",
+            source="unit-test",
+            checked_at=datetime(2026, 4, 8, 14, 30, tzinfo=UTC),
+            released_at=datetime(2026, 4, 7, 8, 15, tzinfo=UTC),
+        )
 
 
 def build_test_session() -> Session:
@@ -69,6 +76,7 @@ def test_build_system_inventory_returns_expandable_dependency_details() -> None:
         ecosystem="pypi",
         summary="Example vulnerability",
         severity="high",
+        malicious_package=True,
     )
     session.add(vulnerability)
     session.flush()
@@ -109,6 +117,9 @@ def test_build_system_inventory_returns_expandable_dependency_details() -> None:
     assert dependency_row.package_name == "requests"
     assert dependency_row.detected_version == "2.25.0"
     assert dependency_row.latest_version == "2.32.3"
+    assert dependency_row.latest_version_published_at == datetime(2026, 4, 7, 8, 15, tzinfo=UTC)
     assert dependency_row.latest_version_status == "outdated"
+    assert dependency_row.was_compromised is True
+    assert dependency_row.compromised_signal == "malicious_package:CVE-2026-0001"
     assert dependency_row.risk_severity == "high"
     assert dependency_row.vulnerability_ids == ["CVE-2026-0001"]

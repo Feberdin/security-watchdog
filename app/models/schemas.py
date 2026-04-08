@@ -142,9 +142,13 @@ class DependencyInsightOut(BaseModel):
     ecosystem: str
     manifest_path: str
     detected_version: str
+    detected_version_checked_at: datetime | None = None
     latest_version: str | None = None
+    latest_version_published_at: datetime | None = None
     latest_version_status: str = "unknown"
     latest_version_source: str = ""
+    was_compromised: bool = False
+    compromised_signal: str = ""
     risk_severity: str = "none"
     risk_score: float = 0.0
     vulnerability_ids: list[str] = Field(default_factory=list)

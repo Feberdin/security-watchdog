@@ -390,7 +390,24 @@ h1 {
 }
 
 .dependency-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-weight: 700;
+}
+
+.compromise-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 999px;
+  background: var(--critical-soft);
+  color: var(--critical-bg);
+  font-size: 0.92rem;
+  line-height: 1;
+  cursor: help;
 }
 
 .dependency-subline {

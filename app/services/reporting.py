@@ -102,8 +102,9 @@ class ReportingService:
 
         systems: list[SystemInventoryOut] = []
         for repository in repositories:
+            compromised_signals = self._build_compromised_signal_index(repository.alerts)
             dependencies = [
-                self._build_dependency_insight(dependency)
+                self._build_dependency_insight(dependency, compromised_signals)
                 for dependency in sorted(
                     repository.dependencies,
                     key=lambda item: (
@@ -138,7 +139,11 @@ class ReportingService:
             )
         return systems
 
-    def _build_dependency_insight(self, dependency: Dependency) -> DependencyInsightOut:
+    def _build_dependency_insight(
+        self,
+        dependency: Dependency,
+        compromised_signals: dict[tuple[str, str], str],
+    ) -> DependencyInsightOut:
         """Transform one ORM dependency into a dashboard-friendly row."""
 
         vulnerabilities = [
@@ -152,17 +157,26 @@ class ReportingService:
         )
         risk_severity = self._highest_vulnerability_severity(vulnerabilities)
         risk_score = self._dependency_risk_score(dependency)
+        compromised_signal = self._detect_compromised_signal(
+            dependency,
+            vulnerabilities,
+            compromised_signals,
+        )
         return DependencyInsightOut(
             package_name=dependency.package_name,
             ecosystem=dependency.ecosystem,
             manifest_path=dependency.manifest_path,
             detected_version=dependency.version,
+            detected_version_checked_at=dependency.updated_at,
             latest_version=latest_version.latest_version,
+            latest_version_published_at=latest_version.released_at,
             latest_version_status=self._classify_version_status(
                 dependency.version,
                 latest_version,
             ),
             latest_version_source=latest_version.source,
+            was_compromised=bool(compromised_signal),
+            compromised_signal=compromised_signal,
             risk_severity=risk_severity,
             risk_score=risk_score,
             vulnerability_ids=[vulnerability.source_identifier for vulnerability in vulnerabilities],
@@ -206,6 +220,44 @@ class ReportingService:
         """Return the highest stored risk score for one dependency."""
 
         return max((float(link.risk_score) for link in dependency.vulnerability_links), default=0.0)
+
+    def _build_compromised_signal_index(
+        self,
+        alerts: list[Alert],
+    ) -> dict[tuple[str, str], str]:
+        """Map dependency identifiers to compromise signals derived from past alerts."""
+
+        signals: dict[tuple[str, str], str] = {}
+        for alert in alerts:
+            metadata = alert.metadata_json or {}
+            dependency_name = str(metadata.get("dependency", "")).strip()
+            dependency_version = str(metadata.get("version", "")).strip()
+            if not dependency_name:
+                continue
+            if alert.source_type == "ai_correlation":
+                signal = str(metadata.get("attack_type") or "ai_correlation")
+                signals[(dependency_name, dependency_version)] = signal
+                signals.setdefault((dependency_name, ""), signal)
+        return signals
+
+    def _detect_compromised_signal(
+        self,
+        dependency: Dependency,
+        vulnerabilities: list[Vulnerability],
+        compromised_signals: dict[tuple[str, str], str],
+    ) -> str:
+        """Return a readable compromise marker when a package was flagged as malicious before."""
+
+        for vulnerability in vulnerabilities:
+            if vulnerability.malicious_package:
+                return f"malicious_package:{vulnerability.source_identifier}"
+
+        exact_key = (dependency.package_name, dependency.version)
+        if exact_key in compromised_signals:
+            return compromised_signals[exact_key]
+
+        package_only_key = (dependency.package_name, "")
+        return compromised_signals.get(package_only_key, "")
 
     def _classify_version_status(
         self,

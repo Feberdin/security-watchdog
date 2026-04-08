@@ -17,7 +17,14 @@ from sqlalchemy.orm import Session
 
 import app.models.entities  # noqa: F401
 from app.db.base import Base
-from app.models.entities import Alert, Dependency, DependencyVulnerability, Repository, Vulnerability
+from app.models.entities import (
+    Alert,
+    Dependency,
+    DependencyVulnerability,
+    Repository,
+    ScanResult,
+    Vulnerability,
+)
 from app.services.reporting import ReportingService
 from app.services.version_catalog import LatestVersionRecord
 
@@ -177,6 +184,41 @@ def test_build_platform_debug_export_includes_suspicious_systems() -> None:
     assert export_payload["diagnostics"]["suspicious_system_count"] == 1
     assert export_payload["suspicious_systems"][0]["full_name"] == "Feberdin/security-watchdog"
     assert export_payload["suspicious_systems"][0]["flagged_dependencies"][0]["was_compromised"] is True
+
+
+def test_build_platform_debug_export_handles_naive_scan_timestamps() -> None:
+    """Naive SQLite timestamps should not crash the scheduler health block in exports."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="security-watchdog",
+        full_name="Feberdin/security-watchdog",
+        local_path="/tmp/security-watchdog",
+        risk_score=12.0,
+    )
+    session.add(repository)
+    session.flush()
+
+    session.add(
+        ScanResult(
+            repository_id=repository.id,
+            scanner_name="dependency_extractor",
+            status="success",
+            findings_count=3,
+            started_at=datetime(2026, 4, 8, 10, 0),
+            completed_at=datetime(2026, 4, 8, 10, 5),
+            details_json={"note": "naive timestamp regression test"},
+        )
+    )
+    session.commit()
+
+    export_payload = ReportingService(version_catalog=FakeVersionCatalog()).build_platform_debug_export(session)
+
+    scheduler = export_payload["scheduler"]["repo_scan"]
+    assert scheduler["last_status"] == "success"
+    assert scheduler["last_completed_at"] == "2026-04-08T10:05:00+00:00"
 
 
 def test_build_codex_remediation_prompt_contains_findings() -> None:

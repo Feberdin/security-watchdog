@@ -152,10 +152,20 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
     <script>
       let allSystems = [];
 
-      async function fetchJson(path) {
-        const response = await fetch(path);
+      async function fetchJson(path, options) {
+        const response = await fetch(path, options);
         if (!response.ok) {
-          throw new Error(`Request failed: ${path}`);
+          const responseText = await response.text();
+          let detail = responseText || `HTTP ${response.status}`;
+
+          try {
+            const payload = JSON.parse(responseText);
+            detail = payload.detail || payload.message || responseText || `HTTP ${response.status}`;
+          } catch (error) {
+            // Keep the plain-text body when the server did not respond with JSON.
+          }
+
+          throw new Error(`Request failed for ${path}: ${detail}`);
         }
         return response.json();
       }
@@ -481,6 +491,11 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         modal.setAttribute('aria-hidden', 'true');
       }
 
+      function showRequestError(title, error) {
+        const message = error instanceof Error ? error.message : String(error || 'Unbekannter Fehler');
+        showModal(title, message);
+      }
+
       async function copyModalOutput() {
         const output = document.getElementById('modal-output').value;
         const feedback = document.getElementById('copy-feedback');
@@ -499,6 +514,8 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         try {
           const payload = await fetchJson('/diagnostics/export');
           showModal('Codex Debug Export', JSON.stringify(payload, null, 2));
+        } catch (error) {
+          showRequestError('Codex Debug Export fehlgeschlagen', error);
         } finally {
           button.disabled = false;
           button.textContent = 'Codex Debug Export';
@@ -511,6 +528,8 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         try {
           const payload = await fetchJson(`/systems/${systemId}/debug-export`);
           showModal(`System-Debugdaten · ${systemName}`, JSON.stringify(payload, null, 2));
+        } catch (error) {
+          showRequestError(`System-Debugdaten fehlgeschlagen · ${systemName}`, error);
         } finally {
           button.disabled = false;
           button.textContent = 'System-Debugdaten';
@@ -523,6 +542,8 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         try {
           const payload = await fetchJson(`/systems/${systemId}/codex-remediation`);
           showModal(`Codex Sanierungs-Prompt · ${systemName}`, payload.prompt);
+        } catch (error) {
+          showRequestError(`Codex Sanierungs-Prompt fehlgeschlagen · ${systemName}`, error);
         } finally {
           button.disabled = false;
           button.textContent = 'Codex Sanierungs-Prompt';
@@ -573,12 +594,14 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         button.disabled = true;
         button.textContent = 'Scan läuft...';
         try {
-          await fetch('/scan', {
+          await fetchJson('/scan', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ include_archived: false, force: true })
           });
           await loadDashboard();
+        } catch (error) {
+          showRequestError('Vollscan fehlgeschlagen', error);
         } finally {
           button.disabled = false;
           button.textContent = 'Vollscan starten';

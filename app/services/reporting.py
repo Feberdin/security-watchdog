@@ -177,13 +177,13 @@ class ReportingService:
                 "scanner_name": result.scanner_name,
                 "status": result.status,
                 "findings_count": result.findings_count,
-                "started_at": result.started_at,
-                "completed_at": result.completed_at,
+                "started_at": self._normalize_datetime(result.started_at),
+                "completed_at": self._normalize_datetime(result.completed_at),
                 "details": result.details_json,
             }
             for result in sorted(
                 repository.scan_results,
-                key=lambda item: item.started_at or datetime.min.replace(tzinfo=UTC),
+                key=lambda item: self._normalize_datetime(item.started_at) or datetime.min.replace(tzinfo=UTC),
                 reverse=True,
             )[:20]
         ]
@@ -521,7 +521,11 @@ class ReportingService:
                 if result.scanner_name in config["scanner_names"]
             ]
             latest_result = relevant_results[0] if relevant_results else None
-            latest_completed_at = latest_result.completed_at if latest_result else None
+            latest_completed_at = (
+                self._normalize_datetime(latest_result.completed_at)
+                if latest_result
+                else None
+            )
             overdue = True
             if latest_completed_at is not None:
                 overdue = (now - latest_completed_at).total_seconds() > config["expected_hours"] * 3600
@@ -532,6 +536,22 @@ class ReportingService:
                 "overdue": overdue,
             }
         return scheduler_health
+
+    def _normalize_datetime(self, value: datetime | None) -> datetime | None:
+        """
+        Normalize timestamps to timezone-aware UTC values.
+
+        Why this exists:
+        SQLite commonly returns naive datetime objects even when the model column is declared with
+        `timezone=True`. Reporting now mixes persisted scan timestamps with `datetime.now(UTC)`, so
+        we normalize eagerly to avoid crashes in exports and debug views.
+        """
+
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
     def _highest_vulnerability_severity(self, vulnerabilities: list[Vulnerability]) -> str:
         """Return the strongest severity across all linked vulnerabilities."""

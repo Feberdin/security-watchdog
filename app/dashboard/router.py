@@ -4,7 +4,7 @@ Input/Output: Accepts browser requests and returns HTML plus referenced static f
 Important invariants: The dashboard should remain mostly read-only and rely on API endpoints for
 live data so the browser and automation clients see the same underlying numbers.
 Debugging: If the page loads but widgets are empty, inspect the browser requests to `/reports`,
-`/alerts`, and `/repositories` before touching the template itself.
+`/systems`, and `/alerts` before touching the template itself.
 """
 
 from __future__ import annotations

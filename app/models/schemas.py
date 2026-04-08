@@ -135,6 +135,39 @@ class AlertOut(BaseModel):
     created_at: datetime
 
 
+class DependencyInsightOut(BaseModel):
+    """Dashboard-friendly dependency row with version and risk context."""
+
+    package_name: str
+    ecosystem: str
+    manifest_path: str
+    detected_version: str
+    latest_version: str | None = None
+    latest_version_status: str = "unknown"
+    latest_version_source: str = ""
+    risk_severity: str = "none"
+    risk_score: float = 0.0
+    vulnerability_ids: list[str] = Field(default_factory=list)
+
+
+class SystemInventoryOut(BaseModel):
+    """One scanned system or asset plus its expandable dependency inventory."""
+
+    id: int
+    owner: str
+    name: str
+    full_name: str
+    display_name: str
+    source_type: str
+    risk_score: float
+    dependency_count: int
+    vulnerable_dependency_count: int
+    open_alert_count: int
+    last_scanned_at: datetime | None
+    summary: str = ""
+    dependencies: list[DependencyInsightOut] = Field(default_factory=list)
+
+
 class ScanRequest(BaseModel):
     """Manual trigger parameters for `/scan`."""
 

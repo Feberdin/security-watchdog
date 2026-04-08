@@ -1,11 +1,13 @@
 <!--
-Purpose: Operator dashboard that highlights repositories/assets, alerts, and risk hotspots.
-Input/Output: Loaded by the browser and hydrated with data from the REST API endpoints.
-Important invariants: The page should stay useful on first load even if JavaScript refresh fails.
-Debugging: If the layout renders but data does not, inspect the fetch calls near the bottom first.
+Purpose: Main operator dashboard for systems, dependencies, alerts, and risk overview.
+Input/Output: Loaded by the browser and hydrated from `/reports` and `/systems`.
+Important invariants: The page should help operators scan all systems quickly before drilling into
+dependency details, so the top-level layout favors readability over dense tables.
+Debugging: If system cards stay empty, inspect the `/systems` response first because the accordion
+section below is rendered entirely from that payload.
 -->
 <!DOCTYPE html>
-<html lang="en">
+<html lang="de">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -15,22 +17,22 @@ Debugging: If the layout renders but data does not, inspect the fetch calls near
   <body>
     <main class="page-shell">
       <section class="hero">
-        <div>
+        <div class="hero-copy">
           <p class="eyebrow">Feberdin Security Operations</p>
           <h1>security-watchdog</h1>
           <p class="subtle">
-            Self-hosted monitoring for GitHub repositories, Unraid Docker workloads, and Home
-            Assistant integrations.
+            Eine zentrale Sicht auf alle gescannten Systeme mit aufklappbaren Dependencies,
+            Versionsständen und Risikostufen.
           </p>
         </div>
         <div class="hero-actions">
-          <button id="scan-button" class="primary-button">Run Full Scan</button>
+          <button id="scan-button" class="primary-button">Vollscan starten</button>
         </div>
       </section>
 
       <section class="metrics-grid" id="metrics-grid">
         <article class="metric-card">
-          <span class="metric-label">Repositories / Assets</span>
+          <span class="metric-label">Systeme</span>
           <strong id="metric-repositories">-</strong>
         </article>
         <article class="metric-card">
@@ -42,36 +44,52 @@ Debugging: If the layout renders but data does not, inspect the fetch calls near
           <strong id="metric-vulnerabilities">-</strong>
         </article>
         <article class="metric-card danger">
-          <span class="metric-label">Critical Alerts</span>
+          <span class="metric-label">Kritische Alerts</span>
           <strong id="metric-critical-alerts">-</strong>
         </article>
+      </section>
+
+      <section class="panel system-panel">
+        <div class="panel-header panel-header-stack">
+          <div>
+            <h2>Systeminventar</h2>
+            <p class="section-copy">
+              Klappe ein System auf, um alle erkannten Dependencies, deine Versionen, die aktuell
+              aufgelöste Zielversion und die Gefährdungsstufe zu sehen.
+            </p>
+          </div>
+          <label class="search-field">
+            <span class="search-label">Suchen</span>
+            <input
+              id="system-search"
+              type="search"
+              placeholder="System, Dependency oder Manifest durchsuchen"
+            />
+          </label>
+        </div>
+        <div id="system-list" class="system-list"></div>
       </section>
 
       <section class="panel-grid">
         <article class="panel">
           <div class="panel-header">
-            <h2>Highest Risk Assets</h2>
+            <h2>Aktuelle Alerts</h2>
           </div>
-          <div id="repository-list" class="table-list"></div>
+          <div id="alert-list" class="table-list"></div>
         </article>
 
         <article class="panel">
           <div class="panel-header">
-            <h2>Recent Alerts</h2>
+            <h2>Häufigste Findings</h2>
           </div>
-          <div id="alert-list" class="table-list"></div>
+          <div id="vulnerability-list" class="table-list"></div>
         </article>
-      </section>
-
-      <section class="panel">
-        <div class="panel-header">
-          <h2>Top Vulnerabilities</h2>
-        </div>
-        <div id="vulnerability-list" class="table-list"></div>
       </section>
     </main>
 
     <script>
+      let allSystems = [];
+
       async function fetchJson(path) {
         const response = await fetch(path);
         if (!response.ok) {
@@ -80,42 +98,200 @@ Debugging: If the layout renders but data does not, inspect the fetch calls near
         return response.json();
       }
 
+      function escapeHtml(value) {
+        return String(value ?? '')
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#39;');
+      }
+
       function renderRows(targetId, rows, renderer) {
         const target = document.getElementById(targetId);
         if (!rows.length) {
-          target.innerHTML = '<p class="empty-state">No data yet.</p>';
+          target.innerHTML = '<p class="empty-state">Noch keine Daten vorhanden.</p>';
           return;
         }
         target.innerHTML = rows.map(renderer).join('');
       }
 
+      function formatRiskScore(value) {
+        return Number(value || 0).toFixed(1);
+      }
+
+      function formatDate(value) {
+        if (!value) {
+          return 'Noch kein Scan';
+        }
+        return new Date(value).toLocaleString('de-DE', {
+          dateStyle: 'medium',
+          timeStyle: 'short'
+        });
+      }
+
+      function dependencyMatchesQuery(dependency, query) {
+        const haystack = [
+          dependency.package_name,
+          dependency.ecosystem,
+          dependency.manifest_path,
+          dependency.detected_version,
+          dependency.latest_version || '',
+          dependency.risk_severity,
+          ...(dependency.vulnerability_ids || [])
+        ]
+          .join(' ')
+          .toLowerCase();
+        return haystack.includes(query);
+      }
+
+      function buildDependencyRow(dependency) {
+        const vulnerabilityMarkup = dependency.vulnerability_ids.length
+          ? `<div class="dependency-subline">${dependency.vulnerability_ids.map(escapeHtml).join(', ')}</div>`
+          : '<div class="dependency-subline">Keine zugeordneten CVEs oder Advisories.</div>';
+
+        const latestVersionMarkup = dependency.latest_version
+          ? `
+              <div class="version-stack">
+                <code>${escapeHtml(dependency.latest_version)}</code>
+                <span class="status-chip status-${escapeHtml(dependency.latest_version_status)}">
+                  ${escapeHtml(dependency.latest_version_status)}
+                </span>
+              </div>
+            `
+          : '<span class="muted-inline">Nicht automatisch aufgelöst</span>';
+
+        return `
+          <div class="dependency-row">
+            <div>
+              <div class="dependency-title">${escapeHtml(dependency.package_name)}</div>
+              <div class="dependency-subline">
+                ${escapeHtml(dependency.ecosystem)} · ${escapeHtml(dependency.manifest_path)}
+              </div>
+              ${vulnerabilityMarkup}
+            </div>
+            <div class="version-cell">
+              <code>${escapeHtml(dependency.detected_version)}</code>
+            </div>
+            <div class="version-cell">
+              ${latestVersionMarkup}
+            </div>
+            <div class="risk-cell">
+              <span class="severity-pill severity-${escapeHtml(dependency.risk_severity)}">
+                ${escapeHtml(dependency.risk_severity)}
+              </span>
+              <span class="risk-score-label">${formatRiskScore(dependency.risk_score)}</span>
+            </div>
+          </div>
+        `;
+      }
+
+      function buildSystemCard(system, query) {
+        const matchingDependencies = query
+          ? system.dependencies.filter((dependency) => dependencyMatchesQuery(dependency, query))
+          : system.dependencies;
+
+        const systemMatchesQuery =
+          !query ||
+          [
+            system.display_name,
+            system.full_name,
+            system.source_type,
+            system.summary
+          ]
+            .join(' ')
+            .toLowerCase()
+            .includes(query);
+
+        if (!systemMatchesQuery && !matchingDependencies.length) {
+          return '';
+        }
+
+        const dependencyRows = matchingDependencies.length
+          ? matchingDependencies.map(buildDependencyRow).join('')
+          : '<p class="empty-state">Keine passenden Dependencies zu diesem Suchbegriff.</p>';
+
+        return `
+          <details class="system-card" ${query ? 'open' : ''}>
+            <summary class="system-summary">
+              <div class="system-summary-main">
+                <div class="system-title-row">
+                  <h3>${escapeHtml(system.display_name)}</h3>
+                  <span class="source-pill">${escapeHtml(system.source_type)}</span>
+                </div>
+                <div class="system-path">${escapeHtml(system.full_name)}</div>
+                <div class="system-meta">
+                  <span>${escapeHtml(system.summary || 'Kein Zusatzkontext')}</span>
+                  <span>Zuletzt gescannt: ${escapeHtml(formatDate(system.last_scanned_at))}</span>
+                </div>
+              </div>
+              <div class="system-summary-stats">
+                <div class="system-stat">
+                  <span class="system-stat-label">Dependencies</span>
+                  <strong>${escapeHtml(system.dependency_count)}</strong>
+                </div>
+                <div class="system-stat">
+                  <span class="system-stat-label">Riskante Pakete</span>
+                  <strong>${escapeHtml(system.vulnerable_dependency_count)}</strong>
+                </div>
+                <div class="system-stat">
+                  <span class="system-stat-label">Offene Alerts</span>
+                  <strong>${escapeHtml(system.open_alert_count)}</strong>
+                </div>
+                <span class="severity-pill severity-${escapeHtml(system.risk_score >= 90 ? 'critical' : system.risk_score >= 70 ? 'high' : system.risk_score >= 40 ? 'medium' : 'low')}">
+                  Risk ${formatRiskScore(system.risk_score)}
+                </span>
+              </div>
+            </summary>
+            <div class="dependency-table">
+              <div class="dependency-table-header">
+                <span>Dependency</span>
+                <span>Deine Version</span>
+                <span>Neueste Version</span>
+                <span>Risiko</span>
+              </div>
+              ${dependencyRows}
+            </div>
+          </details>
+        `;
+      }
+
+      function renderSystems() {
+        const target = document.getElementById('system-list');
+        const query = document.getElementById('system-search').value.trim().toLowerCase();
+        const cards = allSystems
+          .map((system) => buildSystemCard(system, query))
+          .filter(Boolean);
+
+        if (!cards.length) {
+          target.innerHTML = '<p class="empty-state">Keine Systeme passend zum aktuellen Filter.</p>';
+          return;
+        }
+        target.innerHTML = cards.join('');
+      }
+
       async function loadDashboard() {
-        const report = await fetchJson('/reports');
+        const [report, systems] = await Promise.all([
+          fetchJson('/reports'),
+          fetchJson('/systems')
+        ]);
+
+        allSystems = systems;
         document.getElementById('metric-repositories').textContent = report.repository_count;
         document.getElementById('metric-dependencies').textContent = report.dependency_count;
         document.getElementById('metric-vulnerabilities').textContent = report.vulnerability_count;
         document.getElementById('metric-critical-alerts').textContent = report.critical_alert_count;
 
-        renderRows(
-          'repository-list',
-          report.repository_risk,
-          (row) => `
-            <div class="table-row">
-              <span>${row.full_name}</span>
-              <span>${row.source_type}</span>
-              <span class="risk-pill">${row.risk_score.toFixed(1)}</span>
-            </div>
-          `
-        );
+        renderSystems();
 
         renderRows(
           'alert-list',
           report.recent_alerts,
           (row) => `
             <div class="table-row">
-              <span>${row.title}</span>
-              <span>${row.severity}</span>
-              <span class="risk-pill">${row.risk_score.toFixed(1)}</span>
+              <span>${escapeHtml(row.title)}</span>
+              <span class="severity-pill severity-${escapeHtml(row.severity)}">${escapeHtml(row.severity)}</span>
+              <span class="risk-pill">${formatRiskScore(row.risk_score)}</span>
             </div>
           `
         );
@@ -125,9 +301,9 @@ Debugging: If the layout renders but data does not, inspect the fetch calls near
           report.top_vulnerabilities,
           (row) => `
             <div class="table-row">
-              <span>${row.source_identifier}</span>
-              <span>${row.package_name}</span>
-              <span>${row.affected_dependencies}</span>
+              <span>${escapeHtml(row.source_identifier)}</span>
+              <span>${escapeHtml(row.package_name)}</span>
+              <span class="risk-pill">${escapeHtml(row.affected_dependencies)}</span>
             </div>
           `
         );
@@ -136,7 +312,7 @@ Debugging: If the layout renders but data does not, inspect the fetch calls near
       async function triggerScan() {
         const button = document.getElementById('scan-button');
         button.disabled = true;
-        button.textContent = 'Scanning...';
+        button.textContent = 'Scan läuft...';
         try {
           await fetch('/scan', {
             method: 'POST',
@@ -146,11 +322,12 @@ Debugging: If the layout renders but data does not, inspect the fetch calls near
           await loadDashboard();
         } finally {
           button.disabled = false;
-          button.textContent = 'Run Full Scan';
+          button.textContent = 'Vollscan starten';
         }
       }
 
       document.getElementById('scan-button').addEventListener('click', triggerScan);
+      document.getElementById('system-search').addEventListener('input', renderSystems);
       loadDashboard().catch((error) => console.error(error));
       setInterval(() => loadDashboard().catch((error) => console.error(error)), 30000);
     </script>

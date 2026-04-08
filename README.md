@@ -67,6 +67,7 @@ Key environment variables:
 - `GET /threats`: Recent threat articles and AI-extracted threat records.
 - `GET /dependencies`: Recently scanned dependencies.
 - `GET /repositories`: Repository-like assets, including Unraid and Home Assistant.
+- `GET /systems`: System-centric inventory for the dashboard with expandable dependency details and latest-version hints.
 - `GET /health`: Liveness check.
 - Default port: `31337` because it is a memorable security-themed port and was free on the current host during setup.
 

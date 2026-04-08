@@ -123,3 +123,115 @@ def test_build_system_inventory_returns_expandable_dependency_details() -> None:
     assert dependency_row.compromised_signal == "malicious_package:CVE-2026-0001"
     assert dependency_row.risk_severity == "high"
     assert dependency_row.vulnerability_ids == ["CVE-2026-0001"]
+
+
+def test_build_platform_debug_export_includes_suspicious_systems() -> None:
+    """The global debug export should surface risky systems in a compact structured payload."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="security-watchdog",
+        full_name="Feberdin/security-watchdog",
+        local_path="/tmp/security-watchdog",
+        risk_score=82.5,
+    )
+    session.add(repository)
+    session.flush()
+
+    dependency = Dependency(
+        repository_id=repository.id,
+        manifest_path="requirements.txt",
+        package_name="requests",
+        version="2.25.0",
+        ecosystem="pypi",
+    )
+    session.add(dependency)
+    session.flush()
+
+    vulnerability = Vulnerability(
+        source="osv",
+        source_identifier="CVE-2026-0001",
+        package_name="requests",
+        ecosystem="pypi",
+        summary="Example vulnerability",
+        severity="high",
+        malicious_package=True,
+    )
+    session.add(vulnerability)
+    session.flush()
+
+    session.add(
+        DependencyVulnerability(
+            dependency_id=dependency.id,
+            vulnerability_id=vulnerability.id,
+            risk_score=82.5,
+            match_reason="Unit test match",
+        )
+    )
+    session.commit()
+
+    export_payload = ReportingService(version_catalog=FakeVersionCatalog()).build_platform_debug_export(session)
+
+    assert export_payload["diagnostics"]["suspicious_system_count"] == 1
+    assert export_payload["suspicious_systems"][0]["full_name"] == "Feberdin/security-watchdog"
+    assert export_payload["suspicious_systems"][0]["flagged_dependencies"][0]["was_compromised"] is True
+
+
+def test_build_codex_remediation_prompt_contains_findings() -> None:
+    """The remediation prompt should include actionable dependency findings for Codex."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="security-watchdog",
+        full_name="Feberdin/security-watchdog",
+        local_path="/tmp/security-watchdog",
+        risk_score=82.5,
+    )
+    session.add(repository)
+    session.flush()
+
+    dependency = Dependency(
+        repository_id=repository.id,
+        manifest_path="requirements.txt",
+        package_name="requests",
+        version="2.25.0",
+        ecosystem="pypi",
+    )
+    session.add(dependency)
+    session.flush()
+
+    vulnerability = Vulnerability(
+        source="osv",
+        source_identifier="CVE-2026-0001",
+        package_name="requests",
+        ecosystem="pypi",
+        summary="Example vulnerability",
+        severity="high",
+        malicious_package=True,
+    )
+    session.add(vulnerability)
+    session.flush()
+
+    session.add(
+        DependencyVulnerability(
+            dependency_id=dependency.id,
+            vulnerability_id=vulnerability.id,
+            risk_score=82.5,
+            match_reason="Unit test match",
+        )
+    )
+    session.commit()
+
+    prompt = ReportingService(version_catalog=FakeVersionCatalog()).build_codex_remediation_prompt(
+        session,
+        repository.id,
+    )
+
+    assert "Please review and remediate security issues" in prompt
+    assert "Feberdin/security-watchdog" in prompt
+    assert "requests" in prompt
+    assert "Previously compromised: yes" in prompt

@@ -8,7 +8,9 @@ Debugging: If an endpoint behaves differently from the worker job, compare the s
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
@@ -16,6 +18,7 @@ from app.db.session import get_db_session
 from app.models.entities import AIExtractedThreat, Alert, Dependency, Repository, ThreatArticle
 from app.models.schemas import (
     AlertOut,
+    CodexPromptOut,
     ReportOut,
     RepositoryOut,
     ScanRequest,
@@ -130,3 +133,43 @@ def get_systems(session: Session = Depends(get_db_session)) -> list[SystemInvent
     """Return all scanned systems with dependency details for the dashboard accordion view."""
 
     return ReportingService().build_system_inventory(session)
+
+
+@router.get("/diagnostics/export")
+def get_diagnostics_export(session: Session = Depends(get_db_session)) -> dict[str, Any]:
+    """Return a compact platform snapshot that operators can paste into Codex for debugging."""
+
+    return ReportingService().build_platform_debug_export(session)
+
+
+@router.get("/systems/{system_id}/codex-remediation", response_model=CodexPromptOut)
+def get_codex_remediation_prompt(
+    system_id: int,
+    session: Session = Depends(get_db_session),
+) -> CodexPromptOut:
+    """Generate a remediation prompt for one selected system."""
+
+    service = ReportingService()
+    try:
+        prompt = service.build_codex_remediation_prompt(session, system_id)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    return CodexPromptOut(
+        title=f"Codex remediation prompt for system {system_id}",
+        prompt=prompt,
+    )
+
+
+@router.get("/systems/{system_id}/debug-export")
+def get_system_debug_export(
+    system_id: int,
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Return a structured debug snapshot for one selected system."""
+
+    service = ReportingService()
+    try:
+        return service.build_system_debug_export(session, system_id)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error

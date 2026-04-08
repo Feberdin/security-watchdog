@@ -172,6 +172,13 @@ class SystemInventoryOut(BaseModel):
     dependencies: list[DependencyInsightOut] = Field(default_factory=list)
 
 
+class CodexPromptOut(BaseModel):
+    """Reusable Codex prompt response for remediation actions in the dashboard."""
+
+    title: str
+    prompt: str
+
+
 class ScanRequest(BaseModel):
     """Manual trigger parameters for `/scan`."""
 

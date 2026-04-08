@@ -10,12 +10,19 @@ Debugging: If a dashboard card looks wrong, compare the raw query result with th
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from packaging.version import InvalidVersion, Version
 
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models.entities import Alert, Dependency, DependencyVulnerability, Repository, Vulnerability
+from app.models.entities import (
+    Alert,
+    Dependency,
+    DependencyVulnerability,
+    Repository,
+    Vulnerability,
+)
 from app.models.schemas import AlertOut, DependencyInsightOut, ReportOut, SystemInventoryOut
 from app.services.matching import normalize_version
 from app.services.version_catalog import LatestVersionRecord, VersionCatalogService
@@ -89,55 +96,138 @@ class ReportingService:
     def build_system_inventory(self, session: Session) -> list[SystemInventoryOut]:
         """Return all tracked systems with expandable dependency detail for the dashboard."""
 
-        repositories = session.scalars(
-            select(Repository)
-            .options(
-                selectinload(Repository.dependencies)
-                .selectinload(Dependency.vulnerability_links)
-                .selectinload(DependencyVulnerability.vulnerability),
-                selectinload(Repository.alerts),
-            )
-            .order_by(desc(Repository.risk_score), Repository.full_name)
-        ).all()
+        repositories = self._load_repositories_with_inventory(session)
+        return [self._build_system_entry(repository) for repository in repositories]
 
-        systems: list[SystemInventoryOut] = []
-        for repository in repositories:
-            compromised_signals = self._build_compromised_signal_index(repository.alerts)
-            dependencies = [
-                self._build_dependency_insight(dependency, compromised_signals)
-                for dependency in sorted(
-                    repository.dependencies,
-                    key=lambda item: (
-                        -self._dependency_risk_score(item),
-                        item.package_name.lower(),
-                        item.manifest_path.lower(),
-                    ),
+    def build_platform_debug_export(self, session: Session) -> dict[str, Any]:
+        """Return a compact structured export that operators can paste into Codex for diagnosis."""
+
+        report = self.build_report(session)
+        systems = self.build_system_inventory(session)
+        suspicious_systems = [
+            self._build_debug_system_entry(system)
+            for system in systems
+            if system.open_alert_count > 0
+            or system.vulnerable_dependency_count > 0
+            or any(dependency.was_compromised for dependency in system.dependencies)
+        ]
+        suspicious_names = {entry["full_name"] for entry in suspicious_systems}
+        healthy_systems = [
+            {
+                "full_name": system.full_name,
+                "source_type": system.source_type,
+                "dependency_count": system.dependency_count,
+                "last_scanned_at": system.last_scanned_at,
+            }
+            for system in systems
+            if system.full_name not in suspicious_names
+        ]
+
+        return {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "report": report.model_dump(mode="json"),
+            "diagnostics": {
+                "suspicious_system_count": len(suspicious_systems),
+                "healthy_system_count": len(healthy_systems),
+            },
+            "suspicious_systems": suspicious_systems,
+            "healthy_systems": healthy_systems,
+        }
+
+    def build_system_debug_export(self, session: Session, repository_id: int) -> dict[str, Any]:
+        """Return a structured snapshot for one selected system including alerts and scan stages."""
+
+        repository = self._load_repository_with_inventory(session, repository_id)
+        system = self._build_system_entry(repository)
+        recent_alerts = [
+            {
+                "title": alert.title,
+                "severity": alert.severity,
+                "risk_score": alert.risk_score,
+                "status": alert.status,
+                "source_type": alert.source_type,
+                "created_at": alert.created_at,
+                "metadata": alert.metadata_json,
+            }
+            for alert in sorted(repository.alerts, key=lambda item: item.created_at, reverse=True)[:20]
+        ]
+        recent_scan_results = [
+            {
+                "scanner_name": result.scanner_name,
+                "status": result.status,
+                "findings_count": result.findings_count,
+                "started_at": result.started_at,
+                "completed_at": result.completed_at,
+                "details": result.details_json,
+            }
+            for result in sorted(
+                repository.scan_results,
+                key=lambda item: item.started_at or datetime.min.replace(tzinfo=UTC),
+                reverse=True,
+            )[:20]
+        ]
+
+        return {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "system": system.model_dump(mode="json"),
+            "recent_alerts": recent_alerts,
+            "recent_scan_results": recent_scan_results,
+        }
+
+    def build_codex_remediation_prompt(self, session: Session, repository_id: int) -> str:
+        """Generate a ready-to-paste Codex prompt for one risky system or repository."""
+
+        repository = self._load_repository_with_inventory(session, repository_id)
+        system = self._build_system_entry(repository)
+
+        if system.vulnerable_dependency_count == 0 and system.open_alert_count == 0:
+            findings_block = "- There are currently no high-signal findings for this system.\n"
+        else:
+            risky_dependencies = [
+                dependency
+                for dependency in system.dependencies
+                if dependency.risk_score > 0 or dependency.was_compromised
+            ][:20]
+            findings_lines = []
+            for dependency in risky_dependencies:
+                findings_lines.append(
+                    "\n".join(
+                        [
+                            f"- Package: {dependency.package_name}",
+                            f"  Ecosystem: {dependency.ecosystem}",
+                            f"  Manifest: {dependency.manifest_path}",
+                            f"  Current version: {dependency.detected_version}",
+                            f"  Latest known version: {dependency.latest_version or 'unknown'}",
+                            f"  Latest version published at: {dependency.latest_version_published_at or 'unknown'}",
+                            f"  Last checked at: {dependency.detected_version_checked_at or 'unknown'}",
+                            f"  Risk severity: {dependency.risk_severity}",
+                            f"  Risk score: {dependency.risk_score}",
+                            f"  Vulnerabilities: {', '.join(dependency.vulnerability_ids) or 'none listed'}",
+                            f"  Previously compromised: {'yes' if dependency.was_compromised else 'no'}",
+                            f"  Compromise signal: {dependency.compromised_signal or 'none'}",
+                        ]
+                    )
                 )
-            ]
-            vulnerable_dependency_count = len(
-                [dependency for dependency in dependencies if dependency.risk_score > 0]
-            )
-            open_alert_count = len(
-                [alert for alert in repository.alerts if alert.status != "resolved"]
-            )
-            systems.append(
-                SystemInventoryOut(
-                    id=repository.id,
-                    owner=repository.owner,
-                    name=repository.name,
-                    full_name=repository.full_name,
-                    display_name=self._build_display_name(repository),
-                    source_type=repository.source_type,
-                    risk_score=repository.risk_score,
-                    dependency_count=len(dependencies),
-                    vulnerable_dependency_count=vulnerable_dependency_count,
-                    open_alert_count=open_alert_count,
-                    last_scanned_at=repository.last_scanned_at,
-                    summary=self._build_system_summary(repository),
-                    dependencies=dependencies,
-                )
-            )
-        return systems
+            findings_block = "\n\n".join(findings_lines) + "\n"
+
+        return (
+            "You are Codex acting as a senior DevSecOps engineer and secure software maintainer.\n\n"
+            f"Please review and remediate security issues for the following system:\n"
+            f"- System: {system.full_name}\n"
+            f"- Display name: {system.display_name}\n"
+            f"- Source type: {system.source_type}\n"
+            f"- Risk score: {system.risk_score}\n"
+            f"- Last scanned at: {system.last_scanned_at or 'unknown'}\n"
+            f"- Summary: {system.summary or 'n/a'}\n\n"
+            "Findings to address:\n"
+            f"{findings_block}\n"
+            "Tasks:\n"
+            "- Inspect the relevant manifests, lockfiles, Dockerfiles, or integration metadata.\n"
+            "- Update or pin safe dependency versions where possible.\n"
+            "- Remove or replace malicious/compromised packages immediately if any are flagged.\n"
+            "- Preserve expected behavior and add or run tests where appropriate.\n"
+            "- Summarize what changed, what remains risky, and what should be monitored next.\n"
+        )
 
     def _build_dependency_insight(
         self,
@@ -181,6 +271,100 @@ class ReportingService:
             risk_score=risk_score,
             vulnerability_ids=[vulnerability.source_identifier for vulnerability in vulnerabilities],
         )
+
+    def _build_system_entry(self, repository: Repository) -> SystemInventoryOut:
+        """Build one system inventory entry from a repository-like ORM object."""
+
+        compromised_signals = self._build_compromised_signal_index(repository.alerts)
+        dependencies = [
+            self._build_dependency_insight(dependency, compromised_signals)
+            for dependency in sorted(
+                repository.dependencies,
+                key=lambda item: (
+                    -self._dependency_risk_score(item),
+                    item.package_name.lower(),
+                    item.manifest_path.lower(),
+                ),
+            )
+        ]
+        vulnerable_dependency_count = len(
+            [dependency for dependency in dependencies if dependency.risk_score > 0]
+        )
+        open_alert_count = len(
+            [alert for alert in repository.alerts if alert.status != "resolved"]
+        )
+        return SystemInventoryOut(
+            id=repository.id,
+            owner=repository.owner,
+            name=repository.name,
+            full_name=repository.full_name,
+            display_name=self._build_display_name(repository),
+            source_type=repository.source_type,
+            risk_score=repository.risk_score,
+            dependency_count=len(dependencies),
+            vulnerable_dependency_count=vulnerable_dependency_count,
+            open_alert_count=open_alert_count,
+            last_scanned_at=repository.last_scanned_at,
+            summary=self._build_system_summary(repository),
+            dependencies=dependencies,
+        )
+
+    def _load_repositories_with_inventory(self, session: Session) -> list[Repository]:
+        """Load all repositories with the relationships needed for inventory and prompt views."""
+
+        return session.scalars(
+            select(Repository)
+            .options(
+                selectinload(Repository.dependencies)
+                .selectinload(Dependency.vulnerability_links)
+                .selectinload(DependencyVulnerability.vulnerability),
+                selectinload(Repository.alerts),
+                selectinload(Repository.scan_results),
+            )
+            .order_by(desc(Repository.risk_score), Repository.full_name)
+        ).all()
+
+    def _load_repository_with_inventory(self, session: Session, repository_id: int) -> Repository:
+        """Load one repository-like asset with its related findings or raise a lookup error."""
+
+        repository = session.scalar(
+            select(Repository)
+            .where(Repository.id == repository_id)
+            .options(
+                selectinload(Repository.dependencies)
+                .selectinload(Dependency.vulnerability_links)
+                .selectinload(DependencyVulnerability.vulnerability),
+                selectinload(Repository.alerts),
+                selectinload(Repository.scan_results),
+            )
+        )
+        if repository is None:
+            raise LookupError(f"Repository/system with id={repository_id} was not found.")
+        return repository
+
+    def _build_debug_system_entry(self, system: SystemInventoryOut) -> dict[str, Any]:
+        """Trim a system entry to the most useful fields for operator debugging exports."""
+
+        flagged_dependencies = [
+            dependency.model_dump(mode="json")
+            for dependency in system.dependencies
+            if dependency.risk_score > 0
+            or dependency.was_compromised
+            or dependency.latest_version_status in {"outdated", "constraint"}
+        ][:25]
+        return {
+            "id": system.id,
+            "full_name": system.full_name,
+            "display_name": system.display_name,
+            "source_type": system.source_type,
+            "risk_score": system.risk_score,
+            "dependency_count": system.dependency_count,
+            "vulnerable_dependency_count": system.vulnerable_dependency_count,
+            "open_alert_count": system.open_alert_count,
+            "last_scanned_at": system.last_scanned_at,
+            "summary": system.summary,
+            "flagged_dependencies": flagged_dependencies,
+        }
 
     def _build_display_name(self, repository: Repository) -> str:
         """Prefer friendly names from metadata when available, otherwise fall back to full_name."""

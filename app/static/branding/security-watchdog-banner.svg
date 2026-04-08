@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="480" viewBox="0 0 1600 480">
+  <defs>
+    <linearGradient id="sky" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#1A1040"/>
+      <stop offset="45%" stop-color="#4A1978"/>
+      <stop offset="100%" stop-color="#0B0F1A"/>
+    </linearGradient>
+    <linearGradient id="sun" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#FFE479"/>
+      <stop offset="55%" stop-color="#FF2E88"/>
+      <stop offset="100%" stop-color="#9A4DFF"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="1600" height="480" fill="url(#sky)"/>
+  <circle cx="1160" cy="146" r="96" fill="url(#sun)" opacity="0.95"/>
+  <rect x="1064" y="98" width="192" height="5" fill="#0B0F1A" opacity="0.48"/>
+  <rect x="1064" y="111" width="192" height="5" fill="#0B0F1A" opacity="0.48"/>
+  <rect x="1064" y="124" width="192" height="5" fill="#0B0F1A" opacity="0.48"/>
+  <rect x="1064" y="137" width="192" height="5" fill="#0B0F1A" opacity="0.48"/>
+  <rect x="1064" y="150" width="192" height="5" fill="#0B0F1A" opacity="0.48"/>
+  <rect x="1064" y="163" width="192" height="5" fill="#0B0F1A" opacity="0.48"/>
+  <path d="M0 320 H1600" stroke="#00E5FF" stroke-width="2" opacity="0.9"/>
+  <g opacity="0.28">
+    <path d="M800 320 L-80 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L30 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L140 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L250 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L360 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L470 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L580 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L690 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L800 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L910 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L1020 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L1130 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L1240 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L1350 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L1460 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L1570 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L1680 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M800 320 L1790 480" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M0 340 H1600" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M0 360 H1600" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M0 380 H1600" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M0 400 H1600" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M0 420 H1600" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M0 440 H1600" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M0 460 H1600" stroke="#00E5FF" stroke-width="1"/>
+    <path d="M0 480 H1600" stroke="#00E5FF" stroke-width="1"/>
+  </g>
+  <g transform="translate(120,48) scale(0.66)" filter="url(#glow)">
+    <path d="M256 130 L360 170 L342 300 C330 378 290 420 256 442 C222 420 182 378 170 300 L152 170 Z" fill="none" stroke="#00E5FF" stroke-width="14" stroke-linejoin="round"/>
+    <path d="M256 220 a70 70 0 1 1 0 140" fill="none" stroke="#00E5FF" stroke-width="12"/>
+    <path d="M256 290 L330 254" stroke="#FF2E88" stroke-width="12" stroke-linecap="round"/>
+    <circle cx="256" cy="290" r="12" fill="#FF2E88"/>
+  </g>
+  <text x="450" y="160" font-family="Orbitron, Arial, sans-serif" font-size="64" fill="#E6ECFF" letter-spacing="2">security-watchdog</text>
+  <text x="450" y="212" font-family="Inter, Arial, sans-serif" font-size="28" fill="#00E5FF">Synthwave developer tool</text>
+  <text x="450" y="270" font-family="Inter, Arial, sans-serif" font-size="22" fill="#9DA8C7">
+    Unified synthwave branding • dark UI • neon accents • reusable across your ecosystem
+  </text>
+</svg>

@@ -1,10 +1,11 @@
 <!--
-Purpose: Main operator dashboard for systems, dependencies, alerts, and risk overview.
-Input/Output: Loaded by the browser and hydrated from `/reports` and `/systems`.
-Important invariants: The page should help operators scan all systems quickly before drilling into
-dependency details, so the top-level layout favors readability over dense tables.
-Debugging: If system cards stay empty, inspect the `/systems` response first because the accordion
-section below is rendered entirely from that payload.
+Purpose: Main synthwave dashboard for systems, dependencies, debugging exports, and remediation.
+Input/Output: Loaded by the browser and hydrated from `/reports`, `/systems`, `/diagnostics/export`,
+and per-system Codex helper endpoints.
+Important invariants: Operators should be able to scan the whole platform quickly, then drill into
+one system and export structured data or a remediation prompt without leaving the page.
+Debugging: If one of the Codex helper buttons appears broken, inspect the browser requests to
+`/diagnostics/export`, `/systems/{id}/debug-export`, and `/systems/{id}/codex-remediation`.
 -->
 <!DOCTYPE html>
 <html lang="de">
@@ -16,54 +17,83 @@ section below is rendered entirely from that payload.
   </head>
   <body>
     <main class="page-shell">
-      <section class="hero">
-        <div class="hero-copy">
-          <p class="eyebrow">Feberdin Security Operations</p>
-          <h1>security-watchdog</h1>
-          <p class="subtle">
-            Eine zentrale Sicht auf alle gescannten Systeme mit aufklappbaren Dependencies,
-            Versionsständen und Risikostufen.
-          </p>
+      <header class="topbar synth-card">
+        <div class="brand">
+          <img
+            class="brand-mark"
+            src="/static/branding/security-watchdog-logo.svg"
+            alt="security-watchdog logo"
+          />
+          <div class="brand-copy">
+            <span class="eyebrow">Feberdin Security Operations</span>
+            <h1>security-watchdog</h1>
+            <p>Systeminventar, Dependency-Transparenz und Codex-gestützte Sanierung in einer Oberfläche.</p>
+          </div>
         </div>
-        <div class="hero-actions">
-          <button id="scan-button" class="primary-button">Vollscan starten</button>
+        <div class="topbar-actions">
+          <button id="debug-export-button" class="action-button secondary-button">
+            Codex Debug Export
+          </button>
+          <button id="scan-button" class="action-button primary-button">Vollscan starten</button>
+        </div>
+      </header>
+
+      <section class="hero-banner-card synth-card">
+        <img
+          class="hero-banner-image"
+          src="/static/branding/security-watchdog-banner.svg"
+          alt="security-watchdog banner"
+        />
+        <div class="hero-banner-overlay">
+          <div class="hero-copy">
+            <p class="eyebrow">Synthwave Monitoring View</p>
+            <h2>Alle Systeme. Alle Abhängigkeiten. Ein klarer Blick auf Risiko und Zustand.</h2>
+            <p class="hero-subtle">
+              Klappe Systeme auf, vergleiche deine Versionen mit aktuellen Zielversionen, sieh
+              Veröffentlichungsdaten und Prüfzeitpunkte, und exportiere bei Bedarf strukturierte
+              Debug-Daten oder direkt einen Sanierungs-Prompt für Codex.
+            </p>
+          </div>
         </div>
       </section>
 
-      <section class="metrics-grid" id="metrics-grid">
-        <article class="metric-card">
+      <section class="metrics-grid">
+        <article class="metric-card synth-card">
           <span class="metric-label">Systeme</span>
           <strong id="metric-repositories">-</strong>
         </article>
-        <article class="metric-card">
+        <article class="metric-card synth-card">
           <span class="metric-label">Dependencies</span>
           <strong id="metric-dependencies">-</strong>
         </article>
-        <article class="metric-card">
+        <article class="metric-card synth-card">
           <span class="metric-label">Vulnerabilities</span>
           <strong id="metric-vulnerabilities">-</strong>
         </article>
-        <article class="metric-card danger">
+        <article class="metric-card synth-card metric-critical">
           <span class="metric-label">Kritische Alerts</span>
           <strong id="metric-critical-alerts">-</strong>
         </article>
       </section>
 
-      <section class="panel system-panel">
+      <section class="panel synth-card">
         <div class="panel-header panel-header-stack">
           <div>
-            <h2>Systeminventar</h2>
+            <p class="eyebrow">Systeminventar</p>
+            <h2>Aufklappbare Systeme mit Versions- und Risikokontext</h2>
             <p class="section-copy">
-              Klappe ein System auf, um alle erkannten Dependencies, deine Versionen, die aktuell
-              aufgelöste Zielversion und die Gefährdungsstufe zu sehen.
+              Jedes System zeigt seine Dependencies, deine Version, die aktuell aufgelöste
+              Zielversion, Veröffentlichungsdatum, letzten Prüfzeitpunkt und ein Symbol für bereits
+              kompromittierte Pakete.
             </p>
           </div>
           <label class="search-field">
-            <span class="search-label">Suchen</span>
+            <span class="search-label">Filtern</span>
             <input
               id="system-search"
+              class="synth-input"
               type="search"
-              placeholder="System, Dependency oder Manifest durchsuchen"
+              placeholder="System, Paket, Manifest, CVE oder Version durchsuchen"
             />
           </label>
         </div>
@@ -71,21 +101,52 @@ section below is rendered entirely from that payload.
       </section>
 
       <section class="panel-grid">
-        <article class="panel">
+        <article class="panel synth-card">
           <div class="panel-header">
-            <h2>Aktuelle Alerts</h2>
+            <div>
+              <p class="eyebrow">Alerts</p>
+              <h2>Neueste Warnungen</h2>
+            </div>
           </div>
           <div id="alert-list" class="table-list"></div>
         </article>
 
-        <article class="panel">
+        <article class="panel synth-card">
           <div class="panel-header">
-            <h2>Häufigste Findings</h2>
+            <div>
+              <p class="eyebrow">Findings</p>
+              <h2>Häufigste Schwachstellen</h2>
+            </div>
           </div>
           <div id="vulnerability-list" class="table-list"></div>
         </article>
       </section>
     </main>
+
+    <div id="output-modal" class="modal hidden" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal="true"></div>
+      <section class="modal-panel synth-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Codex Helper</p>
+            <h2 id="modal-title">Ausgabe</h2>
+          </div>
+          <button id="close-modal-button" class="action-button ghost-button" type="button">
+            Schließen
+          </button>
+        </div>
+        <p id="modal-copy-hint" class="section-copy">
+          Diesen Inhalt kannst du direkt in Codex oder ChatGPT einfügen.
+        </p>
+        <textarea id="modal-output" class="output-area" readonly></textarea>
+        <div class="modal-actions">
+          <span id="copy-feedback" class="copy-feedback"></span>
+          <button id="copy-modal-button" class="action-button secondary-button" type="button">
+            In Zwischenablage kopieren
+          </button>
+        </div>
+      </section>
+    </div>
 
     <script>
       let allSystems = [];
@@ -107,6 +168,34 @@ section below is rendered entirely from that payload.
           .replaceAll("'", '&#39;');
       }
 
+      function formatRiskScore(value) {
+        return Number(value || 0).toFixed(1);
+      }
+
+      function formatDateTime(value, fallback = 'Unbekannt') {
+        if (!value) {
+          return fallback;
+        }
+        return new Date(value).toLocaleString('de-DE', {
+          dateStyle: 'medium',
+          timeStyle: 'short'
+        });
+      }
+
+      function severityFromScore(score) {
+        const numericScore = Number(score || 0);
+        if (numericScore >= 90) {
+          return 'critical';
+        }
+        if (numericScore >= 70) {
+          return 'high';
+        }
+        if (numericScore >= 40) {
+          return 'medium';
+        }
+        return 'low';
+      }
+
       function renderRows(targetId, rows, renderer) {
         const target = document.getElementById(targetId);
         if (!rows.length) {
@@ -114,30 +203,6 @@ section below is rendered entirely from that payload.
           return;
         }
         target.innerHTML = rows.map(renderer).join('');
-      }
-
-      function formatRiskScore(value) {
-        return Number(value || 0).toFixed(1);
-      }
-
-      function formatDate(value) {
-        if (!value) {
-          return 'Noch kein Scan';
-        }
-        return new Date(value).toLocaleString('de-DE', {
-          dateStyle: 'medium',
-          timeStyle: 'short'
-        });
-      }
-
-      function formatShortDate(value) {
-        if (!value) {
-          return 'Unbekannt';
-        }
-        return new Date(value).toLocaleString('de-DE', {
-          dateStyle: 'medium',
-          timeStyle: 'short'
-        });
       }
 
       function dependencyMatchesQuery(dependency, query) {
@@ -148,6 +213,7 @@ section below is rendered entirely from that payload.
           dependency.detected_version,
           dependency.latest_version || '',
           dependency.risk_severity,
+          dependency.compromised_signal || '',
           ...(dependency.vulnerability_ids || [])
         ]
           .join(' ')
@@ -163,13 +229,13 @@ section below is rendered entirely from that payload.
                 title="Diese Dependency wurde bereits als kompromittiert oder bösartig markiert (${escapeHtml(dependency.compromised_signal || 'security signal')})."
                 aria-label="Kompromittierte Dependency"
               >
-                &#9888;
+                &#9763;
               </span>
             `
           : '';
 
         const vulnerabilityMarkup = dependency.vulnerability_ids.length
-          ? `<div class="dependency-subline">${dependency.vulnerability_ids.map(escapeHtml).join(', ')}</div>`
+          ? `<div class="dependency-subline">Signals: ${dependency.vulnerability_ids.map(escapeHtml).join(', ')}</div>`
           : '<div class="dependency-subline">Keine zugeordneten CVEs oder Advisories.</div>';
 
         const latestVersionMarkup = dependency.latest_version
@@ -181,13 +247,18 @@ section below is rendered entirely from that payload.
                 </span>
               </div>
               <div class="dependency-subline">
-                Version vom: ${escapeHtml(formatShortDate(dependency.latest_version_published_at))}
+                Version vom: ${escapeHtml(formatDateTime(dependency.latest_version_published_at))}
               </div>
               <div class="dependency-subline">
                 Quelle: ${escapeHtml(dependency.latest_version_source || 'unknown')}
               </div>
             `
-          : '<span class="muted-inline">Nicht automatisch aufgelöst</span>';
+          : `
+              <span class="muted-inline">Nicht automatisch aufgelöst</span>
+              <div class="dependency-subline">
+                Quelle: ${escapeHtml(dependency.latest_version_source || 'unknown')}
+              </div>
+            `;
 
         return `
           <div class="dependency-row">
@@ -204,7 +275,7 @@ section below is rendered entirely from that payload.
             <div class="version-cell">
               <code>${escapeHtml(dependency.detected_version)}</code>
               <div class="dependency-subline">
-                Zuletzt geprüft: ${escapeHtml(formatShortDate(dependency.detected_version_checked_at))}
+                Zuletzt geprüft: ${escapeHtml(formatDateTime(dependency.detected_version_checked_at))}
               </div>
             </div>
             <div class="version-cell">
@@ -245,8 +316,23 @@ section below is rendered entirely from that payload.
           ? matchingDependencies.map(buildDependencyRow).join('')
           : '<p class="empty-state">Keine passenden Dependencies zu diesem Suchbegriff.</p>';
 
+        const hasFindings = system.vulnerable_dependency_count > 0 || system.open_alert_count > 0;
+        const remediationButton = hasFindings
+          ? `
+              <button
+                class="action-button secondary-button"
+                type="button"
+                data-system-action="remediation"
+                data-system-id="${system.id}"
+                data-system-name="${escapeHtml(system.display_name)}"
+              >
+                Codex Sanierungs-Prompt
+              </button>
+            `
+          : '';
+
         return `
-          <details class="system-card" ${query ? 'open' : ''}>
+          <details class="system-card synth-card" ${query ? 'open' : ''}>
             <summary class="system-summary">
               <div class="system-summary-main">
                 <div class="system-title-row">
@@ -256,7 +342,7 @@ section below is rendered entirely from that payload.
                 <div class="system-path">${escapeHtml(system.full_name)}</div>
                 <div class="system-meta">
                   <span>${escapeHtml(system.summary || 'Kein Zusatzkontext')}</span>
-                  <span>Zuletzt gescannt: ${escapeHtml(formatDate(system.last_scanned_at))}</span>
+                  <span>Zuletzt gescannt: ${escapeHtml(formatDateTime(system.last_scanned_at, 'Noch kein Scan'))}</span>
                 </div>
               </div>
               <div class="system-summary-stats">
@@ -272,19 +358,33 @@ section below is rendered entirely from that payload.
                   <span class="system-stat-label">Offene Alerts</span>
                   <strong>${escapeHtml(system.open_alert_count)}</strong>
                 </div>
-                <span class="severity-pill severity-${escapeHtml(system.risk_score >= 90 ? 'critical' : system.risk_score >= 70 ? 'high' : system.risk_score >= 40 ? 'medium' : 'low')}">
+                <span class="severity-pill severity-${escapeHtml(severityFromScore(system.risk_score))}">
                   Risk ${formatRiskScore(system.risk_score)}
                 </span>
               </div>
             </summary>
-            <div class="dependency-table">
-              <div class="dependency-table-header">
-                <span>Dependency</span>
-                <span>Deine Version</span>
-                <span>Neueste Version</span>
-                <span>Risiko</span>
+            <div class="system-card-body">
+              <div class="system-actions">
+                <button
+                  class="action-button ghost-button"
+                  type="button"
+                  data-system-action="system-debug"
+                  data-system-id="${system.id}"
+                  data-system-name="${escapeHtml(system.display_name)}"
+                >
+                  System-Debugdaten
+                </button>
+                ${remediationButton}
               </div>
-              ${dependencyRows}
+              <div class="dependency-table">
+                <div class="dependency-table-header">
+                  <span>Dependency</span>
+                  <span>Deine Version</span>
+                  <span>Aktuelle Version</span>
+                  <span>Risiko</span>
+                </div>
+                ${dependencyRows}
+              </div>
             </div>
           </details>
         `;
@@ -302,6 +402,69 @@ section below is rendered entirely from that payload.
           return;
         }
         target.innerHTML = cards.join('');
+      }
+
+      function showModal(title, output) {
+        document.getElementById('modal-title').textContent = title;
+        document.getElementById('modal-output').value = output;
+        document.getElementById('copy-feedback').textContent = '';
+        const modal = document.getElementById('output-modal');
+        modal.classList.remove('hidden');
+        modal.setAttribute('aria-hidden', 'false');
+      }
+
+      function hideModal() {
+        const modal = document.getElementById('output-modal');
+        modal.classList.add('hidden');
+        modal.setAttribute('aria-hidden', 'true');
+      }
+
+      async function copyModalOutput() {
+        const output = document.getElementById('modal-output').value;
+        const feedback = document.getElementById('copy-feedback');
+        try {
+          await navigator.clipboard.writeText(output);
+          feedback.textContent = 'In Zwischenablage kopiert.';
+        } catch (error) {
+          document.getElementById('modal-output').select();
+          feedback.textContent = 'Zwischenablage gescheitert, Text ist markiert.';
+        }
+      }
+
+      async function openPlatformDebugExport(button) {
+        button.disabled = true;
+        button.textContent = 'Export läuft...';
+        try {
+          const payload = await fetchJson('/diagnostics/export');
+          showModal('Codex Debug Export', JSON.stringify(payload, null, 2));
+        } finally {
+          button.disabled = false;
+          button.textContent = 'Codex Debug Export';
+        }
+      }
+
+      async function openSystemDebugExport(systemId, systemName, button) {
+        button.disabled = true;
+        button.textContent = 'Lade Debugdaten...';
+        try {
+          const payload = await fetchJson(`/systems/${systemId}/debug-export`);
+          showModal(`System-Debugdaten · ${systemName}`, JSON.stringify(payload, null, 2));
+        } finally {
+          button.disabled = false;
+          button.textContent = 'System-Debugdaten';
+        }
+      }
+
+      async function openRemediationPrompt(systemId, systemName, button) {
+        button.disabled = true;
+        button.textContent = 'Prompt wird erstellt...';
+        try {
+          const payload = await fetchJson(`/systems/${systemId}/codex-remediation`);
+          showModal(`Codex Sanierungs-Prompt · ${systemName}`, payload.prompt);
+        } finally {
+          button.disabled = false;
+          button.textContent = 'Codex Sanierungs-Prompt';
+        }
       }
 
       async function loadDashboard() {
@@ -361,7 +524,38 @@ section below is rendered entirely from that payload.
       }
 
       document.getElementById('scan-button').addEventListener('click', triggerScan);
+      document.getElementById('debug-export-button').addEventListener('click', (event) => {
+        openPlatformDebugExport(event.currentTarget);
+      });
       document.getElementById('system-search').addEventListener('input', renderSystems);
+      document.getElementById('copy-modal-button').addEventListener('click', copyModalOutput);
+      document.getElementById('close-modal-button').addEventListener('click', hideModal);
+      document.getElementById('output-modal').addEventListener('click', (event) => {
+        if (event.target.dataset.closeModal === 'true') {
+          hideModal();
+        }
+      });
+      document.getElementById('system-list').addEventListener('click', (event) => {
+        const button = event.target.closest('[data-system-action]');
+        if (!button) {
+          return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        const systemId = button.dataset.systemId;
+        const systemName = button.dataset.systemName || `System ${systemId}`;
+        const action = button.dataset.systemAction;
+
+        if (action === 'system-debug') {
+          openSystemDebugExport(systemId, systemName, button);
+        }
+        if (action === 'remediation') {
+          openRemediationPrompt(systemId, systemName, button);
+        }
+      });
+
       loadDashboard().catch((error) => console.error(error));
       setInterval(() => loadDashboard().catch((error) => console.error(error)), 30000);
     </script>

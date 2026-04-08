@@ -446,8 +446,15 @@ p {
   padding-top: 16px;
 }
 
+.runtime-table {
+  margin-top: 18px;
+  border-top: 1px solid rgba(42, 53, 88, 0.8);
+  padding-top: 16px;
+}
+
 .dependency-table-header,
 .dependency-row,
+.runtime-row,
 .table-row {
   display: grid;
   gap: 14px;
@@ -469,6 +476,14 @@ p {
   border-radius: var(--radius-lg);
   background: rgba(11, 15, 26, 0.54);
   border: 1px solid rgba(42, 53, 88, 0.86);
+}
+
+.runtime-row {
+  grid-template-columns: minmax(0, 2fr) minmax(160px, 0.95fr) minmax(220px, 1.1fr) minmax(140px, 0.8fr);
+  padding: 16px;
+  border-radius: var(--radius-lg);
+  background: rgba(11, 15, 26, 0.42);
+  border: 1px solid rgba(255, 154, 60, 0.18);
 }
 
 .dependency-title {
@@ -700,6 +715,7 @@ p {
   }
 
   .dependency-row,
+  .runtime-row,
   .table-row {
     grid-template-columns: 1fr;
   }

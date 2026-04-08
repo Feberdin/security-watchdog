@@ -21,9 +21,16 @@ from app.models.entities import (
     Dependency,
     DependencyVulnerability,
     Repository,
+    ScanResult,
     Vulnerability,
 )
-from app.models.schemas import AlertOut, DependencyInsightOut, ReportOut, SystemInventoryOut
+from app.models.schemas import (
+    AlertOut,
+    DependencyInsightOut,
+    ReportOut,
+    RuntimeFindingOut,
+    SystemInventoryOut,
+)
 from app.services.matching import normalize_version
 from app.services.version_catalog import LatestVersionRecord, VersionCatalogService
 
@@ -43,9 +50,16 @@ class ReportingService:
         repository_count = session.scalar(select(func.count(Repository.id))) or 0
         dependency_count = session.scalar(select(func.count(Dependency.id))) or 0
         vulnerability_count = session.scalar(select(func.count(Vulnerability.id))) or 0
-        alert_count = session.scalar(select(func.count(Alert.id))) or 0
+        active_alert_filter = Alert.status != "resolved"
+        alert_count = session.scalar(select(func.count(Alert.id)).where(active_alert_filter)) or 0
         critical_alert_count = (
-            session.scalar(select(func.count(Alert.id)).where(Alert.severity == "critical")) or 0
+            session.scalar(
+                select(func.count(Alert.id)).where(
+                    active_alert_filter,
+                    Alert.severity == "critical",
+                )
+            )
+            or 0
         )
 
         repository_risk = [
@@ -57,7 +71,12 @@ class ReportingService:
 
         recent_alerts = [
             AlertOut.model_validate(alert)
-            for alert in session.scalars(select(Alert).order_by(desc(Alert.created_at)).limit(10))
+            for alert in session.scalars(
+                select(Alert)
+                .where(active_alert_filter)
+                .order_by(desc(Alert.updated_at))
+                .limit(10)
+            )
         ]
 
         top_vulnerabilities = [
@@ -110,6 +129,7 @@ class ReportingService:
             if system.open_alert_count > 0
             or system.vulnerable_dependency_count > 0
             or any(dependency.was_compromised for dependency in system.dependencies)
+            or bool(system.runtime_findings)
         ]
         suspicious_names = {entry["full_name"] for entry in suspicious_systems}
         healthy_systems = [
@@ -130,6 +150,7 @@ class ReportingService:
                 "suspicious_system_count": len(suspicious_systems),
                 "healthy_system_count": len(healthy_systems),
             },
+            "scheduler": self._build_scheduler_health(session),
             "suspicious_systems": suspicious_systems,
             "healthy_systems": healthy_systems,
         }
@@ -172,6 +193,7 @@ class ReportingService:
             "system": system.model_dump(mode="json"),
             "recent_alerts": recent_alerts,
             "recent_scan_results": recent_scan_results,
+            "scheduler": self._build_scheduler_health(session),
         }
 
     def build_codex_remediation_prompt(self, session: Session, repository_id: int) -> str:
@@ -180,7 +202,11 @@ class ReportingService:
         repository = self._load_repository_with_inventory(session, repository_id)
         system = self._build_system_entry(repository)
 
-        if system.vulnerable_dependency_count == 0 and system.open_alert_count == 0:
+        if (
+            system.vulnerable_dependency_count == 0
+            and system.open_alert_count == 0
+            and not system.runtime_findings
+        ):
             findings_block = "- There are currently no high-signal findings for this system.\n"
         else:
             risky_dependencies = [
@@ -205,6 +231,24 @@ class ReportingService:
                             f"  Vulnerabilities: {', '.join(dependency.vulnerability_ids) or 'none listed'}",
                             f"  Previously compromised: {'yes' if dependency.was_compromised else 'no'}",
                             f"  Compromise signal: {dependency.compromised_signal or 'none'}",
+                        ]
+                    )
+                )
+            for finding in system.runtime_findings[:20]:
+                findings_lines.append(
+                    "\n".join(
+                        [
+                            f"- Runtime finding: {finding.title}",
+                            f"  Source type: {finding.source_type}",
+                            f"  Vulnerability: {finding.vulnerability_id or 'n/a'}",
+                            f"  Package: {finding.package_name or 'n/a'}",
+                            f"  Installed version: {finding.installed_version or 'n/a'}",
+                            f"  Fix version: {finding.fix_version or 'unknown'}",
+                            f"  Severity: {finding.severity}",
+                            f"  Risk score: {finding.risk_score}",
+                            f"  Target: {finding.target or 'n/a'}",
+                            f"  Last seen at: {finding.last_seen_at or 'unknown'}",
+                            f"  Description: {finding.description or 'n/a'}",
                         ]
                     )
                 )
@@ -307,6 +351,7 @@ class ReportingService:
             last_scanned_at=repository.last_scanned_at,
             summary=self._build_system_summary(repository),
             dependencies=dependencies,
+            runtime_findings=self._build_runtime_findings(repository),
         )
 
     def _load_repositories_with_inventory(self, session: Session) -> list[Repository]:
@@ -364,6 +409,7 @@ class ReportingService:
             "last_scanned_at": system.last_scanned_at,
             "summary": system.summary,
             "flagged_dependencies": flagged_dependencies,
+            "runtime_findings": [finding.model_dump(mode="json") for finding in system.runtime_findings[:25]],
         }
 
     def _build_display_name(self, repository: Repository) -> str:
@@ -386,9 +432,106 @@ class ReportingService:
             summary_bits.append(f"TZ {metadata['time_zone']}")
         if metadata.get("image_ref"):
             summary_bits.append(str(metadata["image_ref"]))
+        if metadata.get("image"):
+            summary_bits.append(str(metadata["image"]))
+        if metadata.get("homeassistant_base_url"):
+            summary_bits.append(str(metadata["homeassistant_base_url"]))
         if repository.local_path:
             summary_bits.append(repository.local_path)
         return " | ".join(summary_bits)
+
+    def _build_runtime_findings(self, repository: Repository) -> list[RuntimeFindingOut]:
+        """
+        Convert non-dependency alerts into dashboard-visible findings.
+
+        Why this exists:
+        Container image CVEs and secret-scanner matches are stored as alerts instead of dependency
+        links. Without surfacing them explicitly, systems can show hundreds of open alerts while the
+        accordion body stays almost empty.
+        """
+
+        findings: list[RuntimeFindingOut] = []
+        for alert in sorted(
+            repository.alerts,
+            key=lambda item: (item.risk_score, item.updated_at),
+            reverse=True,
+        ):
+            if alert.status == "resolved":
+                continue
+            if alert.source_type in {"dependency_vulnerability", "ai_correlation"}:
+                continue
+            metadata = alert.metadata_json or {}
+            findings.append(
+                RuntimeFindingOut(
+                    title=alert.title,
+                    source_type=alert.source_type,
+                    severity=alert.severity,
+                    risk_score=alert.risk_score,
+                    vulnerability_id=str(
+                        metadata.get("vulnerability_id")
+                        or metadata.get("detector")
+                        or ""
+                    ),
+                    package_name=str(metadata.get("package_name") or ""),
+                    installed_version=str(metadata.get("installed_version") or ""),
+                    fix_version=metadata.get("fix_version"),
+                    target=str(
+                        metadata.get("target")
+                        or metadata.get("file_path")
+                        or metadata.get("source_url")
+                        or ""
+                    ),
+                    description=str(metadata.get("description") or alert.description or ""),
+                    last_seen_at=alert.updated_at,
+                )
+            )
+        return findings[:25]
+
+    def _build_scheduler_health(self, session: Session) -> dict[str, dict[str, Any]]:
+        """Summarize the most recent recurring job activity from stored scan results."""
+
+        now = datetime.now(UTC)
+        job_scanners = {
+            "repo_scan": {
+                "scanner_names": {
+                    "dependency_extractor",
+                    "secret_scanner",
+                    "container_scanner",
+                    "unraid_container_scanner",
+                    "homeassistant_dependency_scan",
+                },
+                "expected_hours": 24,
+            },
+            "threat_feed": {
+                "scanner_names": {"threat_intelligence"},
+                "expected_hours": 6,
+            },
+            "ai_analysis": {
+                "scanner_names": {"ai_threat_extraction"},
+                "expected_hours": 24 * 30,
+            },
+        }
+
+        scheduler_health: dict[str, dict[str, Any]] = {}
+        scan_results = session.scalars(select(ScanResult).order_by(desc(ScanResult.completed_at))).all()
+        for job_name, config in job_scanners.items():
+            relevant_results = [
+                result
+                for result in scan_results
+                if result.scanner_name in config["scanner_names"]
+            ]
+            latest_result = relevant_results[0] if relevant_results else None
+            latest_completed_at = latest_result.completed_at if latest_result else None
+            overdue = True
+            if latest_completed_at is not None:
+                overdue = (now - latest_completed_at).total_seconds() > config["expected_hours"] * 3600
+            scheduler_health[job_name] = {
+                "last_completed_at": latest_completed_at.isoformat() if latest_completed_at else None,
+                "last_status": latest_result.status if latest_result else "never_ran",
+                "expected_interval_hours": config["expected_hours"],
+                "overdue": overdue,
+            }
+        return scheduler_health
 
     def _highest_vulnerability_severity(self, vulnerabilities: list[Vulnerability]) -> str:
         """Return the strongest severity across all linked vulnerabilities."""

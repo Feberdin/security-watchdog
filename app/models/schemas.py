@@ -154,6 +154,22 @@ class DependencyInsightOut(BaseModel):
     vulnerability_ids: list[str] = Field(default_factory=list)
 
 
+class RuntimeFindingOut(BaseModel):
+    """Runtime or image-level finding that is not represented as a manifest dependency row."""
+
+    title: str
+    source_type: str
+    severity: str
+    risk_score: float
+    vulnerability_id: str = ""
+    package_name: str = ""
+    installed_version: str = ""
+    fix_version: str | None = None
+    target: str = ""
+    description: str = ""
+    last_seen_at: datetime | None = None
+
+
 class SystemInventoryOut(BaseModel):
     """One scanned system or asset plus its expandable dependency inventory."""
 
@@ -170,6 +186,7 @@ class SystemInventoryOut(BaseModel):
     last_scanned_at: datetime | None
     summary: str = ""
     dependencies: list[DependencyInsightOut] = Field(default_factory=list)
+    runtime_findings: list[RuntimeFindingOut] = Field(default_factory=list)
 
 
 class CodexPromptOut(BaseModel):

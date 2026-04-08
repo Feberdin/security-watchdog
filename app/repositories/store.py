@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.utils import sha256_text, stable_json_dumps
 from app.models.entities import (
     Alert,
+    AlertStatus,
     Dependency,
     DependencyVulnerability,
     Repository,
@@ -257,15 +258,11 @@ def upsert_alert(
 ) -> Alert:
     """Create or update an alert by deterministic fingerprint."""
 
-    fingerprint = sha256_text(
-        stable_json_dumps(
-            {
-                "repository_id": repository_id,
-                "title": title,
-                "source_type": source_type,
-                "metadata": metadata,
-            }
-        )
+    fingerprint = build_alert_fingerprint(
+        repository_id=repository_id,
+        title=title,
+        source_type=source_type,
+        metadata=metadata,
     )
     alert = session.scalar(select(Alert).where(Alert.fingerprint == fingerprint))
     if alert is None:
@@ -285,8 +282,67 @@ def upsert_alert(
         alert.severity = severity
         alert.risk_score = risk_score
         alert.metadata_json = metadata
+        if alert.status == AlertStatus.RESOLVED.value:
+            alert.status = AlertStatus.OPEN.value
     session.flush()
     return alert
+
+
+def build_alert_fingerprint(
+    *,
+    repository_id: int | None,
+    title: str,
+    source_type: str,
+    metadata: dict,
+) -> str:
+    """Build the deterministic alert fingerprint used for dedupe and stale-alert cleanup."""
+
+    return sha256_text(
+        stable_json_dumps(
+            {
+                "repository_id": repository_id,
+                "title": title,
+                "source_type": source_type,
+                "metadata": metadata,
+            }
+        )
+    )
+
+
+def resolve_stale_alerts(
+    session: Session,
+    *,
+    repository_id: int,
+    source_types: list[str],
+    active_fingerprints: set[str],
+) -> int:
+    """
+    Resolve active alerts from prior scan runs that were not seen in the current run.
+
+    Why this exists:
+    Without explicit resolution, a repository keeps historical findings forever even when the
+    dependency, secret, or container issue is gone. That inflates open-alert counts and distorts
+    repository risk scores.
+    """
+
+    if not source_types:
+        return 0
+
+    resolved_count = 0
+    alerts = session.scalars(
+        select(Alert).where(
+            Alert.repository_id == repository_id,
+            Alert.source_type.in_(source_types),
+            Alert.status != AlertStatus.RESOLVED.value,
+        )
+    ).all()
+    for alert in alerts:
+        if alert.fingerprint in active_fingerprints:
+            continue
+        alert.status = AlertStatus.RESOLVED.value
+        resolved_count += 1
+    session.flush()
+    return resolved_count
 
 
 def report_counts(session: Session) -> dict[str, int]:

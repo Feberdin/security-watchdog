@@ -34,7 +34,7 @@ class ContainerScanner:
         findings: list[ContainerFinding] = []
         findings.extend(self._scan_with_trivy_image(image_ref))
         findings.extend(self._scan_with_grype(image_ref))
-        return findings
+        return self._deduplicate_findings(findings)
 
     def scan_dockerfile(self, dockerfile_path: Path) -> list[ContainerFinding]:
         """Run Trivy config scanning on one Dockerfile when available."""
@@ -124,3 +124,33 @@ class ContainerScanner:
                 )
             )
         return findings
+
+    def _deduplicate_findings(self, findings: list[ContainerFinding]) -> list[ContainerFinding]:
+        """
+        Collapse duplicate image findings reported by multiple scanners.
+
+        Why this exists:
+        Trivy and Grype frequently report the same package/CVE pair. Keeping both as independent
+        alerts doubles operator noise without adding much value, so we retain one merged record per
+        affected package/version/vulnerability tuple.
+        """
+
+        deduplicated: dict[tuple[str, str, str, str], ContainerFinding] = {}
+        for finding in findings:
+            key = (
+                finding.target,
+                finding.vulnerability_id,
+                finding.package_name,
+                finding.installed_version,
+            )
+            existing = deduplicated.get(key)
+            if existing is None:
+                deduplicated[key] = finding
+                continue
+            if not existing.fix_version and finding.fix_version:
+                existing.fix_version = finding.fix_version
+            if len(finding.description or "") > len(existing.description or ""):
+                existing.description = finding.description
+            if existing.tool != finding.tool and finding.tool not in existing.tool.split("+"):
+                existing.tool = f"{existing.tool}+{finding.tool}"
+        return list(deduplicated.values())

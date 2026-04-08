@@ -89,7 +89,8 @@ def test_normalizes_remote_components_into_integration_domains():
     assert by_domain["tapo"].component_names == ["tapo.sensor", "tapo.switch"]
     assert by_domain["tapo"].platforms == ["sensor", "switch"]
     assert by_domain["hacs"].component_names == ["hacs"]
-    assert by_domain["sensor"].platforms == []
+    assert "sensor" not in by_domain
+    assert "config" not in by_domain
 
 
 def test_syncs_remote_homeassistant_integrations_into_assets():

@@ -8,6 +8,7 @@ Debugging: If a job fails silently, inspect worker logs for the wrapped exceptio
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 import logging
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -31,34 +32,76 @@ def register_jobs(scheduler: BaseScheduler) -> BaseScheduler:
     state_store = RedisStateStore()
 
     def repo_scan_job() -> None:
-        with SessionLocal() as session:
-            orchestrator.run_manual_scan(
-                session,
-                ScanRequest(repository_full_name=None, include_archived=False, force=False),
-            )
-            session.commit()
-            state_store.set_job_heartbeat("repo_scan")
+        try:
+            with SessionLocal() as session:
+                orchestrator.run_manual_scan(
+                    session,
+                    ScanRequest(repository_full_name=None, include_archived=False, force=False),
+                )
+                session.commit()
+        except Exception:
+            LOGGER.exception("Scheduled repository scan failed")
+            raise
+        state_store.set_job_heartbeat("repo_scan")
 
     def threat_feed_job() -> None:
-        with SessionLocal() as session:
-            orchestrator.collect_threat_intelligence(session)
-            session.commit()
-            state_store.set_job_heartbeat("threat_feed")
+        try:
+            with SessionLocal() as session:
+                orchestrator.collect_threat_intelligence(session)
+                session.commit()
+        except Exception:
+            LOGGER.exception("Scheduled threat-feed collection failed")
+            raise
+        state_store.set_job_heartbeat("threat_feed")
 
     def ai_analysis_job() -> None:
-        with SessionLocal() as session:
-            orchestrator.run_ai_analysis(session)
-            session.commit()
-            state_store.set_job_heartbeat("ai_analysis")
+        try:
+            with SessionLocal() as session:
+                orchestrator.run_ai_analysis(session)
+                session.commit()
+        except Exception:
+            LOGGER.exception("Scheduled AI analysis failed")
+            raise
+        state_store.set_job_heartbeat("ai_analysis")
 
-    scheduler.add_job(repo_scan_job, "interval", hours=settings.scan_schedule_hours, id="repo_scan")
+    scheduler.add_job(
+        repo_scan_job,
+        "interval",
+        hours=settings.scan_schedule_hours,
+        id="repo_scan",
+        next_run_time=_initial_next_run_time("repo_scan", hours=settings.scan_schedule_hours, state_store=state_store),
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
     scheduler.add_job(
         threat_feed_job,
         "interval",
         hours=settings.feed_schedule_hours,
         id="threat_feed",
+        next_run_time=_initial_next_run_time(
+            "threat_feed",
+            hours=settings.feed_schedule_hours,
+            state_store=state_store,
+        ),
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=3600,
     )
-    scheduler.add_job(ai_analysis_job, "interval", days=settings.ai_schedule_days, id="ai_analysis")
+    scheduler.add_job(
+        ai_analysis_job,
+        "interval",
+        days=settings.ai_schedule_days,
+        id="ai_analysis",
+        next_run_time=_initial_next_run_time(
+            "ai_analysis",
+            days=settings.ai_schedule_days,
+            state_store=state_store,
+        ),
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=86400,
+    )
     return scheduler
 
 
@@ -72,3 +115,31 @@ def build_background_scheduler() -> BackgroundScheduler:
     """Create a background scheduler for single-container deployments."""
 
     return register_jobs(BackgroundScheduler(timezone="UTC"))  # type: ignore[return-value]
+
+
+def _initial_next_run_time(
+    job_name: str,
+    *,
+    state_store: RedisStateStore,
+    hours: int = 0,
+    days: int = 0,
+) -> datetime:
+    """
+    Decide whether a recurring job should run immediately after startup.
+
+    Why this exists:
+    In single-container setups the embedded scheduler restarts with the web service. If the next run
+    is always scheduled strictly `interval` hours from startup, a missed day can stay missed until
+    the following interval. We instead run immediately when the last heartbeat is absent or overdue.
+    """
+
+    now = datetime.now(UTC)
+    heartbeat = state_store.get_job_heartbeat(job_name)
+    interval = timedelta(hours=hours, days=days)
+    if heartbeat is None:
+        return now
+    if heartbeat.tzinfo is None:
+        heartbeat = heartbeat.replace(tzinfo=UTC)
+    if heartbeat + interval <= now:
+        return now
+    return heartbeat + interval

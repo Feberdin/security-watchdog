@@ -18,8 +18,10 @@ from sqlalchemy.orm import Session
 from app.models.entities import AIExtractedThreat, Alert, Dependency, Repository
 from app.models.schemas import DependencyRecord, ScanRequest, ScanResponse, VulnerabilityRecord
 from app.repositories.store import (
+    build_alert_fingerprint,
     link_dependency_to_vulnerability,
     record_scan_result,
+    resolve_stale_alerts,
     replace_repository_dependencies,
     upsert_alert,
     upsert_vulnerability,
@@ -32,7 +34,7 @@ from app.scanners.secret_scanner import SecretScanner
 from app.scanners.unraid_scanner import UnraidScanner
 from app.services.ai_extraction import AIExtractionService
 from app.services.alerts import AlertDispatcher
-from app.services.matching import normalize_version, version_matches
+from app.services.matching import is_exact_version, version_matches
 from app.services.risk import calculate_risk_score
 from app.services.sbom import SbomService
 from app.services.threat_intelligence import ThreatIntelligenceService
@@ -127,7 +129,20 @@ class ScanOrchestrator:
         )
 
         alerts_created = 0
-        alerts_created += self._correlate_dependencies(session, repository, orm_dependencies)
+        active_alerts_by_source = {
+            "dependency_vulnerability": set(),
+            "ai_correlation": set(),
+            "secret_scanner": set(),
+            "container_scanner": set(),
+        }
+        dependency_alerts_created, dependency_active_alerts = self._correlate_dependencies(
+            session,
+            repository,
+            orm_dependencies,
+        )
+        alerts_created += dependency_alerts_created
+        for source_type, fingerprints in dependency_active_alerts.items():
+            active_alerts_by_source[source_type].update(fingerprints)
 
         secrets = self.secret_scanner.scan_directory(local_path)
         record_scan_result(
@@ -139,6 +154,15 @@ class ScanOrchestrator:
             details={"sample_findings": [finding.model_dump() for finding in secrets[:10]]},
         )
         for finding in secrets:
+            metadata = finding.model_dump()
+            active_alerts_by_source["secret_scanner"].add(
+                build_alert_fingerprint(
+                    repository_id=repository.id,
+                    title=f"Potential secret in {repository.full_name}",
+                    source_type="secret_scanner",
+                    metadata=metadata,
+                )
+            )
             alert = upsert_alert(
                 session,
                 repository_id=repository.id,
@@ -150,7 +174,7 @@ class ScanOrchestrator:
                 severity="critical",
                 risk_score=95.0,
                 source_type="secret_scanner",
-                metadata=finding.model_dump(),
+                metadata=metadata,
             )
             alerts_created += 1 if alert else 0
 
@@ -166,6 +190,15 @@ class ScanOrchestrator:
                 details={"dockerfile": str(dockerfile_path)},
             )
             for finding in findings:
+                metadata = finding.model_dump()
+                active_alerts_by_source["container_scanner"].add(
+                    build_alert_fingerprint(
+                        repository_id=repository.id,
+                        title=f"Container issue for {repository.full_name}",
+                        source_type="container_scanner",
+                        metadata=metadata,
+                    )
+                )
                 alert = upsert_alert(
                     session,
                     repository_id=repository.id,
@@ -174,10 +207,16 @@ class ScanOrchestrator:
                     severity=finding.severity,
                     risk_score=85.0 if finding.severity in {"critical", "high"} else 55.0,
                     source_type="container_scanner",
-                    metadata=finding.model_dump(),
+                    metadata=metadata,
                 )
                 alerts_created += 1 if alert else 0
 
+        resolve_stale_alerts(
+            session,
+            repository_id=repository.id,
+            source_types=list(active_alerts_by_source),
+            active_fingerprints=self._merge_active_alert_fingerprints(active_alerts_by_source),
+        )
         self.sbom_service.generate(repository, orm_dependencies)
         repository.risk_score = self._calculate_repository_risk(session, repository.id)
         return alerts_created
@@ -202,8 +241,28 @@ class ScanOrchestrator:
             findings_count=len(findings),
             details={"image_ref": image_ref},
         )
-        alerts_created = self._correlate_dependencies(session, repository, orm_dependencies)
+        active_alerts_by_source = {
+            "dependency_vulnerability": set(),
+            "ai_correlation": set(),
+            "unraid_container": set(),
+        }
+        alerts_created, dependency_active_alerts = self._correlate_dependencies(
+            session,
+            repository,
+            orm_dependencies,
+        )
+        for source_type, fingerprints in dependency_active_alerts.items():
+            active_alerts_by_source[source_type].update(fingerprints)
         for finding in findings:
+            metadata = finding.model_dump()
+            active_alerts_by_source["unraid_container"].add(
+                build_alert_fingerprint(
+                    repository_id=repository.id,
+                    title=f"Unraid container vulnerability in {repository.name}",
+                    source_type="unraid_container",
+                    metadata=metadata,
+                )
+            )
             alert = upsert_alert(
                 session,
                 repository_id=repository.id,
@@ -212,9 +271,15 @@ class ScanOrchestrator:
                 severity=finding.severity,
                 risk_score=90.0 if finding.severity == "critical" else 70.0,
                 source_type="unraid_container",
-                metadata=finding.model_dump(),
+                metadata=metadata,
             )
             alerts_created += 1 if alert else 0
+        resolve_stale_alerts(
+            session,
+            repository_id=repository.id,
+            source_types=list(active_alerts_by_source),
+            active_fingerprints=self._merge_active_alert_fingerprints(active_alerts_by_source),
+        )
         repository.risk_score = self._calculate_repository_risk(session, repository.id)
         return alerts_created
 
@@ -247,11 +312,31 @@ class ScanOrchestrator:
             },
         )
 
-        alerts_created = self._correlate_dependencies(session, repository, orm_dependencies)
+        active_alerts_by_source = {
+            "dependency_vulnerability": set(),
+            "ai_correlation": set(),
+            "homeassistant_secret": set(),
+        }
+        alerts_created, dependency_active_alerts = self._correlate_dependencies(
+            session,
+            repository,
+            orm_dependencies,
+        )
+        for source_type, fingerprints in dependency_active_alerts.items():
+            active_alerts_by_source[source_type].update(fingerprints)
         if repository.local_path:
             integration_path = Path(repository.local_path)
             secrets = self.secret_scanner.scan_directory(integration_path)
             for finding in secrets:
+                metadata = finding.model_dump()
+                active_alerts_by_source["homeassistant_secret"].add(
+                    build_alert_fingerprint(
+                        repository_id=repository.id,
+                        title=f"Potential secret in Home Assistant integration {repository.name}",
+                        source_type="homeassistant_secret",
+                        metadata=metadata,
+                    )
+                )
                 alert = upsert_alert(
                     session,
                     repository_id=repository.id,
@@ -263,9 +348,15 @@ class ScanOrchestrator:
                     severity="critical",
                     risk_score=95.0,
                     source_type="homeassistant_secret",
-                    metadata=finding.model_dump(),
+                    metadata=metadata,
                 )
                 alerts_created += 1 if alert else 0
+        resolve_stale_alerts(
+            session,
+            repository_id=repository.id,
+            source_types=list(active_alerts_by_source),
+            active_fingerprints=self._merge_active_alert_fingerprints(active_alerts_by_source),
+        )
         self.sbom_service.generate(repository, orm_dependencies)
         repository.risk_score = self._calculate_repository_risk(session, repository.id)
         return alerts_created
@@ -275,10 +366,14 @@ class ScanOrchestrator:
         session: Session,
         repository: Repository,
         orm_dependencies: list[Dependency],
-    ) -> int:
+    ) -> tuple[int, dict[str, set[str]]]:
         """Match dependencies against known vulnerabilities and AI-derived malicious versions."""
 
         created_alerts = 0
+        active_alerts_by_source = {
+            "dependency_vulnerability": set(),
+            "ai_correlation": set(),
+        }
         for dependency in orm_dependencies:
             dependency_record = DependencyRecord(
                 package_name=dependency.package_name,
@@ -290,11 +385,15 @@ class ScanOrchestrator:
                 metadata=dependency.metadata_json,
             )
             vulnerability_records = self.vulnerability_service.correlate_dependency(dependency_record)
-            created_alerts += self._persist_vulnerability_matches(
+            dependency_alerts_created, vulnerability_fingerprints = self._persist_vulnerability_matches(
                 session, repository, dependency, vulnerability_records
             )
-            created_alerts += self._match_ai_threats(session, repository, dependency)
-        return created_alerts
+            created_alerts += dependency_alerts_created
+            active_alerts_by_source["dependency_vulnerability"].update(vulnerability_fingerprints)
+            ai_alerts_created, ai_fingerprints = self._match_ai_threats(session, repository, dependency)
+            created_alerts += ai_alerts_created
+            active_alerts_by_source["ai_correlation"].update(ai_fingerprints)
+        return created_alerts, active_alerts_by_source
 
     def _persist_vulnerability_matches(
         self,
@@ -302,10 +401,11 @@ class ScanOrchestrator:
         repository: Repository,
         dependency: Dependency,
         vulnerability_records: list[VulnerabilityRecord],
-    ) -> int:
+    ) -> tuple[int, set[str]]:
         """Persist vulnerability matches and open repository-level alerts."""
 
         created_alerts = 0
+        active_fingerprints: set[str] = set()
         for vulnerability_record in vulnerability_records:
             vulnerability = upsert_vulnerability(session, vulnerability_record)
             risk = calculate_risk_score(
@@ -321,6 +421,21 @@ class ScanOrchestrator:
                 risk_score=risk.score,
                 match_reason=f"Matched {dependency.package_name}@{dependency.version} via {vulnerability.source}",
             )
+            metadata = {
+                "dependency": dependency.package_name,
+                "version": dependency.version,
+                "manifest_path": dependency.manifest_path,
+                "vulnerability": vulnerability.source_identifier,
+                "references": vulnerability.reference_urls,
+            }
+            active_fingerprints.add(
+                build_alert_fingerprint(
+                    repository_id=repository.id,
+                    title=f"Vulnerable dependency {dependency.package_name}",
+                    source_type="dependency_vulnerability",
+                    metadata=metadata,
+                )
+            )
             alert = upsert_alert(
                 session,
                 repository_id=repository.id,
@@ -332,21 +447,24 @@ class ScanOrchestrator:
                 severity=risk.severity,
                 risk_score=risk.score,
                 source_type="dependency_vulnerability",
-                metadata={
-                    "dependency": dependency.package_name,
-                    "version": dependency.version,
-                    "manifest_path": dependency.manifest_path,
-                    "vulnerability": vulnerability.source_identifier,
-                    "references": vulnerability.reference_urls,
-                },
+                metadata=metadata,
             )
             created_alerts += 1 if alert else 0
-        return created_alerts
+        return created_alerts, active_fingerprints
 
-    def _match_ai_threats(self, session: Session, repository: Repository, dependency: Dependency) -> int:
+    def _match_ai_threats(
+        self,
+        session: Session,
+        repository: Repository,
+        dependency: Dependency,
+    ) -> tuple[int, set[str]]:
         """Compare dependencies to AI-extracted malicious package versions."""
 
+        if not is_exact_version(dependency.version):
+            return 0, set()
+
         created_alerts = 0
+        active_fingerprints: set[str] = set()
         threats = session.scalars(
             select(AIExtractedThreat).where(
                 AIExtractedThreat.package_name == dependency.package_name,
@@ -354,9 +472,24 @@ class ScanOrchestrator:
             )
         ).all()
         for threat in threats:
-            if not version_matches(normalize_version(dependency.version), threat.affected_versions):
+            if threat.affected_versions and not version_matches(dependency.version, threat.affected_versions):
                 continue
             risk_score = min(max(threat.confidence_score * 100, 50), 95)
+            metadata = {
+                "dependency": dependency.package_name,
+                "version": dependency.version,
+                "affected_versions": threat.affected_versions,
+                "source_url": threat.source_url,
+                "attack_type": threat.attack_type,
+            }
+            active_fingerprints.add(
+                build_alert_fingerprint(
+                    repository_id=repository.id,
+                    title=f"Malicious or compromised dependency {dependency.package_name}",
+                    source_type="ai_correlation",
+                    metadata=metadata,
+                )
+            )
             alert = upsert_alert(
                 session,
                 repository_id=repository.id,
@@ -368,21 +501,20 @@ class ScanOrchestrator:
                 severity="critical" if threat.confidence_score >= 0.8 else "high",
                 risk_score=risk_score,
                 source_type="ai_correlation",
-                metadata={
-                    "dependency": dependency.package_name,
-                    "version": dependency.version,
-                    "affected_versions": threat.affected_versions,
-                    "source_url": threat.source_url,
-                    "attack_type": threat.attack_type,
-                },
+                metadata=metadata,
             )
             created_alerts += 1 if alert else 0
-        return created_alerts
+        return created_alerts, active_fingerprints
 
     def _dispatch_open_alerts(self, session: Session) -> None:
         """Deliver the newest unresolved alerts to external channels."""
 
-        alerts = session.scalars(select(Alert).order_by(desc(Alert.created_at)).limit(50)).all()
+        alerts = session.scalars(
+            select(Alert)
+            .where(Alert.status == "open")
+            .order_by(desc(Alert.updated_at))
+            .limit(50)
+        ).all()
         for alert in alerts:
             repository = session.get(Repository, alert.repository_id) if alert.repository_id else None
             self.alert_dispatcher.dispatch(alert, repository)
@@ -390,5 +522,21 @@ class ScanOrchestrator:
     def _calculate_repository_risk(self, session: Session, repository_id: int) -> float:
         """Set repository risk to the current highest open alert score."""
 
-        alerts = session.scalars(select(Alert).where(Alert.repository_id == repository_id)).all()
+        alerts = session.scalars(
+            select(Alert).where(
+                Alert.repository_id == repository_id,
+                Alert.status != "resolved",
+            )
+        ).all()
         return max((alert.risk_score for alert in alerts), default=0.0)
+
+    def _merge_active_alert_fingerprints(
+        self,
+        fingerprints_by_source: dict[str, set[str]],
+    ) -> set[str]:
+        """Collapse source-keyed fingerprint sets into one repository-wide active fingerprint set."""
+
+        merged: set[str] = set()
+        for fingerprints in fingerprints_by_source.values():
+            merged.update(fingerprints)
+        return merged

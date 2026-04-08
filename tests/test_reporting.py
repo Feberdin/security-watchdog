@@ -235,3 +235,49 @@ def test_build_codex_remediation_prompt_contains_findings() -> None:
     assert "Feberdin/security-watchdog" in prompt
     assert "requests" in prompt
     assert "Previously compromised: yes" in prompt
+
+
+def test_build_system_inventory_surfaces_runtime_findings_from_alerts() -> None:
+    """Container or secret alerts should appear as runtime findings on the system card."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="unraid_docker",
+        owner="unraid",
+        name="watchtower",
+        full_name="unraid/watchtower",
+        local_path="",
+        risk_score=70.0,
+    )
+    session.add(repository)
+    session.flush()
+
+    session.add(
+        Alert(
+            repository_id=repository.id,
+            title="Unraid container vulnerability in watchtower",
+            description="Moby authorization bypass vulnerability",
+            severity="high",
+            risk_score=70.0,
+            fingerprint="unit-test-runtime-finding",
+            status="open",
+            source_type="unraid_container",
+            metadata_json={
+                "vulnerability_id": "CVE-2026-34040",
+                "package_name": "github.com/docker/docker",
+                "installed_version": "v24.0.7+incompatible",
+                "fix_version": "29.3.1",
+                "target": "containrrr/watchtower:latest",
+                "description": "Moby authorization bypass vulnerability",
+            },
+        )
+    )
+    session.commit()
+
+    systems = ReportingService(version_catalog=FakeVersionCatalog()).build_system_inventory(session)
+
+    assert len(systems) == 1
+    runtime_finding = systems[0].runtime_findings[0]
+    assert runtime_finding.vulnerability_id == "CVE-2026-34040"
+    assert runtime_finding.package_name == "github.com/docker/docker"
+    assert runtime_finding.fix_version == "29.3.1"

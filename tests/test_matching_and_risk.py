@@ -7,7 +7,7 @@ Debugging: If alert severity changes unexpectedly, start with these unit tests.
 
 from __future__ import annotations
 
-from app.services.matching import version_matches
+from app.services.matching import is_constraint_version, is_exact_version, version_matches
 from app.services.risk import calculate_risk_score
 
 
@@ -17,6 +17,16 @@ def test_version_matches_specifier_range():
 
 def test_version_does_not_match_different_exact_version():
     assert not version_matches("1.2.5", ["1.2.4"])
+
+
+def test_version_matches_or_expression():
+    assert version_matches("1.2.5", ["<1.0.0 || >=1.2.0 <1.3.0"])
+
+
+def test_exact_version_detection_distinguishes_constraints():
+    assert is_exact_version("==0.28.1")
+    assert not is_exact_version(">=0.28.0,<1.0.0")
+    assert is_constraint_version("^7.1.3")
 
 
 def test_risk_score_prioritizes_kev_and_exploit_signals():

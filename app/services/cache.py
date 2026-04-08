@@ -34,6 +34,23 @@ class RedisStateStore:
         except RedisError as error:
             LOGGER.warning("Redis heartbeat write failed", extra={"error": str(error)})
 
+    def get_job_heartbeat(self, job_name: str) -> datetime | None:
+        """Return the last successful job execution time if Redis is reachable and populated."""
+
+        try:
+            raw_value = self._client.get(f"jobs:{job_name}:heartbeat")
+        except RedisError as error:
+            LOGGER.warning("Redis heartbeat read failed", extra={"error": str(error)})
+            return None
+
+        if not raw_value:
+            return None
+        try:
+            return datetime.fromisoformat(raw_value)
+        except ValueError:
+            LOGGER.warning("Redis heartbeat had invalid timestamp format", extra={"value": raw_value})
+            return None
+
     def seen_recently(self, fingerprint: str, ttl_seconds: int = 3600) -> bool:
         """Return True if a value already exists, otherwise set it for the given TTL."""
 

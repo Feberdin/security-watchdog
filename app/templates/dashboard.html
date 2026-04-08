@@ -84,7 +84,8 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
             <p class="section-copy">
               Jedes System zeigt seine Dependencies, deine Version, die aktuell aufgelöste
               Zielversion, Veröffentlichungsdatum, letzten Prüfzeitpunkt und ein Symbol für bereits
-              kompromittierte Pakete.
+              kompromittierte Pakete. Laufzeit-Findings aus Containern oder Secret-Scans erscheinen
+              zusätzlich in einer eigenen Detailtabelle.
             </p>
           </div>
           <label class="search-field">
@@ -291,6 +292,45 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         `;
       }
 
+      function buildRuntimeFindingRow(finding) {
+        return `
+          <div class="runtime-row">
+            <div>
+              <div class="dependency-title">
+                <span>${escapeHtml(finding.title)}</span>
+              </div>
+              <div class="dependency-subline">
+                ${escapeHtml(finding.source_type)} · ${escapeHtml(finding.vulnerability_id || 'Kein CVE/GHSA')}
+              </div>
+              <div class="dependency-subline">
+                ${escapeHtml(finding.description || 'Keine Zusatzbeschreibung verfügbar.')}
+              </div>
+            </div>
+            <div class="version-cell">
+              <code>${escapeHtml(finding.package_name || 'n/a')}</code>
+              <div class="dependency-subline">
+                Installiert: ${escapeHtml(finding.installed_version || 'n/a')}
+              </div>
+            </div>
+            <div class="version-cell">
+              <code>${escapeHtml(finding.fix_version || 'unbekannt')}</code>
+              <div class="dependency-subline">
+                Ziel: ${escapeHtml(finding.target || 'n/a')}
+              </div>
+              <div class="dependency-subline">
+                Zuletzt gesehen: ${escapeHtml(formatDateTime(finding.last_seen_at))}
+              </div>
+            </div>
+            <div class="risk-cell">
+              <span class="severity-pill severity-${escapeHtml(finding.severity)}">
+                ${escapeHtml(finding.severity)}
+              </span>
+              <span class="risk-score-label">${formatRiskScore(finding.risk_score)}</span>
+            </div>
+          </div>
+        `;
+      }
+
       function buildSystemCard(system, query) {
         const matchingDependencies = query
           ? system.dependencies.filter((dependency) => dependencyMatchesQuery(dependency, query))
@@ -315,6 +355,9 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         const dependencyRows = matchingDependencies.length
           ? matchingDependencies.map(buildDependencyRow).join('')
           : '<p class="empty-state">Keine passenden Dependencies zu diesem Suchbegriff.</p>';
+        const runtimeRows = (system.runtime_findings || []).length
+          ? system.runtime_findings.map(buildRuntimeFindingRow).join('')
+          : '';
 
         const hasFindings = system.vulnerable_dependency_count > 0 || system.open_alert_count > 0;
         const remediationButton = hasFindings
@@ -358,6 +401,10 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
                   <span class="system-stat-label">Offene Alerts</span>
                   <strong>${escapeHtml(system.open_alert_count)}</strong>
                 </div>
+                <div class="system-stat">
+                  <span class="system-stat-label">Laufzeit-Findings</span>
+                  <strong>${escapeHtml((system.runtime_findings || []).length)}</strong>
+                </div>
                 <span class="severity-pill severity-${escapeHtml(severityFromScore(system.risk_score))}">
                   Risk ${formatRiskScore(system.risk_score)}
                 </span>
@@ -385,6 +432,21 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
                 </div>
                 ${dependencyRows}
               </div>
+              ${
+                runtimeRows
+                  ? `
+                      <div class="runtime-table">
+                        <div class="dependency-table-header">
+                          <span>Laufzeit-Finding</span>
+                          <span>Paket</span>
+                          <span>Fix / Ziel</span>
+                          <span>Risiko</span>
+                        </div>
+                        ${runtimeRows}
+                      </div>
+                    `
+                  : ''
+              }
             </div>
           </details>
         `;

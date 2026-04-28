@@ -1,0 +1,18 @@
+# Purpose: Optional Compose override for local source builds during development or pre-release tests.
+# Input/Output: Compose reads this file on top of `docker-compose.yml` and swaps the published GHCR
+# image for a build from the checked-out repository.
+# Important invariants: Production and Unraid updates should keep using the image-based base file so
+# upgrades stay simple and do not depend on a Git checkout or a local build toolchain.
+# Debugging: If your local code changes do not appear in containers, verify that you passed both
+# Compose files with `-f docker-compose.yml -f docker-compose.build.yml`.
+
+services:
+  watchdog:
+    build:
+      context: .
+    image: security-watchdog:local
+
+  worker:
+    build:
+      context: .
+    image: security-watchdog:local

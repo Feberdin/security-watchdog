@@ -43,6 +43,15 @@ class FakeVersionCatalog:
         )
 
 
+class ExplodingVersionCatalog:
+    """Fail loudly if debug export accidentally performs latest-version lookups."""
+
+    def resolve_latest_version(self, ecosystem: str, package_name: str) -> LatestVersionRecord:
+        raise AssertionError(
+            f"Debug export should not resolve latest versions, but got {ecosystem}:{package_name}"
+        )
+
+
 def build_test_session() -> Session:
     """Create a throwaway in-memory database session for reporting tests."""
 
@@ -219,6 +228,63 @@ def test_build_platform_debug_export_handles_naive_scan_timestamps() -> None:
     scheduler = export_payload["scheduler"]["repo_scan"]
     assert scheduler["last_status"] == "success"
     assert scheduler["last_completed_at"] == "2026-04-08T10:05:00+00:00"
+
+
+def test_build_platform_debug_export_skips_latest_version_lookups_for_speed() -> None:
+    """The large debug export should stay offline-friendly and fast even with many dependencies."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="security-watchdog",
+        full_name="Feberdin/security-watchdog",
+        local_path="/tmp/security-watchdog",
+        risk_score=82.5,
+    )
+    session.add(repository)
+    session.flush()
+
+    dependency = Dependency(
+        repository_id=repository.id,
+        manifest_path="requirements.txt",
+        package_name="requests",
+        version="2.25.0",
+        ecosystem="pypi",
+    )
+    session.add(dependency)
+    session.flush()
+
+    vulnerability = Vulnerability(
+        source="osv",
+        source_identifier="CVE-2026-0001",
+        package_name="requests",
+        ecosystem="pypi",
+        summary="Example vulnerability",
+        severity="high",
+        malicious_package=True,
+    )
+    session.add(vulnerability)
+    session.flush()
+
+    session.add(
+        DependencyVulnerability(
+            dependency_id=dependency.id,
+            vulnerability_id=vulnerability.id,
+            risk_score=82.5,
+            match_reason="Unit test match",
+        )
+    )
+    session.commit()
+
+    export_payload = ReportingService(
+        version_catalog=ExplodingVersionCatalog()
+    ).build_platform_debug_export(session)
+
+    flagged_dependency = export_payload["suspicious_systems"][0]["flagged_dependencies"][0]
+    assert flagged_dependency["latest_version"] is None
+    assert flagged_dependency["latest_version_status"] == "skipped"
+    assert flagged_dependency["latest_version_source"] == "skipped_debug_export"
 
 
 def test_build_codex_remediation_prompt_contains_findings() -> None:

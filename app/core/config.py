@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     github_alert_repository: str = ""
     github_request_timeout_seconds: int = 30
     github_include_private: bool = True
+    secret_history_scan_enabled: bool = True
+    secret_history_max_commits_per_repo: int = 0
 
     repo_storage_path: Path = Path("./data/repos")
     sbom_output_path: Path = Path("./data/sbom")
@@ -57,6 +59,7 @@ class Settings(BaseSettings):
     scan_schedule_hours: int = 24
     feed_schedule_hours: int = 6
     ai_schedule_days: int = 30
+    manual_scan_poll_seconds: int = 15
 
     osv_api_url: str = "https://api.osv.dev/v1/query"
     nvd_api_url: str = "https://services.nvd.nist.gov/rest/json/cves/2.0"

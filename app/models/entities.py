@@ -41,6 +41,15 @@ class AlertStatus(StrEnum):
     RESOLVED = "resolved"
 
 
+class ManualScanJobStatus(StrEnum):
+    """Lifecycle states for manually triggered full scans."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 class Repository(Base):
     """Tracked GitHub repository metadata and local checkout status."""
 
@@ -231,3 +240,26 @@ class Alert(Base):
     )
 
     repository: Mapped[Repository | None] = relationship(back_populates="alerts")
+
+
+class ManualScanJob(Base):
+    """Persistent queue entry that tracks one manual scan from request to completion."""
+
+    __tablename__ = "manual_scan_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    repository_full_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    include_archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    force: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default=ManualScanJobStatus.QUEUED.value,
+        index=True,
+    )
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    repository_count: Mapped[int] = mapped_column(Integer, default=0)
+    alert_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_system_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

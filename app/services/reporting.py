@@ -112,17 +112,25 @@ class ReportingService:
             top_vulnerabilities=top_vulnerabilities,
         )
 
-    def build_system_inventory(self, session: Session) -> list[SystemInventoryOut]:
+    def build_system_inventory(
+        self,
+        session: Session,
+        *,
+        resolve_latest_versions: bool = True,
+    ) -> list[SystemInventoryOut]:
         """Return all tracked systems with expandable dependency detail for the dashboard."""
 
         repositories = self._load_repositories_with_inventory(session)
-        return [self._build_system_entry(repository) for repository in repositories]
+        return [
+            self._build_system_entry(repository, resolve_latest_versions=resolve_latest_versions)
+            for repository in repositories
+        ]
 
     def build_platform_debug_export(self, session: Session) -> dict[str, Any]:
         """Return a compact structured export that operators can paste into Codex for diagnosis."""
 
         report = self.build_report(session)
-        systems = self.build_system_inventory(session)
+        systems = self.build_system_inventory(session, resolve_latest_versions=False)
         suspicious_systems = [
             self._build_debug_system_entry(system)
             for system in systems
@@ -277,6 +285,8 @@ class ReportingService:
         self,
         dependency: Dependency,
         compromised_signals: dict[tuple[str, str], str],
+        *,
+        resolve_latest_version: bool = True,
     ) -> DependencyInsightOut:
         """Transform one ORM dependency into a dashboard-friendly row."""
 
@@ -285,9 +295,18 @@ class ReportingService:
             for link in dependency.vulnerability_links
             if link.vulnerability is not None
         ]
-        latest_version = self.version_catalog.resolve_latest_version(
-            dependency.ecosystem,
-            dependency.package_name,
+        latest_version = (
+            self.version_catalog.resolve_latest_version(
+                dependency.ecosystem,
+                dependency.package_name,
+            )
+            if resolve_latest_version
+            else LatestVersionRecord(
+                latest_version=None,
+                source="skipped_debug_export",
+                checked_at=datetime.now(UTC),
+                note="Skipped latest-version lookup to keep the debug export fast.",
+            )
         )
         risk_severity = self._highest_vulnerability_severity(vulnerabilities)
         risk_score = self._dependency_risk_score(dependency)
@@ -304,9 +323,10 @@ class ReportingService:
             detected_version_checked_at=dependency.updated_at,
             latest_version=latest_version.latest_version,
             latest_version_published_at=latest_version.released_at,
-            latest_version_status=self._classify_version_status(
-                dependency.version,
-                latest_version,
+            latest_version_status=(
+                self._classify_version_status(dependency.version, latest_version)
+                if resolve_latest_version
+                else "skipped"
             ),
             latest_version_source=latest_version.source,
             was_compromised=bool(compromised_signal),
@@ -316,12 +336,21 @@ class ReportingService:
             vulnerability_ids=[vulnerability.source_identifier for vulnerability in vulnerabilities],
         )
 
-    def _build_system_entry(self, repository: Repository) -> SystemInventoryOut:
+    def _build_system_entry(
+        self,
+        repository: Repository,
+        *,
+        resolve_latest_versions: bool = True,
+    ) -> SystemInventoryOut:
         """Build one system inventory entry from a repository-like ORM object."""
 
         compromised_signals = self._build_compromised_signal_index(repository.alerts)
         dependencies = [
-            self._build_dependency_insight(dependency, compromised_signals)
+            self._build_dependency_insight(
+                dependency,
+                compromised_signals,
+                resolve_latest_version=resolve_latest_versions,
+            )
             for dependency in sorted(
                 repository.dependencies,
                 key=lambda item: (

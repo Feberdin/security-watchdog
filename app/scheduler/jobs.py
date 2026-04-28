@@ -19,6 +19,7 @@ from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models.schemas import ScanRequest
 from app.services.cache import RedisStateStore
+from app.services.manual_scan_jobs import process_manual_scan_job
 from app.services.orchestrator import ScanOrchestrator
 
 LOGGER = logging.getLogger(__name__)
@@ -64,6 +65,18 @@ def register_jobs(scheduler: BaseScheduler) -> BaseScheduler:
             raise
         state_store.set_job_heartbeat("ai_analysis")
 
+    def manual_scan_queue_job() -> None:
+        try:
+            queued_job = process_manual_scan_job()
+            if queued_job is not None:
+                LOGGER.info(
+                    "Processed queued manual scan job",
+                    extra={"job_id": queued_job.id, "status": queued_job.status},
+                )
+        except Exception:
+            LOGGER.exception("Queued manual scan processing failed")
+            raise
+
     scheduler.add_job(
         repo_scan_job,
         "interval",
@@ -101,6 +114,16 @@ def register_jobs(scheduler: BaseScheduler) -> BaseScheduler:
         coalesce=True,
         max_instances=1,
         misfire_grace_time=86400,
+    )
+    scheduler.add_job(
+        manual_scan_queue_job,
+        "interval",
+        seconds=settings.manual_scan_poll_seconds,
+        id="manual_scan_queue",
+        next_run_time=datetime.now(UTC),
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=max(settings.manual_scan_poll_seconds * 2, 30),
     )
     return scheduler
 

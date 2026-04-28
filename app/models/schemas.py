@@ -78,6 +78,8 @@ class SecretFinding(BaseModel):
     detector: str
     excerpt: str
     entropy: float | None = None
+    content_source: str = "working_tree"
+    commit_sha: str | None = None
 
 
 class ContainerFinding(BaseModel):
@@ -210,6 +212,34 @@ class ScanResponse(BaseModel):
     message: str
     repository_count: int
     alert_count: int
+    failed_system_count: int = 0
+
+
+class ScanAcceptedResponse(BaseModel):
+    """Acknowledgement returned when a manual scan was queued successfully."""
+
+    message: str
+    job_id: int
+    status: str
+    status_url: str
+
+
+class ManualScanJobOut(BaseModel):
+    """API-friendly view of one manual scan job and its current lifecycle state."""
+
+    id: int
+    status: str
+    message: str
+    repository_full_name: str | None = None
+    include_archived: bool
+    force: bool
+    requested_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    repository_count: int = 0
+    alert_count: int = 0
+    failed_system_count: int = 0
+    error_message: str | None = None
 
 
 class ReportOut(BaseModel):

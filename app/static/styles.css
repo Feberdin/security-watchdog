@@ -274,6 +274,46 @@ p {
   box-shadow: var(--shadow-soft), var(--glow-pink);
 }
 
+.scan-status-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(280px, 1fr);
+  gap: 18px 24px;
+  align-items: start;
+  padding: 22px;
+  margin-bottom: 20px;
+}
+
+.scan-status-copy {
+  min-width: 0;
+}
+
+.scan-status-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.scan-status-pill-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.scan-scope-label {
+  color: var(--color-cyber-cyan);
+  font-size: 0.88rem;
+  letter-spacing: 0.04em;
+  word-break: break-word;
+}
+
+.scan-status-details {
+  color: var(--text-secondary);
+  line-height: 1.6;
+  word-break: break-word;
+}
+
 .panel {
   padding: 22px;
 }
@@ -669,11 +709,27 @@ p {
   min-height: 1.2rem;
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 @media (max-width: 1120px) {
   .topbar,
   .panel-header {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .scan-status-card {
+    grid-template-columns: 1fr;
   }
 
   .system-summary {

@@ -4,6 +4,8 @@
 # you explicitly want Unraid container discovery inside this stack.
 # Debugging: If scans fail inside Docker, check service health and volume mounts defined here.
 
+x-watchdog-image: &watchdog-image ${SECURITY_WATCHDOG_IMAGE:-ghcr.io/feberdin/security-watchdog:latest}
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -33,8 +35,7 @@ services:
       retries: 5
 
   watchdog:
-    build:
-      context: .
+    image: *watchdog-image
     restart: unless-stopped
     env_file:
       - .env
@@ -58,8 +59,7 @@ services:
       retries: 5
 
   worker:
-    build:
-      context: .
+    image: *watchdog-image
     restart: unless-stopped
     env_file:
       - .env

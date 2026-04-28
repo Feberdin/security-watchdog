@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, desc, func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.utils import sha256_text, stable_json_dumps
@@ -20,12 +20,14 @@ from app.models.entities import (
     AlertStatus,
     Dependency,
     DependencyVulnerability,
+    ManualScanJob,
+    ManualScanJobStatus,
     Repository,
     ScanResult,
     ThreatArticle,
     Vulnerability,
 )
-from app.models.schemas import DependencyRecord, ThreatArticleRecord, VulnerabilityRecord
+from app.models.schemas import DependencyRecord, ScanRequest, ScanResponse, ThreatArticleRecord, VulnerabilityRecord
 
 LOGGER = logging.getLogger(__name__)
 
@@ -85,6 +87,130 @@ def upsert_repository(
         repository.metadata_json = metadata or repository.metadata_json
     session.flush()
     return repository
+
+
+def create_manual_scan_job(session: Session, request: ScanRequest) -> ManualScanJob:
+    """Persist one queued manual scan request for later worker or background execution."""
+
+    job = ManualScanJob(
+        repository_full_name=request.repository_full_name,
+        include_archived=request.include_archived,
+        force=request.force,
+        status=ManualScanJobStatus.QUEUED.value,
+    )
+    session.add(job)
+    session.flush()
+    return job
+
+
+def get_manual_scan_job(session: Session, job_id: int) -> ManualScanJob | None:
+    """Return one persisted manual scan job by primary key."""
+
+    return session.get(ManualScanJob, job_id)
+
+
+def get_latest_manual_scan_job(session: Session) -> ManualScanJob | None:
+    """Return the newest manual scan job so the dashboard can restore visible scan state."""
+
+    return session.scalar(
+        select(ManualScanJob).order_by(desc(ManualScanJob.requested_at), desc(ManualScanJob.id))
+    )
+
+
+def get_active_manual_scan_job(session: Session) -> ManualScanJob | None:
+    """Return the current queued or running manual scan, if any."""
+
+    return session.scalar(
+        select(ManualScanJob)
+        .where(
+            ManualScanJob.status.in_(
+                [ManualScanJobStatus.QUEUED.value, ManualScanJobStatus.RUNNING.value]
+            )
+        )
+        .order_by(ManualScanJob.requested_at.asc(), ManualScanJob.id.asc())
+    )
+
+
+def claim_manual_scan_job(session: Session, *, job_id: int | None = None) -> ManualScanJob | None:
+    """
+    Atomically transition one queued job into the running state.
+
+    Why this exists:
+    Both the API process and the dedicated worker may attempt to pick up the same queued scan. The
+    conditional update below ensures only one process wins the claim even if both notice the job at
+    roughly the same time.
+    """
+
+    if job_id is None:
+        job_id = session.scalar(
+            select(ManualScanJob.id)
+            .where(ManualScanJob.status == ManualScanJobStatus.QUEUED.value)
+            .order_by(ManualScanJob.requested_at.asc(), ManualScanJob.id.asc())
+            .limit(1)
+        )
+    if job_id is None:
+        return None
+
+    claim_result = session.execute(
+        update(ManualScanJob)
+        .where(
+            ManualScanJob.id == job_id,
+            ManualScanJob.status == ManualScanJobStatus.QUEUED.value,
+        )
+        .values(
+            status=ManualScanJobStatus.RUNNING.value,
+            started_at=utcnow(),
+            completed_at=None,
+            error_message=None,
+        )
+    )
+    if claim_result.rowcount != 1:
+        session.rollback()
+        return None
+
+    session.flush()
+    return get_manual_scan_job(session, job_id)
+
+
+def mark_manual_scan_job_succeeded(
+    session: Session,
+    *,
+    job_id: int,
+    response: ScanResponse,
+) -> ManualScanJob | None:
+    """Store the final counts for a successfully completed manual scan."""
+
+    job = get_manual_scan_job(session, job_id)
+    if job is None:
+        return None
+
+    job.status = ManualScanJobStatus.SUCCEEDED.value
+    job.completed_at = utcnow()
+    job.repository_count = response.repository_count
+    job.alert_count = response.alert_count
+    job.failed_system_count = response.failed_system_count
+    job.error_message = None
+    session.flush()
+    return job
+
+
+def mark_manual_scan_job_failed(
+    session: Session,
+    *,
+    job_id: int,
+    error_message: str,
+) -> ManualScanJob | None:
+    """Persist the final failure state so operators can see what broke and when."""
+
+    job = get_manual_scan_job(session, job_id)
+    if job is None:
+        return None
+
+    job.status = ManualScanJobStatus.FAILED.value
+    job.completed_at = utcnow()
+    job.error_message = error_message
+    session.flush()
+    return job
 
 
 def replace_repository_dependencies(
@@ -224,6 +350,20 @@ def store_threat_article(session: Session, article: ThreatArticleRecord) -> Thre
             }
         )
     )
+    existing = session.scalar(
+        select(ThreatArticle).where(ThreatArticle.source_url == article.source_url)
+    )
+    if existing:
+        existing.source_type = article.source_type
+        existing.title = article.title
+        existing.published_at = article.published_at
+        existing.content_hash = content_hash
+        existing.raw_content = article.raw_content
+        existing.normalized_text = article.normalized_text
+        existing.tags = article.tags
+        session.flush()
+        return existing
+
     existing = session.scalar(
         select(ThreatArticle).where(ThreatArticle.content_hash == content_hash)
     )

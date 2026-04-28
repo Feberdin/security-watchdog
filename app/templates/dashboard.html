@@ -1,11 +1,12 @@
 <!--
 Purpose: Main synthwave dashboard for systems, dependencies, debugging exports, and remediation.
 Input/Output: Loaded by the browser and hydrated from `/reports`, `/systems`, `/diagnostics/export`,
-and per-system Codex helper endpoints.
+`/scan-jobs/latest`, and per-system Codex helper endpoints.
 Important invariants: Operators should be able to scan the whole platform quickly, then drill into
 one system and export structured data or a remediation prompt without leaving the page.
 Debugging: If one of the Codex helper buttons appears broken, inspect the browser requests to
-`/diagnostics/export`, `/systems/{id}/debug-export`, and `/systems/{id}/codex-remediation`.
+`/scan`, `/scan-jobs/latest`, `/diagnostics/export`, `/systems/{id}/debug-export`, and
+`/systems/{id}/codex-remediation`.
 -->
 <!DOCTYPE html>
 <html lang="de">
@@ -74,6 +75,28 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
           <span class="metric-label">Kritische Alerts</span>
           <strong id="metric-critical-alerts">-</strong>
         </article>
+      </section>
+
+      <section class="scan-status-card synth-card" aria-labelledby="scan-status-title">
+        <div class="scan-status-copy">
+          <p class="eyebrow">Scan-Status</p>
+          <h2 id="scan-status-title">Manueller Vollscan</h2>
+          <p id="scan-status-message" class="section-copy">
+            Noch kein manueller Vollscan registriert. Starte den ersten Lauf, um Warteschlange,
+            Fortschritt und Ergebnis sichtbar zu machen.
+          </p>
+        </div>
+        <div class="scan-status-meta">
+          <div class="scan-status-pill-row">
+            <span id="scan-status-pill" class="severity-pill severity-low">bereit</span>
+            <span id="scan-status-scope" class="scan-scope-label">Gesamte Plattform</span>
+          </div>
+          <p id="scan-status-details" class="scan-status-details">
+            Nach dem Start erscheint hier, wann der Lauf angefragt, gestartet und abgeschlossen
+            wurde.
+          </p>
+        </div>
+        <div id="scan-status-live" class="visually-hidden" aria-live="polite"></div>
       </section>
 
       <section class="panel synth-card">
@@ -151,6 +174,8 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
 
     <script>
       let allSystems = [];
+      let scanStatusPollHandle = null;
+      let dashboardRefreshAfterJobId = null;
 
       async function fetchJson(path, options) {
         const response = await fetch(path, options);
@@ -214,6 +239,147 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
           return;
         }
         target.innerHTML = rows.map(renderer).join('');
+      }
+
+      function isActiveScanJob(job) {
+        return Boolean(job && ['queued', 'running'].includes(job.status));
+      }
+
+      function isTerminalScanJob(job) {
+        return Boolean(job && ['succeeded', 'failed'].includes(job.status));
+      }
+
+      function describeScanScope(job) {
+        if (!job || !job.repository_full_name) {
+          return 'Gesamte Plattform';
+        }
+        return job.repository_full_name;
+      }
+
+      function scanStatusSeverity(job) {
+        if (!job) {
+          return 'low';
+        }
+        if (job.status === 'failed') {
+          return 'critical';
+        }
+        if (job.status === 'running' || job.status === 'queued') {
+          return 'medium';
+        }
+        if (Number(job.failed_system_count || 0) > 0) {
+          return 'high';
+        }
+        return 'low';
+      }
+
+      function scanStatusLabel(job) {
+        if (!job) {
+          return 'bereit';
+        }
+        if (job.status === 'queued') {
+          return 'wartet';
+        }
+        if (job.status === 'running') {
+          return 'läuft';
+        }
+        if (job.status === 'failed') {
+          return 'fehler';
+        }
+        if (Number(job.failed_system_count || 0) > 0) {
+          return 'warnungen';
+        }
+        return 'fertig';
+      }
+
+      function buildScanStatusDetails(job) {
+        if (!job) {
+          return 'Nach dem Start erscheint hier, wann der Lauf angefragt, gestartet und abgeschlossen wurde.';
+        }
+
+        const details = [
+          `Angefragt: ${formatDateTime(job.requested_at)}`
+        ];
+
+        if (job.started_at) {
+          details.push(`Gestartet: ${formatDateTime(job.started_at)}`);
+        }
+        if (job.completed_at) {
+          details.push(`Abgeschlossen: ${formatDateTime(job.completed_at)}`);
+        }
+        if (job.status === 'succeeded') {
+          details.push(
+            `Systeme: ${job.repository_count} · Alerts: ${job.alert_count} · Fehlgeschlagen: ${job.failed_system_count}`
+          );
+        }
+        if (job.status === 'failed' && job.error_message) {
+          details.push(`Fehler: ${job.error_message}`);
+        }
+        return details.join(' | ');
+      }
+
+      function renderScanStatus(job) {
+        const pill = document.getElementById('scan-status-pill');
+        const scope = document.getElementById('scan-status-scope');
+        const message = document.getElementById('scan-status-message');
+        const details = document.getElementById('scan-status-details');
+        const live = document.getElementById('scan-status-live');
+        const button = document.getElementById('scan-button');
+
+        pill.className = `severity-pill severity-${scanStatusSeverity(job)}`;
+        pill.textContent = scanStatusLabel(job);
+        scope.textContent = describeScanScope(job);
+        message.textContent = job
+          ? job.message
+          : 'Noch kein manueller Vollscan registriert. Starte den ersten Lauf, um Warteschlange, Fortschritt und Ergebnis sichtbar zu machen.';
+        details.textContent = buildScanStatusDetails(job);
+        live.textContent = message.textContent;
+
+        if (job && job.status === 'queued') {
+          button.disabled = true;
+          button.textContent = 'Scan in Warteschlange...';
+        } else if (job && job.status === 'running') {
+          button.disabled = true;
+          button.textContent = 'Scan läuft...';
+        } else {
+          button.disabled = false;
+          button.textContent = 'Vollscan starten';
+        }
+      }
+
+      function stopScanStatusPolling() {
+        if (scanStatusPollHandle) {
+          clearTimeout(scanStatusPollHandle);
+          scanStatusPollHandle = null;
+        }
+      }
+
+      function scheduleScanStatusPolling(delayMs = 4000) {
+        stopScanStatusPolling();
+        scanStatusPollHandle = setTimeout(() => {
+          refreshScanStatus({ refreshDashboardOnCompletion: true }).catch((error) => console.error(error));
+        }, delayMs);
+      }
+
+      async function refreshScanStatus({ refreshDashboardOnCompletion = false } = {}) {
+        const job = await fetchJson('/scan-jobs/latest');
+        renderScanStatus(job);
+
+        if (isActiveScanJob(job)) {
+          scheduleScanStatusPolling(job.status === 'queued' ? 2500 : 4000);
+          return;
+        }
+
+        stopScanStatusPolling();
+
+        if (
+          refreshDashboardOnCompletion &&
+          job &&
+          isTerminalScanJob(job) &&
+          dashboardRefreshAfterJobId === job.id
+        ) {
+          dashboardRefreshAfterJobId = null;
+          await loadDashboard();
+        }
       }
 
       function dependencyMatchesQuery(dependency, query) {
@@ -496,6 +662,14 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         showModal(title, message);
       }
 
+      function fallbackCopyModalOutput() {
+        const output = document.getElementById('modal-output');
+        output.focus();
+        output.select();
+        output.setSelectionRange(0, output.value.length);
+        return document.execCommand && document.execCommand('copy');
+      }
+
       async function copyModalOutput() {
         const output = document.getElementById('modal-output').value;
         const feedback = document.getElementById('copy-feedback');
@@ -503,8 +677,10 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
           await navigator.clipboard.writeText(output);
           feedback.textContent = 'In Zwischenablage kopiert.';
         } catch (error) {
-          document.getElementById('modal-output').select();
-          feedback.textContent = 'Zwischenablage gescheitert, Text ist markiert.';
+          const copied = fallbackCopyModalOutput();
+          feedback.textContent = copied
+            ? 'In Zwischenablage kopiert.'
+            : 'Zwischenablage gescheitert, Text ist markiert.';
         }
       }
 
@@ -592,19 +768,19 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
       async function triggerScan() {
         const button = document.getElementById('scan-button');
         button.disabled = true;
-        button.textContent = 'Scan läuft...';
+        button.textContent = 'Scan wird angefragt...';
         try {
-          await fetchJson('/scan', {
+          const payload = await fetchJson('/scan', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ include_archived: false, force: true })
           });
-          await loadDashboard();
+          dashboardRefreshAfterJobId = payload.job_id;
+          await refreshScanStatus({ refreshDashboardOnCompletion: true });
         } catch (error) {
-          showRequestError('Vollscan fehlgeschlagen', error);
-        } finally {
           button.disabled = false;
           button.textContent = 'Vollscan starten';
+          showRequestError('Vollscan fehlgeschlagen', error);
         }
       }
 
@@ -641,7 +817,10 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         }
       });
 
-      loadDashboard().catch((error) => console.error(error));
+      Promise.all([
+        loadDashboard(),
+        refreshScanStatus()
+      ]).catch((error) => console.error(error));
       setInterval(() => loadDashboard().catch((error) => console.error(error)), 30000);
     </script>
   </body>

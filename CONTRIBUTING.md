@@ -38,5 +38,7 @@ python3.12 -m venv .venv
 
 - `GET /health` should return `{"status": "ok"}`.
 - `GET /reports` should load without server errors.
-- A manual `POST /scan` should create `scan_results` rows and refresh dashboard data.
+- A manual `POST /scan` should return `202 Accepted`, create a `manual_scan_jobs` row, and
+  eventually populate fresh `scan_results`.
 - If you change Docker or Home Assistant integration behavior, validate mounted-path assumptions in `deployment.md`.
+- If you need to validate unpublished Docker changes, use `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build` so production-style Compose remains image-based and stable.

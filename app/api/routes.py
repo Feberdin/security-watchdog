@@ -8,9 +8,10 @@ Debugging: If an endpoint behaves differently from the worker job, compare the s
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
@@ -19,16 +20,23 @@ from app.models.entities import AIExtractedThreat, Alert, Dependency, Repository
 from app.models.schemas import (
     AlertOut,
     CodexPromptOut,
+    ManualScanJobOut,
     ReportOut,
     RepositoryOut,
+    ScanAcceptedResponse,
     ScanRequest,
-    ScanResponse,
     SystemInventoryOut,
 )
-from app.services.orchestrator import ScanOrchestrator
+from app.services.manual_scan_jobs import (
+    enqueue_manual_scan,
+    get_latest_manual_scan_job_out,
+    get_manual_scan_job_out,
+    process_manual_scan_job,
+)
 from app.services.reporting import ReportingService
 
 router = APIRouter()
+LOGGER = logging.getLogger(__name__)
 
 
 @router.get("/health")
@@ -38,17 +46,57 @@ def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.post("/scan", response_model=ScanResponse)
+@router.post("/scan", response_model=ScanAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)
 def trigger_scan(
-    request: ScanRequest,
+    scan_request: ScanRequest,
+    http_request: Request,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_db_session),
-) -> ScanResponse:
-    """Run a manual full scan across GitHub, Unraid, and Home Assistant assets."""
+) -> ScanAcceptedResponse:
+    """Queue a manual full scan without forcing the caller to wait for completion."""
 
-    orchestrator = ScanOrchestrator()
-    response = orchestrator.run_manual_scan(session, request)
-    session.commit()
-    return response
+    try:
+        scan_job, created_new_job = enqueue_manual_scan(session, scan_request)
+        session.commit()
+        if created_new_job:
+            background_tasks.add_task(process_manual_scan_job, scan_job.id)
+            message = "Manual scan accepted and queued for background processing."
+        else:
+            message = "A manual scan is already queued or running; reusing the active job."
+        return ScanAcceptedResponse(
+            message=message,
+            job_id=scan_job.id,
+            status=scan_job.status,
+            status_url=str(http_request.url_for("get_scan_job", job_id=scan_job.id)),
+        )
+    except Exception as error:  # noqa: BLE001
+        session.rollback()
+        LOGGER.exception(
+            "Manual scan request failed",
+            extra={
+                "repository_full_name": scan_request.repository_full_name,
+                "include_archived": scan_request.include_archived,
+                "force": scan_request.force,
+            },
+        )
+        raise HTTPException(status_code=500, detail=f"Manual scan enqueue failed: {error}") from error
+
+
+@router.get("/scan-jobs/latest", response_model=ManualScanJobOut | None)
+def get_latest_scan_job(session: Session = Depends(get_db_session)) -> ManualScanJobOut | None:
+    """Return the newest manual scan job so the dashboard can restore visible progress state."""
+
+    return get_latest_manual_scan_job_out(session)
+
+
+@router.get("/scan-jobs/{job_id}", response_model=ManualScanJobOut)
+def get_scan_job(job_id: int, session: Session = Depends(get_db_session)) -> ManualScanJobOut:
+    """Return one manual scan job with counts, timestamps, and failure details."""
+
+    job = get_manual_scan_job_out(session, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Manual scan job {job_id} was not found.")
+    return job
 
 
 @router.get("/reports", response_model=ReportOut)

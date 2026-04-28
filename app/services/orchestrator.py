@@ -62,41 +62,100 @@ class ScanOrchestrator:
     def run_manual_scan(self, session: Session, request: ScanRequest) -> ScanResponse:
         """Run the complete asset scan workflow immediately."""
 
-        repositories = self.repository_scanner.sync_repositories(
+        repositories = self._run_inventory_stage(
             session,
-            repository_full_name=request.repository_full_name,
-            include_archived=request.include_archived,
+            scanner_name="repository_inventory",
+            details={
+                "repository_full_name": request.repository_full_name or "",
+                "include_archived": request.include_archived,
+            },
+            loader=lambda: self.repository_scanner.sync_repositories(
+                session,
+                repository_full_name=request.repository_full_name,
+                include_archived=request.include_archived,
+            ),
         )
-        unraid_assets = self.unraid_scanner.sync_assets(session)
-        homeassistant_assets = self.homeassistant_scanner.sync_assets(session)
-        session.commit()
+        unraid_assets = self._run_inventory_stage(
+            session,
+            scanner_name="unraid_inventory",
+            details={"source_type": "unraid_docker"},
+            loader=lambda: self.unraid_scanner.sync_assets(session),
+        )
+        homeassistant_assets = self._run_inventory_stage(
+            session,
+            scanner_name="homeassistant_inventory",
+            details={"source_type": "homeassistant"},
+            loader=lambda: self.homeassistant_scanner.sync_assets(session),
+        )
 
         processed_count = 0
         created_alerts = 0
+        failed_system_count = 0
 
         for repository in repositories:
-            created_alerts += self._scan_repository_asset(session, repository)
+            alerts_created, failed = self._run_guarded_asset_scan(
+                session,
+                repository=repository,
+                scanner_name="repository_asset_scan",
+                details={
+                    "full_name": repository.full_name,
+                    "source_type": repository.source_type,
+                },
+                scan_callable=lambda repository=repository: self._scan_repository_asset(session, repository),
+            )
+            created_alerts += alerts_created
             processed_count += 1
+            failed_system_count += failed
 
         for asset in unraid_assets:
-            created_alerts += self._scan_unraid_asset(session, asset["repository"], asset["image_ref"])
+            repository = asset["repository"]
+            alerts_created, failed = self._run_guarded_asset_scan(
+                session,
+                repository=repository,
+                scanner_name="unraid_asset_scan",
+                details={
+                    "full_name": repository.full_name,
+                    "source_type": repository.source_type,
+                    "image_ref": asset["image_ref"],
+                },
+                scan_callable=lambda asset=asset: self._scan_unraid_asset(
+                    session,
+                    asset["repository"],
+                    asset["image_ref"],
+                ),
+            )
+            created_alerts += alerts_created
             processed_count += 1
+            failed_system_count += failed
 
         for asset in homeassistant_assets:
-            created_alerts += self._scan_homeassistant_asset(
+            repository = asset["repository"]
+            alerts_created, failed = self._run_guarded_asset_scan(
                 session,
-                asset["repository"],
-                asset["manifest_path"],
+                repository=repository,
+                scanner_name="homeassistant_asset_scan",
+                details={
+                    "full_name": repository.full_name,
+                    "source_type": repository.source_type,
+                    "manifest_path": str(asset["manifest_path"] or ""),
+                },
+                scan_callable=lambda asset=asset: self._scan_homeassistant_asset(
+                    session,
+                    asset["repository"],
+                    asset["manifest_path"],
+                ),
             )
+            created_alerts += alerts_created
             processed_count += 1
+            failed_system_count += failed
 
-        session.commit()
         self._dispatch_open_alerts(session)
         session.commit()
         return ScanResponse(
-            message="Scan completed",
+            message="Scan completed with warnings" if failed_system_count else "Scan completed",
             repository_count=processed_count,
             alert_count=created_alerts,
+            failed_system_count=failed_system_count,
         )
 
     def collect_threat_intelligence(self, session: Session) -> int:
@@ -144,7 +203,11 @@ class ScanOrchestrator:
         for source_type, fingerprints in dependency_active_alerts.items():
             active_alerts_by_source[source_type].update(fingerprints)
 
-        secrets = self.secret_scanner.scan_directory(local_path)
+        include_git_history = self._should_scan_repository_git_history(repository)
+        secrets = self.secret_scanner.scan_directory(
+            local_path,
+            include_git_history=include_git_history,
+        )
         record_scan_result(
             session,
             repository_id=repository.id,
@@ -167,9 +230,9 @@ class ScanOrchestrator:
                 session,
                 repository_id=repository.id,
                 title=f"Potential secret in {repository.full_name}",
-                description=(
-                    f"Detector `{finding.detector}` matched {finding.file_path}:{finding.line_number}. "
-                    "Review the file, rotate the credential if valid, and remove it from history."
+                description=self._describe_secret_finding(
+                    finding,
+                    git_history_is_public=include_git_history,
                 ),
                 severity="critical",
                 risk_score=95.0,
@@ -341,9 +404,11 @@ class ScanOrchestrator:
                     session,
                     repository_id=repository.id,
                     title=f"Potential secret in Home Assistant integration {repository.name}",
-                    description=(
-                        f"Detector `{finding.detector}` matched {finding.file_path}:{finding.line_number}. "
-                        "Review the integration config and rotate any exposed credentials."
+                    description=self._describe_secret_finding(
+                        finding,
+                        remediation_hint=(
+                            "Review the integration config and rotate any exposed credentials."
+                        ),
                     ),
                     severity="critical",
                     risk_score=95.0,
@@ -394,6 +459,30 @@ class ScanOrchestrator:
             created_alerts += ai_alerts_created
             active_alerts_by_source["ai_correlation"].update(ai_fingerprints)
         return created_alerts, active_alerts_by_source
+
+    def _should_scan_repository_git_history(self, repository: Repository) -> bool:
+        """Only scan git history when the repository is public and therefore historically exposed."""
+
+        return repository.source_type == "github" and not repository.metadata_json.get("private", False)
+
+    def _describe_secret_finding(
+        self,
+        finding,
+        *,
+        git_history_is_public: bool = False,
+        remediation_hint: str | None = None,
+    ) -> str:
+        """Explain whether a secret was found in the working tree or in publicly reachable history."""
+
+        location = f"{finding.file_path}:{finding.line_number}"
+        hint = remediation_hint or "Review the file, rotate the credential if valid, and remove it from history."
+        if finding.content_source == "git_history" and finding.commit_sha:
+            exposure_scope = "public git history" if git_history_is_public else "git history"
+            return (
+                f"Detector `{finding.detector}` matched {location} in {exposure_scope} commit "
+                f"{finding.commit_sha[:12]}. {hint}"
+            )
+        return f"Detector `{finding.detector}` matched {location}. {hint}"
 
     def _persist_vulnerability_matches(
         self,
@@ -518,6 +607,78 @@ class ScanOrchestrator:
         for alert in alerts:
             repository = session.get(Repository, alert.repository_id) if alert.repository_id else None
             self.alert_dispatcher.dispatch(alert, repository)
+
+    def _run_inventory_stage(
+        self,
+        session: Session,
+        *,
+        scanner_name: str,
+        details: dict[str, str | bool],
+        loader,
+    ) -> list:
+        """Run one inventory stage and convert hard failures into auditable error records."""
+
+        try:
+            assets = loader()
+            record_scan_result(
+                session,
+                repository_id=None,
+                scanner_name=scanner_name,
+                status="success",
+                findings_count=len(assets),
+                details=details,
+            )
+            session.commit()
+            return assets
+        except Exception as error:  # noqa: BLE001
+            session.rollback()
+            LOGGER.exception("Inventory stage failed", extra={"scanner_name": scanner_name, **details})
+            record_scan_result(
+                session,
+                repository_id=None,
+                scanner_name=scanner_name,
+                status="error",
+                findings_count=0,
+                details={**details, "error": str(error)},
+            )
+            session.commit()
+            return []
+
+    def _run_guarded_asset_scan(
+        self,
+        session: Session,
+        *,
+        repository: Repository,
+        scanner_name: str,
+        details: dict[str, str],
+        scan_callable,
+    ) -> tuple[int, int]:
+        """
+        Run one asset scan without letting a single failure abort the whole manual scan.
+
+        Why this exists:
+        Operators run `/scan` to refresh a large mixed estate. A single Git checkout problem or
+        scanner edge case should be visible in logs and scan history, but it should not block every
+        remaining repository, container, and Home Assistant integration from being processed.
+        """
+
+        try:
+            alerts_created = scan_callable()
+            session.commit()
+            return alerts_created, 0
+        except Exception as error:  # noqa: BLE001
+            session.rollback()
+            LOGGER.exception("Asset scan failed", extra={"repository": repository.full_name, **details})
+            record_scan_result(
+                session,
+                repository_id=repository.id,
+                scanner_name=scanner_name,
+                status="error",
+                findings_count=0,
+                details={**details, "error": str(error)},
+            )
+            session.commit()
+            return 0, 1
 
     def _calculate_repository_risk(self, session: Session, repository_id: int) -> float:
         """Set repository risk to the current highest open alert score."""

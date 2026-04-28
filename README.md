@@ -9,7 +9,7 @@ How to debug: Start with `LOG_LEVEL=DEBUG`, inspect `/health`, `/reports`, worke
 
 - Inventories all GitHub repositories available to the configured user token.
 - Clones or updates repositories and extracts dependencies from Python, Node.js, Java, PHP, Rust, Go, and Docker manifests.
-- Scans repositories for likely leaked secrets with regex and entropy heuristics.
+- Scans repositories for likely leaked secrets with regex and entropy heuristics, including public git history for owned public repositories.
 - Scans Docker images and Dockerfiles with Trivy and Grype.
 - Discovers running Unraid Docker containers through the Docker API or socket.
 - Discovers Home Assistant integrations from mounted config/component paths or from a remote Home Assistant REST API.
@@ -24,7 +24,8 @@ How to debug: Start with `LOG_LEVEL=DEBUG`, inspect `/health`, `/reports`, worke
 
 ```bash
 cp .env.example .env
-docker compose up --build
+docker compose pull
+docker compose up -d
 open http://localhost:31337
 ```
 
@@ -34,6 +35,14 @@ open http://localhost:31337
 python3.12 -m venv .venv
 .venv/bin/pip install -e .[dev]
 .venv/bin/uvicorn app.main:app --reload --port 31337
+```
+
+## Local Docker Build From Source
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.yml -f docker-compose.build.yml build
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
 ```
 
 ## Run Tests
@@ -48,8 +57,11 @@ python3.12 -m venv .venv
 
 Key environment variables:
 
+- `SECURITY_WATCHDOG_IMAGE`: Standard image tag for Compose deployments, for example `ghcr.io/feberdin/security-watchdog:latest` or a pinned release tag.
 - `PUID`, `PGID`: Optional container runtime user/group mapping. On Unraid, `99`/`100` usually matches `nobody:users`.
 - `GITHUB_TOKEN`: GitHub token with access to the repositories you want to monitor.
+- `SECRET_HISTORY_SCAN_ENABLED`: When `true`, public GitHub repositories are fetched with full history and scanned for secrets in old commits as well as the current tree.
+- `SECRET_HISTORY_MAX_COMMITS_PER_REPO`: Optional safety limit for history scanning. `0` means scan the full reachable history.
 - `DATABASE_URL`: PostgreSQL connection string.
 - `REDIS_URL`: Redis instance for lightweight dedupe and job heartbeats.
 - `UNRAID_DOCKER_HOST`: Usually `unix:///var/run/docker.sock` when deployed on Unraid.
@@ -61,7 +73,9 @@ Key environment variables:
 
 ## API Overview
 
-- `POST /scan`: Run an immediate full scan.
+- `POST /scan`: Queue an immediate full scan and return `202 Accepted` plus a status URL.
+- `GET /scan-jobs/latest`: Latest manual scan including queue/running/success/failure state.
+- `GET /scan-jobs/{job_id}`: One manual scan job with timestamps, counts, and error details.
 - `GET /reports`: Aggregated dashboard/report data.
 - `GET /alerts`: Latest alerts.
 - `GET /threats`: Recent threat articles and AI-extracted threat records.
@@ -80,6 +94,8 @@ For Unraid Docker coverage:
 - Set `PUID=99` and `PGID=100` on Unraid unless your share permissions require different values.
 - The entrypoint maps the service user to those IDs and adds docker socket group access automatically when `/var/run/docker.sock` is mounted.
 - For a simpler Unraid single-container install, use [unraid/security-watchdog.xml](unraid/security-watchdog.xml) with `RUN_EMBEDDED_SCHEDULER=true`.
+- In this Unraid template mode, `/mnt/user/appdata/security-watchdog` is your persistent data directory only. The container update itself comes from the image `ghcr.io/feberdin/security-watchdog:latest`, not from `docker compose` inside that appdata path.
+- After a new image is published, update it from the Unraid Docker or Apps UI by refreshing the template or applying the image update. The bundled template already points to `ghcr.io/feberdin/security-watchdog:latest`.
 - The repository also contains a GitHub Actions workflow that publishes `ghcr.io/feberdin/security-watchdog:latest` after pushes to `main`.
 
 For Home Assistant coverage:
@@ -97,7 +113,10 @@ For Home Assistant coverage:
 
 ## Troubleshooting
 
+- `Tower update failed with a macOS path`: the path `/Users/...` is only valid on the development machine. On Unraid, switch into the real Compose project directory first and then run `docker compose pull && docker compose up -d`.
+- `docker compose pull` says `no configuration file provided`: you are probably in `/mnt/user/appdata/security-watchdog`, which is only the persistent data directory for the Unraid template. Update the container through the Unraid template or switch into the actual Compose project directory first.
 - `GitHub repos not syncing`: verify `GITHUB_TOKEN` scope and check worker logs for Git clone errors.
+- `Public repo history scan is too slow`: set `SECRET_HISTORY_MAX_COMMITS_PER_REPO` to a smaller number temporarily, or disable `SECRET_HISTORY_SCAN_ENABLED` while you triage the largest repositories.
 - `Unraid containers missing`: verify `/var/run/docker.sock` is mounted and readable inside `watchdog` and `worker`.
 - `PermissionError: data/repos`: on Unraid, set `PUID=99` and `PGID=100` or another UID/GID pair that can write to your mapped appdata directory.
 - `Home Assistant integrations missing`: check that `.storage/core.config_entries` exists in the mounted config path.
@@ -111,6 +130,9 @@ For Home Assistant coverage:
 - Increase verbosity with `LOG_LEVEL=DEBUG`.
 - API logs: `docker compose logs -f watchdog`
 - Worker logs: `docker compose logs -f worker`
+- Manual scan progress: `curl -fsS http://localhost:31337/scan-jobs/latest`
+- Stable image upgrade: `docker compose pull && docker compose up -d`
+- Local source rebuild: `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`
 - Database state: inspect `repositories`, `dependencies`, `vulnerabilities`, `scan_results`, `threat_articles`, `ai_extracted_threats`, and `alerts`.
 - SBOM output: `data/sbom/<asset>/cyclonedx.json` and `data/sbom/<asset>/spdx.json`
 

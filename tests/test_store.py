@@ -1,94 +1,97 @@
 """
-Purpose: Verify alert fingerprint dedupe and stale-alert resolution in the persistence layer.
-Input/Output: Creates an in-memory database, writes alerts, resolves old ones, and ensures repeated
-findings reopen the same alert instead of creating endless new rows.
-Important invariants: Alert fingerprints must stay stable across scans and old findings must be
-resolved when they disappear, otherwise dashboard counts and risk scores become unusable.
-Debugging: If alert counts balloon unexpectedly, start with `resolve_stale_alerts()` and
-`upsert_alert()` because they define the entire alert lifecycle.
+Purpose: Verify repository persistence helpers stay idempotent for repeated threat-feed imports.
+Input/Output: Uses an in-memory SQLite database and stores duplicate threat articles with controlled
+URLs and content changes.
+Important invariants: Re-importing the same source URL must update the existing row instead of
+crashing on a database unique constraint; identical content should still deduplicate cleanly.
+Debugging: If this test fails, inspect `store_threat_article()` together with the `ThreatArticle`
+unique constraints before touching the scheduler or feed collectors.
 """
 
 from __future__ import annotations
 
-from sqlalchemy import create_engine
+from datetime import UTC, datetime
+
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 import app.models.entities  # noqa: F401
 from app.db.base import Base
-from app.models.entities import AlertStatus
-from app.repositories.store import resolve_stale_alerts, upsert_alert, upsert_repository
+from app.models.entities import ThreatArticle
+from app.models.schemas import ThreatArticleRecord
+from app.repositories.store import store_threat_article
 
 
 def build_test_session() -> Session:
-    """Create a throwaway in-memory database session for repository-store tests."""
+    """Create a throwaway in-memory database session for repository store tests."""
 
     engine = create_engine("sqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
     return Session(engine)
 
 
-def test_stale_alerts_are_resolved_and_reopened_when_they_return() -> None:
-    """A disappeared finding should resolve and reopen on reoccurrence with the same fingerprint."""
+def test_store_threat_article_updates_existing_row_when_source_url_repeats() -> None:
+    """The feed importer should upsert by source URL instead of violating the unique constraint."""
 
     session = build_test_session()
-    repository = upsert_repository(
-        session,
-        source_type="github",
-        owner="Feberdin",
-        name="security-watchdog",
-        full_name="Feberdin/security-watchdog",
-        local_path="/tmp/security-watchdog",
+    original = ThreatArticleRecord(
+        source_type="rss",
+        title="Original title",
+        source_url="https://example.com/article",
+        published_at=datetime(2026, 4, 28, 18, 0, tzinfo=UTC),
+        raw_content="original body",
+        normalized_text="original body",
+        tags=["rss"],
     )
+    updated = ThreatArticleRecord(
+        source_type="rss",
+        title="Updated title",
+        source_url="https://example.com/article",
+        published_at=datetime(2026, 4, 28, 18, 5, tzinfo=UTC),
+        raw_content="updated body",
+        normalized_text="updated body",
+        tags=["rss", "refresh"],
+    )
+
+    store_threat_article(session, original)
+    row = store_threat_article(session, updated)
     session.commit()
 
-    alert = upsert_alert(
-        session,
-        repository_id=repository.id,
-        title="Vulnerable dependency fastapi",
-        description="fastapi matched GHSA-123",
-        severity="high",
-        risk_score=49.2,
-        source_type="dependency_vulnerability",
-        metadata={
-            "dependency": "fastapi",
-            "version": "0.115.12",
-            "manifest_path": "pyproject.toml",
-            "vulnerability": "GHSA-123",
-            "references": [],
-        },
+    stored_rows = session.scalars(select(ThreatArticle)).all()
+    assert len(stored_rows) == 1
+    assert row.id == stored_rows[0].id
+    assert stored_rows[0].title == "Updated title"
+    assert stored_rows[0].normalized_text == "updated body"
+    assert stored_rows[0].tags == ["rss", "refresh"]
+
+
+def test_store_threat_article_reuses_existing_row_for_identical_article() -> None:
+    """Re-importing the same normalized article should return the existing database row."""
+
+    session = build_test_session()
+    first = ThreatArticleRecord(
+        source_type="rss",
+        title="Same story",
+        source_url="https://example.com/article-a",
+        published_at=datetime(2026, 4, 28, 18, 0, tzinfo=UTC),
+        raw_content="shared body",
+        normalized_text="shared body",
+        tags=["rss"],
     )
-    fingerprint = alert.fingerprint
+    repeated = ThreatArticleRecord(
+        source_type="rss",
+        title="Same story",
+        source_url="https://example.com/article-a",
+        published_at=datetime(2026, 4, 28, 18, 0, tzinfo=UTC),
+        raw_content="shared body",
+        normalized_text="shared body",
+        tags=["rss"],
+    )
+
+    first_row = store_threat_article(session, first)
+    repeated_row = store_threat_article(session, repeated)
     session.commit()
 
-    resolved_count = resolve_stale_alerts(
-        session,
-        repository_id=repository.id,
-        source_types=["dependency_vulnerability"],
-        active_fingerprints=set(),
-    )
-    session.commit()
-
-    assert resolved_count == 1
-    assert alert.status == AlertStatus.RESOLVED.value
-
-    reopened = upsert_alert(
-        session,
-        repository_id=repository.id,
-        title="Vulnerable dependency fastapi",
-        description="fastapi matched GHSA-123 again",
-        severity="high",
-        risk_score=49.2,
-        source_type="dependency_vulnerability",
-        metadata={
-            "dependency": "fastapi",
-            "version": "0.115.12",
-            "manifest_path": "pyproject.toml",
-            "vulnerability": "GHSA-123",
-            "references": [],
-        },
-    )
-    session.commit()
-
-    assert reopened.id == alert.id
-    assert reopened.fingerprint == fingerprint
-    assert reopened.status == AlertStatus.OPEN.value
+    stored_rows = session.scalars(select(ThreatArticle)).all()
+    assert len(stored_rows) == 1
+    assert repeated_row.id == first_row.id

@@ -40,7 +40,7 @@ class RepositoryScanner:
         synced = []
         try:
             repositories = self.github_client.list_repositories()
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             LOGGER.warning("GitHub repository inventory failed", extra={"error": str(error)})
             return synced
 
@@ -72,7 +72,7 @@ class RepositoryScanner:
                     fetch_full_history=self._should_fetch_full_history(repository_data),
                 )
                 synced.append(repository)
-            except Exception as error:  # noqa: BLE001
+            except Exception as error:
                 LOGGER.warning(
                     "Repository sync failed",
                     extra={

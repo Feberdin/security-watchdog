@@ -17,6 +17,7 @@ How to debug: Start with `LOG_LEVEL=DEBUG`, inspect `/health`, `/reports`, worke
 - Collects threat intelligence from RSS, Reddit `r/netsec`, Hacker News RSS, and GitHub issues.
 - Uses an OpenAI-compatible API to extract structured malicious-package signals from unstructured articles.
 - Generates CycloneDX and SPDX SBOMs for every scanned asset.
+- Exports active alerts as SARIF 2.1.0 JSON for GitHub Code Scanning-compatible tooling.
 - Exposes REST endpoints and a browser dashboard.
 - Sends alerts to Slack, email, and GitHub issues.
 
@@ -77,6 +78,7 @@ Key environment variables:
 - `GET /scan-jobs/latest`: Latest manual scan including queue/running/success/failure state.
 - `GET /scan-jobs/{job_id}`: One manual scan job with timestamps, counts, and error details.
 - `GET /reports`: Aggregated dashboard/report data.
+- `GET /reports/sarif`: Active alerts as SARIF 2.1.0 JSON. Add `?include_resolved=true` for audit exports.
 - `GET /alerts`: Latest alerts.
 - `GET /threats`: Recent threat articles and AI-extracted threat records.
 - `GET /dependencies`: Recently scanned dependencies.
@@ -131,6 +133,7 @@ For Home Assistant coverage:
 - API logs: `docker compose logs -f watchdog`
 - Worker logs: `docker compose logs -f worker`
 - Manual scan progress: `curl -fsS http://localhost:31337/scan-jobs/latest`
+- SARIF export: `curl -fsS http://localhost:31337/reports/sarif > security-watchdog.sarif`
 - Stable image upgrade: `docker compose pull && docker compose up -d`
 - Local source rebuild: `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`
 - Database state: inspect `repositories`, `dependencies`, `vulnerabilities`, `scan_results`, `threat_articles`, `ai_extracted_threats`, and `alerts`.
@@ -142,6 +145,12 @@ For Home Assistant coverage:
 - Prefer read-only mounts for Home Assistant paths.
 - Mounting the Docker socket grants powerful host access; restrict access to this stack accordingly.
 - Rotate any secret immediately if the secret scanner reports a real credential.
+
+## Acknowledgements
+
+- Inspired in part by [m3lixir/chumdump](https://github.com/m3lixir/chumdump), especially its
+  evidence-first security reporting and SARIF export ideas. Gruss und Danke an Melisa K. Savich
+  fuer die oeffentlichen Research-Ideen.
 
 ## License Note
 

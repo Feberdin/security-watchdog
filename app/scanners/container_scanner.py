@@ -45,7 +45,7 @@ class ContainerScanner:
                 cwd=dockerfile_path.parent,
                 timeout=180,
             )
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             LOGGER.warning(
                 "Trivy Dockerfile scan failed",
                 extra={"dockerfile": str(dockerfile_path), "error": str(error)},
@@ -77,7 +77,7 @@ class ContainerScanner:
                 [self.trivy_binary, "image", "--format", "json", image_ref],
                 timeout=600,
             )
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             LOGGER.warning("Trivy image scan failed", extra={"image": image_ref, "error": str(error)})
             return []
         findings: list[ContainerFinding] = []
@@ -103,7 +103,7 @@ class ContainerScanner:
 
         try:
             output = run_command([self.grype_binary, image_ref, "-o", "json"], timeout=600)
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             LOGGER.warning("Grype image scan failed", extra={"image": image_ref, "error": str(error)})
             return []
         findings: list[ContainerFinding] = []

@@ -12,7 +12,17 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -73,9 +83,9 @@ class Repository(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
-    dependencies: Mapped[list["Dependency"]] = relationship(back_populates="repository")
-    scan_results: Mapped[list["ScanResult"]] = relationship(back_populates="repository")
-    alerts: Mapped[list["Alert"]] = relationship(back_populates="repository")
+    dependencies: Mapped[list[Dependency]] = relationship(back_populates="repository")
+    scan_results: Mapped[list[ScanResult]] = relationship(back_populates="repository")
+    alerts: Mapped[list[Alert]] = relationship(back_populates="repository")
 
 
 class Dependency(Base):
@@ -107,8 +117,8 @@ class Dependency(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
-    repository: Mapped["Repository"] = relationship(back_populates="dependencies")
-    vulnerability_links: Mapped[list["DependencyVulnerability"]] = relationship(
+    repository: Mapped[Repository] = relationship(back_populates="dependencies")
+    vulnerability_links: Mapped[list[DependencyVulnerability]] = relationship(
         back_populates="dependency",
         cascade="all, delete-orphan",
     )
@@ -139,7 +149,7 @@ class Vulnerability(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
-    dependency_links: Mapped[list["DependencyVulnerability"]] = relationship(
+    dependency_links: Mapped[list[DependencyVulnerability]] = relationship(
         back_populates="vulnerability",
         cascade="all, delete-orphan",
     )
@@ -160,8 +170,8 @@ class DependencyVulnerability(Base):
     match_reason: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
-    dependency: Mapped["Dependency"] = relationship(back_populates="vulnerability_links")
-    vulnerability: Mapped["Vulnerability"] = relationship(back_populates="dependency_links")
+    dependency: Mapped[Dependency] = relationship(back_populates="vulnerability_links")
+    vulnerability: Mapped[Vulnerability] = relationship(back_populates="dependency_links")
 
 
 class ScanResult(Base):
@@ -180,7 +190,7 @@ class ScanResult(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     details_json: Mapped[dict] = mapped_column("details", JSON, default=dict)
 
-    repository: Mapped["Repository | None"] = relationship(back_populates="scan_results")
+    repository: Mapped[Repository | None] = relationship(back_populates="scan_results")
 
 
 class ThreatArticle(Base):

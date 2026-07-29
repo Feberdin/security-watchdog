@@ -99,7 +99,7 @@ def process_manual_scan_job(job_id: int | None = None) -> ManualScanJobOut | Non
     work_session = SessionLocal()
     try:
         response = ScanOrchestrator().run_manual_scan(work_session, request)
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         work_session.rollback()
         LOGGER.exception(
             "Manual scan job failed during execution",

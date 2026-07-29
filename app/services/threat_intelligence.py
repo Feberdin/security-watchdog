@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
 
 import feedparser
 import httpx
@@ -86,7 +85,7 @@ class ThreatIntelligenceService:
                 response = client.get(self.settings.reddit_netsec_url)
                 response.raise_for_status()
                 payload = response.json()
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             LOGGER.warning("Reddit threat feed failed", extra={"error": str(error)})
             return []
 
@@ -114,7 +113,7 @@ class ThreatIntelligenceService:
         articles: list[ThreatArticleRecord] = []
         try:
             results = list(self.github_client.search_security_issues(self.settings.github_issue_keywords))
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             LOGGER.warning("GitHub issue threat feed failed", extra={"error": str(error)})
             return []
         for item in results:

@@ -292,7 +292,7 @@ class SecretScanner:
         if self.settings.secret_history_max_commits_per_repo > 0:
             command.insert(4, f"--max-count={self.settings.secret_history_max_commits_per_repo}")
 
-        process = subprocess.Popen(  # noqa: S603
+        process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -300,11 +300,13 @@ class SecretScanner:
             encoding="utf-8",
             errors="ignore",
         )
-        assert process.stdout is not None
-        assert process.stderr is not None
+        if process.stdout is None or process.stderr is None:
+            raise RuntimeError(
+                "Git history secret scan failed before output streams were available. "
+                f"repository={root_path}"
+            )
         try:
-            for line in process.stdout:
-                yield line
+            yield from process.stdout
         finally:
             stderr = process.stderr.read()
             return_code = process.wait()

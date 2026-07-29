@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from packaging.version import InvalidVersion, Version
 
+from packaging.version import InvalidVersion, Version
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -63,7 +63,11 @@ class ReportingService:
         )
 
         repository_risk = [
-            {"full_name": repository.full_name, "source_type": repository.source_type, "risk_score": repository.risk_score}
+            {
+                "full_name": repository.full_name,
+                "source_type": repository.source_type,
+                "risk_score": repository.risk_score,
+            }
             for repository in session.scalars(
                 select(Repository).order_by(desc(Repository.risk_score)).limit(10)
             )

@@ -56,7 +56,7 @@ def run_command(command: list[str], *, cwd: Path | None = None, timeout: int = 3
         "Running external command",
         extra={"command": [_mask_command_part(part) for part in command], "cwd": str(cwd or ".")},
     )
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(
         command,
         cwd=cwd,
         capture_output=True,

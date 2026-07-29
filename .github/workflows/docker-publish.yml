@@ -1,3 +1,10 @@
+# Purpose: Publish validated security-watchdog Docker images to GitHub Container Registry.
+# Input/Output: Runs the local quality gate, then builds and pushes the image for main, tags, and
+# manual dispatches.
+# Important invariants: Images must not be published when linting or tests fail; registry access
+# uses only GitHub's scoped token.
+# Debugging: If publishing fails, inspect the quality-gate job first, then the Buildx metadata step.
+
 name: docker-publish
 
 on:
@@ -13,7 +20,32 @@ permissions:
   packages: write
 
 jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Test
+        run: python -m pytest
+
+      - name: Compile
+        run: python -m compileall app tests
+
   docker:
+    needs: quality-gate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

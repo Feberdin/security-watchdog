@@ -10,9 +10,9 @@ check the outbound network access from the container to the relevant package reg
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-import logging
 from typing import Any
 from urllib.parse import quote
 

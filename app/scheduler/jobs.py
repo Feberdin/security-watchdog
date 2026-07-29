@@ -8,8 +8,8 @@ Debugging: If a job fails silently, inspect worker logs for the wrapped exceptio
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 import logging
+from datetime import UTC, datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.base import BaseScheduler

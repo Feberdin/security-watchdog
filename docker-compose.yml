@@ -4,9 +4,9 @@
 # you explicitly want Unraid container discovery inside this stack.
 # Debugging: If scans fail inside Docker, check service health and volume mounts defined here.
 
-# Why this exists: this GitOps branch is deployed before merge, so it must not rely on the
-# default-branch `latest` image. Override SECURITY_WATCHDOG_IMAGE if you want another pinned tag.
-x-watchdog-image: &watchdog-image ${SECURITY_WATCHDOG_IMAGE:-ghcr.io/feberdin/security-watchdog:agent-sarif-ci-quality}
+# Why this exists: production Compose pulls the default published image, while review or rollback
+# deployments can override SECURITY_WATCHDOG_IMAGE with a pinned tag or digest.
+x-watchdog-image: &watchdog-image ${SECURITY_WATCHDOG_IMAGE:-ghcr.io/feberdin/security-watchdog:latest}
 x-watchdog-logging: &watchdog-logging
   driver: json-file
   options:

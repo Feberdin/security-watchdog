@@ -59,6 +59,8 @@ python3.12 -m venv .venv
 Key environment variables:
 
 - `SECURITY_WATCHDOG_IMAGE`: Standard image tag for Compose deployments, for example `ghcr.io/feberdin/security-watchdog:latest` or a pinned release tag.
+- `SECURITY_WATCHDOG_DATA_PATH`: Host path for `/app/data`. Local default is `./data`; Broker/Unraid default is `/mnt/user/appdata/security-watchdog`.
+- `LOG_MAX_SIZE`, `LOG_MAX_FILE`: Docker JSON log rotation limits used by the Compose stack.
 - `PUID`, `PGID`: Optional container runtime user/group mapping. On Unraid, `99`/`100` usually matches `nobody:users`.
 - `POSTGRES_PASSWORD`: Local Docker password for PostgreSQL. In Broker GitOps deployments this must be provided as the Broker secret `SECURITY_WATCHDOG_POSTGRES_PASSWORD`.
 - `SECURITY_WATCHDOG_DATABASE_URL`: Broker secret containing the PostgreSQL connection string for the application.
@@ -123,6 +125,7 @@ For Home Assistant coverage:
 - `Tower update failed with a macOS path`: the path `/Users/...` is only valid on the development machine. On Unraid, switch into the real Compose project directory first and then run `docker compose pull && docker compose up -d`.
 - `docker compose pull` says `no configuration file provided`: you are probably in `/mnt/user/appdata/security-watchdog`, which is only the persistent data directory for the Unraid template. Update the container through the Unraid template or switch into the actual Compose project directory first.
 - `secret://...` appears as the runtime password locally: start local Compose with `-f docker-compose.yml -f docker-compose.local.yml` and verify that `.env` exists.
+- `Broker blocks /var/run/docker.sock`: add a stack-scoped Broker policy allowance for `security-watchdog` before registering the stack source. Do not hide the mount behind a Compose variable.
 - `GitHub repos not syncing`: verify `GITHUB_TOKEN` scope and check worker logs for Git clone errors.
 - `Public repo history scan is too slow`: set `SECRET_HISTORY_MAX_COMMITS_PER_REPO` to a smaller number temporarily, or disable `SECRET_HISTORY_SCAN_ENABLED` while you triage the largest repositories.
 - `Unraid containers missing`: verify `/var/run/docker.sock` is mounted and readable inside `watchdog` and `worker`.

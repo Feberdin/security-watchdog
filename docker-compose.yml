@@ -5,6 +5,11 @@
 # Debugging: If scans fail inside Docker, check service health and volume mounts defined here.
 
 x-watchdog-image: &watchdog-image ${SECURITY_WATCHDOG_IMAGE:-ghcr.io/feberdin/security-watchdog:latest}
+x-watchdog-logging: &watchdog-logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-10m}
+    max-file: ${LOG_MAX_FILE:-3}
 x-watchdog-environment: &watchdog-environment
   APP_NAME: ${APP_NAME:-security-watchdog}
   ENVIRONMENT: ${ENVIRONMENT:-production}
@@ -45,6 +50,7 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *watchdog-logging
     environment:
       POSTGRES_DB: watchdog
       POSTGRES_USER: watchdog
@@ -60,6 +66,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *watchdog-logging
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
@@ -72,6 +79,7 @@ services:
   watchdog:
     image: *watchdog-image
     restart: unless-stopped
+    logging: *watchdog-logging
     environment:
       <<: *watchdog-environment
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "31337"]
@@ -83,7 +91,7 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      - ./data:/app/data
+      - ${SECURITY_WATCHDOG_DATA_PATH:-/mnt/user/appdata/security-watchdog}:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
       - /mnt/user/appdata/homeassistant:/opt/homeassistant-config:ro
       - /mnt/user/appdata/homeassistant-core/components:/opt/homeassistant-core/components:ro
@@ -96,6 +104,7 @@ services:
   worker:
     image: *watchdog-image
     restart: unless-stopped
+    logging: *watchdog-logging
     environment:
       <<: *watchdog-environment
     command: ["python", "-m", "app.worker"]
@@ -105,10 +114,15 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      - ./data:/app/data
+      - ${SECURITY_WATCHDOG_DATA_PATH:-/mnt/user/appdata/security-watchdog}:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
       - /mnt/user/appdata/homeassistant:/opt/homeassistant-config:ro
       - /mnt/user/appdata/homeassistant-core/components:/opt/homeassistant-core/components:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "from app.core.config import get_settings; get_settings()"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
 
 volumes:
   postgres-data:

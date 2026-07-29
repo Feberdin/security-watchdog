@@ -49,9 +49,11 @@ curl -fsS http://localhost:31337/scan-jobs/latest
 - If you run this stack directly on Unraid, mount `/var/run/docker.sock` into both `watchdog` and `worker`.
 - On Unraid, prefer `PUID=99` and `PGID=100` unless your share uses different ownership.
 - The base `docker-compose.yml` uses the published GHCR image by default, which makes updates on Unraid practical even when there is no Git checkout in `/Users/...`.
+- The base `docker-compose.yml` writes `/app/data` to `/mnt/user/appdata/security-watchdog` unless `SECURITY_WATCHDOG_DATA_PATH` overrides it.
 - If you prefer a remote Docker TCP endpoint, set `UNRAID_DOCKER_HOST=tcp://<unraid-host>:2375` and secure it with TLS before using it outside a trusted network.
 - Store persistent Compose data on an Unraid share, not inside ephemeral container layers.
 - For GitOps deployments through the Unraid Deployment Broker, use `docker-compose.yml` without the local override. Required Broker secrets are `SECURITY_WATCHDOG_POSTGRES_PASSWORD`, `SECURITY_WATCHDOG_DATABASE_URL`, and `SECURITY_WATCHDOG_GITHUB_TOKEN`.
+- The Docker socket mount requires a stack-scoped Broker policy allowance for `security-watchdog`; do not bypass that review with variable substitution.
 - If you want a simpler Unraid Community Applications setup, use [unraid/security-watchdog.xml](unraid/security-watchdog.xml). That template enables `RUN_EMBEDDED_SCHEDULER=true`, so one container can handle both the API and scheduled scans.
 - In this template-driven Unraid mode, `/mnt/user/appdata/security-watchdog` is only the mounted data directory. It is not the place where `docker compose pull` works unless you also created a separate Compose project there.
 

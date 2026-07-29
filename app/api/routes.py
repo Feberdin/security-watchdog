@@ -20,6 +20,7 @@ from app.models.entities import AIExtractedThreat, Alert, Dependency, Repository
 from app.models.schemas import (
     AlertOut,
     CodexPromptOut,
+    DailySecurityAutomationOut,
     HighRiskUpdateQueueOut,
     ManualScanJobOut,
     ReportOut,
@@ -220,6 +221,21 @@ def get_high_risk_update_prompt(
     return CodexPromptOut(
         title="Codex High-Risk Update Queue",
         prompt=ReportingService().build_high_risk_update_prompt(session, limit=limit),
+    )
+
+
+@router.get("/automation/daily-security-check", response_model=DailySecurityAutomationOut)
+def get_daily_security_automation_runbook(
+    limit: int = Query(default=25, ge=1, le=100),
+    max_tasks_per_run: int = Query(default=3, ge=1, le=10),
+    session: Session = Depends(get_db_session),
+) -> DailySecurityAutomationOut:
+    """Return the JSON runbook consumed by the recurring Codex security task."""
+
+    return ReportingService().build_daily_security_automation(
+        session,
+        limit=limit,
+        max_tasks_per_run=max_tasks_per_run,
     )
 
 

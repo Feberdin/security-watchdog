@@ -26,6 +26,7 @@ from app.models.entities import (
 )
 from app.models.schemas import (
     AlertOut,
+    DailySecurityAutomationOut,
     DependencyInsightOut,
     HighRiskDependencyUpdateOut,
     HighRiskSystemUpdateOut,
@@ -40,6 +41,7 @@ from app.services.version_catalog import LatestVersionRecord, VersionCatalogServ
 SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "none": 0}
 QUEUE_PRIORITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1}
 DEFAULT_VERSION_CATALOG = VersionCatalogService()
+DAILY_AUTOMATION_API_VERSION = "2026-07-30"
 
 
 class ReportingService:
@@ -328,9 +330,60 @@ class ReportingService:
             guidance=[
                 "Work one repository at a time and keep every change reviewable in a pull request.",
                 "Prioritize compromised, critical, and high-severity findings before routine latest-version drift.",
+                "Do not update only because a target version is higher; prove compatibility first.",
+                "Treat constraint status as a required review of package purpose, version range, and migration impact.",
                 "Run the repository's local checks and wait for CI on the pushed commit before moving on.",
                 "Never include secrets in commits, logs, PR descriptions, or generated prompts.",
             ],
+        )
+
+    def build_daily_security_automation(
+        self,
+        session: Session,
+        *,
+        limit: int = 25,
+        max_tasks_per_run: int = 3,
+    ) -> DailySecurityAutomationOut:
+        """
+        Return the machine-readable runbook consumed by a recurring Codex task.
+
+        Why this exists:
+        The daily Codex automation should not scrape dashboard HTML or infer safety rules from free
+        text. This endpoint gives it one stable JSON contract with queue data, guardrails, source
+        endpoints, and the exact prompt it should execute.
+        """
+
+        queue = self.build_high_risk_update_queue(session, limit=limit)
+        return DailySecurityAutomationOut(
+            api_version=DAILY_AUTOMATION_API_VERSION,
+            generated_at=datetime.now(UTC),
+            recommended_schedule="daily",
+            max_tasks_per_run=max_tasks_per_run,
+            queue=queue,
+            guardrails=self._build_update_guardrails(),
+            allowed_actions=[
+                "Inspect repository manifests, lockfiles, docs, workflows, and changelogs.",
+                "Create one branch and one pull request per repository or system.",
+                "Update dependency constraints only after compatibility and purpose are verified.",
+                "Change related config, code, migrations, tests, or lockfiles when an update requires it.",
+                "Run local checks and verify CI for the exact pushed commit.",
+            ],
+            blocked_actions=[
+                "Do not update solely because a target version is higher.",
+                "Do not widen a version constraint without identifying why the constraint exists.",
+                "Do not merge pull requests automatically.",
+                "Do not deploy automatically.",
+                "Do not use SSH, direct Docker CLI, raw HTTP, root shells, or secret values for Unraid work.",
+                "Do not commit secrets, real .env files, credential logs, or private debug exports.",
+            ],
+            source_endpoints={
+                "queue": "/automation/high-risk-updates",
+                "prompt": "/automation/high-risk-updates/codex-prompt",
+                "runbook": "/automation/daily-security-check",
+                "scan": "/scan",
+                "scan_status": "/scan-jobs/latest",
+            },
+            codex_prompt=self._build_daily_security_prompt(queue, max_tasks_per_run=max_tasks_per_run),
         )
 
     def build_high_risk_update_prompt(
@@ -359,8 +412,7 @@ class ReportingService:
             "Operating rules:\n"
             "- Work one repository or system at a time. Do not batch unrelated repos into one commit.\n"
             "- Inspect manifests, lockfiles, Dockerfiles, workflows, and project docs before changing versions.\n"
-            "- Prefer the latest safe compatible version. If a major upgrade is likely breaking, open a PR with clear "
-            "migration notes instead of forcing a risky change.\n"
+            f"{self._format_guardrails_for_prompt(self._build_update_guardrails())}"
             "- Run local tests, type checks, linters, and builds that the repository documents.\n"
             "- Push only reviewable branches, then wait for CI for the exact pushed commit before moving on.\n"
             "- Do not commit secrets, tokens, .env files with real values, logs with credentials, or generated private "
@@ -378,6 +430,60 @@ class ReportingService:
             "- Remaining risks are documented with the reason they could not be fixed automatically.\n"
             "- Deployment is only planned or applied through the broker when the user explicitly requests it and the "
             "broker approval policy allows it.\n"
+        )
+
+    def _build_update_guardrails(self) -> list[str]:
+        """Return the safety rules that prevent blind version-number-only updates."""
+
+        return [
+            "Do not update solely because a target version is higher. First verify package purpose, runtime "
+            "compatibility, framework version, peer dependencies, engine requirements, and project configuration.",
+            "Treat `constraint` status as a warning. The project currently restricts the allowed version range; "
+            "identify why that range exists before changing it.",
+            "For major-version updates, dev-tooling updates, framework updates, and runtime updates, read release "
+            "notes or changelogs and check migration requirements.",
+            "If a security fix requires a breaking upgrade, make the required config, code, migration, and test "
+            "changes in the same pull request.",
+            "If compatibility cannot be proven locally, do not force the update. Leave the dependency unchanged and "
+            "open a PR or issue with findings, blocker details, and migration notes.",
+        ]
+
+    def _format_guardrails_for_prompt(self, guardrails: list[str]) -> str:
+        """Format guardrails as prompt bullets without duplicating wording in multiple call sites."""
+
+        return "".join(f"- {guardrail}\n" for guardrail in guardrails)
+
+    def _build_daily_security_prompt(
+        self,
+        queue: HighRiskUpdateQueueOut,
+        *,
+        max_tasks_per_run: int,
+    ) -> str:
+        """Build the daily automation prompt from an already materialized queue payload."""
+
+        task_blocks = [self._format_high_risk_prompt_task(task) for task in queue.tasks[:max_tasks_per_run]]
+        queue_block = "\n\n".join(task_blocks) if task_blocks else "- No queued tasks.\n"
+        return (
+            "You are Codex running the daily Security Watchdog maintenance task for Feberdin.\n\n"
+            "Fetch or use the Security Watchdog automation runbook at `/automation/daily-security-check` and "
+            "process the current queue conservatively.\n\n"
+            f"Maximum tasks this run: {max_tasks_per_run}\n"
+            f"Queue generated at: {queue.generated_at.isoformat()}\n"
+            f"Current task count: {queue.task_count}\n\n"
+            "Required workflow:\n"
+            "- If the queue is empty, report that no repository changes are needed and stop.\n"
+            "- Work only on the highest-priority queued tasks listed below, one repository or system at a time.\n"
+            "- For every changed repository, create a dedicated branch and pull request.\n"
+            "- Run the repository's documented local checks and wait for CI for the exact pushed commit.\n"
+            "- Do not merge pull requests and do not deploy automatically.\n"
+            "- For Docker or Unraid deployments, only prepare notes unless the user explicitly requests deployment; "
+            "then use the `unraid_deploy` MCP broker flow with plan and approval.\n\n"
+            "Compatibility guardrails:\n"
+            f"{self._format_guardrails_for_prompt(self._build_update_guardrails())}\n"
+            "Queue slice for this run:\n"
+            f"{queue_block}\n\n"
+            "End with: checked tasks, branches/PRs, local checks, CI results, skipped updates with reasons, and any "
+            "manual decision required.\n"
         )
 
     def _build_high_risk_update_task(
@@ -471,7 +577,9 @@ class ReportingService:
 
         if dependency.was_compromised:
             return "replace_or_remove_compromised_package"
-        if dependency.latest_version and dependency.latest_version_status in {"outdated", "constraint"}:
+        if dependency.latest_version and dependency.latest_version_status == "constraint":
+            return "review_constraint_and_update_config_if_safe"
+        if dependency.latest_version and dependency.latest_version_status == "outdated":
             return "update_to_latest_known_safe_version"
         if dependency.vulnerability_ids or dependency.risk_score > 0:
             return "investigate_security_fix"

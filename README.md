@@ -90,6 +90,7 @@ Key environment variables:
 - `GET /systems`: System-centric inventory for the dashboard with expandable dependency details and latest-version hints.
 - `GET /automation/high-risk-updates`: Prioritized update queue for high-risk and outdated dependencies.
 - `GET /automation/high-risk-updates/codex-prompt`: Master prompt for a controlled Codex update run across queued repositories.
+- `GET /automation/daily-security-check`: Machine-readable runbook for the recurring Codex security task.
 - `GET /health`: Liveness check.
 - Default port: `31337` because it is a memorable security-themed port and was free on the current host during setup.
 

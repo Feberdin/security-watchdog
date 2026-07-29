@@ -87,3 +87,32 @@ def test_post_scan_returns_accepted_and_exposes_latest_job(monkeypatch) -> None:
     assert latest_job["status"] == "succeeded"
     assert latest_job["repository_count"] == 6
     assert latest_job["alert_count"] == 11
+
+
+def test_daily_security_check_endpoint_returns_codex_runbook() -> None:
+    """Codex automation should be able to fetch one JSON runbook without scraping dashboard HTML."""
+
+    session_factory = build_session_factory()
+
+    def override_db_session() -> Generator[Session, None, None]:
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app = FastAPI()
+    app.include_router(api_router)
+    app.dependency_overrides[get_db_session] = override_db_session
+
+    response = TestClient(app).get("/automation/daily-security-check?limit=5&max_tasks_per_run=2")
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["api_version"] == "2026-07-30"
+    assert payload["recommended_schedule"] == "daily"
+    assert payload["max_tasks_per_run"] == 2
+    assert payload["queue"]["task_count"] == 0
+    assert payload["source_endpoints"]["runbook"] == "/automation/daily-security-check"
+    assert "Do not update solely because a target version is higher" in payload["guardrails"][0]
+    assert "daily Security Watchdog maintenance task" in payload["codex_prompt"]

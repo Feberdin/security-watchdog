@@ -232,6 +232,21 @@ class HighRiskUpdateQueueOut(BaseModel):
     guidance: list[str] = Field(default_factory=list)
 
 
+class DailySecurityAutomationOut(BaseModel):
+    """Machine-readable runbook for the daily Codex security update automation."""
+
+    api_version: str
+    generated_at: datetime
+    recommended_schedule: str
+    max_tasks_per_run: int
+    queue: HighRiskUpdateQueueOut
+    guardrails: list[str] = Field(default_factory=list)
+    allowed_actions: list[str] = Field(default_factory=list)
+    blocked_actions: list[str] = Field(default_factory=list)
+    source_endpoints: dict[str, str] = Field(default_factory=dict)
+    codex_prompt: str
+
+
 class CodexPromptOut(BaseModel):
     """Reusable Codex prompt response for remediation actions in the dashboard."""
 

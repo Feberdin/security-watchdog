@@ -127,3 +127,14 @@ services:
 volumes:
   postgres-data:
   redis-data:
+
+# Why this exists: the Unraid Deployment Broker requires an explicit Docker bridge subnet so
+# Docker cannot auto-allocate a range that overlaps Joachim's LAN/VLAN networks.
+# What happens here: every service that uses the default Compose network gets the same
+# stack-local subnet and gateway during deployment.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.200.9.0/24
+          gateway: 10.200.9.1

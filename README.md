@@ -98,6 +98,7 @@ For Unraid Docker coverage:
 - Run the stack on Unraid or mount the Unraid Docker socket into the containers.
 - Deploy the GitOps stack through the Unraid Deployment Broker with `docker-compose.yml`; it contains `secret://...` references that the Broker resolves at runtime.
 - Required Broker secrets are `SECURITY_WATCHDOG_POSTGRES_PASSWORD`, `SECURITY_WATCHDOG_DATABASE_URL`, and `SECURITY_WATCHDOG_GITHUB_TOKEN`.
+- The Compose default network is pinned to `10.200.9.0/24` so the Broker can verify that Docker networking does not overlap LAN/VLAN ranges.
 - For local Docker usage outside the Broker, always add `docker-compose.local.yml` so `.env` values replace the Broker secret references.
 - Leave `UNRAID_DOCKER_ENABLED=true`.
 - Set `PUID=99` and `PGID=100` on Unraid unless your share permissions require different values.

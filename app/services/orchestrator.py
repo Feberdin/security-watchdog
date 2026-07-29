@@ -21,8 +21,8 @@ from app.repositories.store import (
     build_alert_fingerprint,
     link_dependency_to_vulnerability,
     record_scan_result,
-    resolve_stale_alerts,
     replace_repository_dependencies,
+    resolve_stale_alerts,
     upsert_alert,
     upsert_vulnerability,
 )
@@ -630,7 +630,7 @@ class ScanOrchestrator:
             )
             session.commit()
             return assets
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             session.rollback()
             LOGGER.exception("Inventory stage failed", extra={"scanner_name": scanner_name, **details})
             record_scan_result(
@@ -666,7 +666,7 @@ class ScanOrchestrator:
             alerts_created = scan_callable()
             session.commit()
             return alerts_created, 0
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             session.rollback()
             LOGGER.exception("Asset scan failed", extra={"repository": repository.full_name, **details})
             record_scan_result(

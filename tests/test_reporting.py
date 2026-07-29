@@ -345,6 +345,102 @@ def test_build_codex_remediation_prompt_contains_findings() -> None:
     assert "Previously compromised: yes" in prompt
 
 
+def test_build_high_risk_update_queue_prioritizes_risky_outdated_dependencies() -> None:
+    """The Codex automation queue should expose risky outdated packages with target versions."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="security-watchdog",
+        full_name="Feberdin/security-watchdog",
+        local_path="/tmp/security-watchdog",
+        risk_score=82.5,
+    )
+    session.add(repository)
+    session.flush()
+
+    dependency = Dependency(
+        repository_id=repository.id,
+        manifest_path="requirements.txt",
+        package_name="requests",
+        version="2.25.0",
+        ecosystem="pypi",
+    )
+    session.add(dependency)
+    session.flush()
+
+    vulnerability = Vulnerability(
+        source="osv",
+        source_identifier="CVE-2026-0001",
+        package_name="requests",
+        ecosystem="pypi",
+        summary="Example vulnerability",
+        severity="high",
+        malicious_package=True,
+    )
+    session.add(vulnerability)
+    session.flush()
+
+    session.add(
+        DependencyVulnerability(
+            dependency_id=dependency.id,
+            vulnerability_id=vulnerability.id,
+            risk_score=82.5,
+            match_reason="Unit test match",
+        )
+    )
+    session.commit()
+
+    queue = ReportingService(version_catalog=FakeVersionCatalog()).build_high_risk_update_queue(session)
+
+    assert queue.task_count == 1
+    task = queue.tasks[0]
+    assert task.full_name == "Feberdin/security-watchdog"
+    assert task.priority == "critical"
+    assert "vulnerable dependency update" in task.reason
+    dependency_action = task.dependencies[0]
+    assert dependency_action.package_name == "requests"
+    assert dependency_action.current_version == "2.25.0"
+    assert dependency_action.target_version == "2.32.3"
+    assert dependency_action.action == "replace_or_remove_compromised_package"
+
+
+def test_build_high_risk_update_prompt_contains_safe_codex_rules() -> None:
+    """The master prompt should include package targets plus guardrails for CI and deployments."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="security-watchdog",
+        full_name="Feberdin/security-watchdog",
+        local_path="/tmp/security-watchdog",
+        risk_score=82.5,
+    )
+    session.add(repository)
+    session.flush()
+
+    dependency = Dependency(
+        repository_id=repository.id,
+        manifest_path="requirements.txt",
+        package_name="requests",
+        version="2.25.0",
+        ecosystem="pypi",
+    )
+    session.add(dependency)
+    session.commit()
+
+    prompt = ReportingService(version_catalog=FakeVersionCatalog()).build_high_risk_update_prompt(session)
+
+    assert "Feberdin/security-watchdog" in prompt
+    assert "requests" in prompt
+    assert "Current version: 2.25.0" in prompt
+    assert "Target version: 2.32.3" in prompt
+    assert "wait for CI for the exact pushed commit" in prompt
+    assert "use only the `unraid_deploy` MCP broker flow" in prompt
+
+
 def test_build_system_inventory_surfaces_runtime_findings_from_alerts() -> None:
     """Container or secret alerts should appear as runtime findings on the system card."""
 

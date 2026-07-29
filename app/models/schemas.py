@@ -191,6 +191,47 @@ class SystemInventoryOut(BaseModel):
     runtime_findings: list[RuntimeFindingOut] = Field(default_factory=list)
 
 
+class HighRiskDependencyUpdateOut(BaseModel):
+    """One dependency update candidate for the Codex high-risk update queue."""
+
+    package_name: str
+    ecosystem: str
+    manifest_path: str
+    current_version: str
+    target_version: str | None = None
+    latest_version_status: str = "unknown"
+    latest_version_source: str = ""
+    risk_severity: str = "none"
+    risk_score: float = 0.0
+    vulnerability_ids: list[str] = Field(default_factory=list)
+    was_compromised: bool = False
+    compromised_signal: str = ""
+    action: str = "review"
+
+
+class HighRiskSystemUpdateOut(BaseModel):
+    """One repository or runtime system that Codex should update or investigate."""
+
+    repository_id: int
+    full_name: str
+    display_name: str
+    source_type: str
+    risk_score: float
+    priority: str
+    reason: str
+    dependencies: list[HighRiskDependencyUpdateOut] = Field(default_factory=list)
+    runtime_findings: list[RuntimeFindingOut] = Field(default_factory=list)
+
+
+class HighRiskUpdateQueueOut(BaseModel):
+    """Prioritized update queue used by the dashboard and Codex automation prompt."""
+
+    generated_at: datetime
+    task_count: int
+    tasks: list[HighRiskSystemUpdateOut] = Field(default_factory=list)
+    guidance: list[str] = Field(default_factory=list)
+
+
 class CodexPromptOut(BaseModel):
     """Reusable Codex prompt response for remediation actions in the dashboard."""
 

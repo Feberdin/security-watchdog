@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from packaging.version import InvalidVersion, Version
 
+from packaging.version import InvalidVersion, Version
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -27,6 +27,9 @@ from app.models.entities import (
 from app.models.schemas import (
     AlertOut,
     DependencyInsightOut,
+    HighRiskDependencyUpdateOut,
+    HighRiskSystemUpdateOut,
+    HighRiskUpdateQueueOut,
     ReportOut,
     RuntimeFindingOut,
     SystemInventoryOut,
@@ -35,6 +38,7 @@ from app.services.matching import normalize_version
 from app.services.version_catalog import LatestVersionRecord, VersionCatalogService
 
 SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "none": 0}
+QUEUE_PRIORITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1}
 DEFAULT_VERSION_CATALOG = VersionCatalogService()
 
 
@@ -63,7 +67,11 @@ class ReportingService:
         )
 
         repository_risk = [
-            {"full_name": repository.full_name, "source_type": repository.source_type, "risk_score": repository.risk_score}
+            {
+                "full_name": repository.full_name,
+                "source_type": repository.source_type,
+                "risk_score": repository.risk_score,
+            }
             for repository in session.scalars(
                 select(Repository).order_by(desc(Repository.risk_score)).limit(10)
             )
@@ -280,6 +288,302 @@ class ReportingService:
             "- Preserve expected behavior and add or run tests where appropriate.\n"
             "- Summarize what changed, what remains risky, and what should be monitored next.\n"
         )
+
+    def build_high_risk_update_queue(
+        self,
+        session: Session,
+        *,
+        limit: int = 25,
+    ) -> HighRiskUpdateQueueOut:
+        """
+        Build a high-risk-first queue for Codex-managed repository updates.
+
+        Why this exists:
+        Operators need a safe "what should Codex update next?" view that includes both urgent
+        security findings and normal latest-version drift. The queue is intentionally read-only and
+        leaves the actual repository writes to a later Codex task with tests, CI, and PR review.
+        """
+
+        systems = self.build_system_inventory(session)
+        tasks = [
+            task
+            for system in systems
+            if (task := self._build_high_risk_update_task(system)) is not None
+        ]
+        tasks.sort(
+            key=lambda task: (
+                QUEUE_PRIORITY_ORDER.get(task.priority, 0),
+                task.risk_score,
+                len(task.runtime_findings),
+                len(task.dependencies),
+                task.full_name.lower(),
+            ),
+            reverse=True,
+        )
+        limited_tasks = tasks[:limit]
+        return HighRiskUpdateQueueOut(
+            generated_at=datetime.now(UTC),
+            task_count=len(limited_tasks),
+            tasks=limited_tasks,
+            guidance=[
+                "Work one repository at a time and keep every change reviewable in a pull request.",
+                "Prioritize compromised, critical, and high-severity findings before routine latest-version drift.",
+                "Run the repository's local checks and wait for CI on the pushed commit before moving on.",
+                "Never include secrets in commits, logs, PR descriptions, or generated prompts.",
+            ],
+        )
+
+    def build_high_risk_update_prompt(
+        self,
+        session: Session,
+        *,
+        limit: int = 25,
+    ) -> str:
+        """Generate a Codex master prompt that processes the current high-risk update queue safely."""
+
+        queue = self.build_high_risk_update_queue(session, limit=limit)
+        if not queue.tasks:
+            return (
+                "You are Codex working in the Feberdin GitHub environment.\n\n"
+                "The security-watchdog high-risk update queue is currently empty. Do not make repository changes.\n"
+                "Run or schedule a fresh security-watchdog scan first, then re-open this automation prompt if new "
+                "high-risk findings or outdated dependencies appear.\n"
+            )
+
+        task_blocks = [self._format_high_risk_prompt_task(task) for task in queue.tasks]
+        return (
+            "You are Codex acting as a senior DevSecOps maintainer in the Feberdin GitHub environment.\n\n"
+            "Goal:\n"
+            "Update the repositories and tracked systems below in high-risk-first order so vulnerable, compromised, "
+            "or outdated dependencies move toward the latest safe version.\n\n"
+            "Operating rules:\n"
+            "- Work one repository or system at a time. Do not batch unrelated repos into one commit.\n"
+            "- Inspect manifests, lockfiles, Dockerfiles, workflows, and project docs before changing versions.\n"
+            "- Prefer the latest safe compatible version. If a major upgrade is likely breaking, open a PR with clear "
+            "migration notes instead of forcing a risky change.\n"
+            "- Run local tests, type checks, linters, and builds that the repository documents.\n"
+            "- Push only reviewable branches, then wait for CI for the exact pushed commit before moving on.\n"
+            "- Do not commit secrets, tokens, .env files with real values, logs with credentials, or generated private "
+            "debug dumps.\n"
+            "- For Docker or Unraid deployments, use only the `unraid_deploy` MCP broker flow. Do not use SSH, direct "
+            "Docker CLI, raw HTTP, or root shell access.\n"
+            "- Stop and report clearly if a required secret, registry credential, CI login, or repository permission "
+            "is missing.\n\n"
+            f"Queue generated at: {queue.generated_at.isoformat()}\n"
+            f"Task count: {queue.task_count}\n\n"
+            "Update queue:\n"
+            f"{'\n\n'.join(task_blocks)}\n\n"
+            "End state expected:\n"
+            "- Every changed repository has a branch, commit, PR, local check result, and CI result.\n"
+            "- Remaining risks are documented with the reason they could not be fixed automatically.\n"
+            "- Deployment is only planned or applied through the broker when the user explicitly requests it and the "
+            "broker approval policy allows it.\n"
+        )
+
+    def _build_high_risk_update_task(
+        self,
+        system: SystemInventoryOut,
+    ) -> HighRiskSystemUpdateOut | None:
+        """
+        Convert one system inventory entry into an automation task when action is needed.
+
+        Why this exists:
+        A system can need Codex attention because of vulnerable dependencies, runtime findings, or
+        plain latest-version drift. Keeping the decision in one helper makes the route predictable
+        and keeps the dashboard from reimplementing security prioritization in JavaScript.
+        """
+
+        dependencies = [
+            self._build_dependency_update_entry(dependency)
+            for dependency in system.dependencies
+            if self._should_queue_dependency_update(dependency)
+        ]
+        runtime_findings = [
+            finding
+            for finding in system.runtime_findings
+            if self._should_queue_runtime_finding(finding)
+        ]
+
+        has_high_system_risk = system.risk_score >= 70 or system.open_alert_count > 0
+        if not dependencies and not runtime_findings and not has_high_system_risk:
+            return None
+
+        return HighRiskSystemUpdateOut(
+            repository_id=system.id,
+            full_name=system.full_name,
+            display_name=system.display_name,
+            source_type=system.source_type,
+            risk_score=system.risk_score,
+            priority=self._classify_update_priority(system, dependencies, runtime_findings),
+            reason=self._build_update_reason(system, dependencies, runtime_findings),
+            dependencies=dependencies[:25],
+            runtime_findings=runtime_findings[:25],
+        )
+
+    def _build_dependency_update_entry(
+        self,
+        dependency: DependencyInsightOut,
+    ) -> HighRiskDependencyUpdateOut:
+        """Normalize one dependency insight into an update action for Codex."""
+
+        return HighRiskDependencyUpdateOut(
+            package_name=dependency.package_name,
+            ecosystem=dependency.ecosystem,
+            manifest_path=dependency.manifest_path,
+            current_version=dependency.detected_version,
+            target_version=dependency.latest_version,
+            latest_version_status=dependency.latest_version_status,
+            latest_version_source=dependency.latest_version_source,
+            risk_severity=dependency.risk_severity,
+            risk_score=dependency.risk_score,
+            vulnerability_ids=dependency.vulnerability_ids,
+            was_compromised=dependency.was_compromised,
+            compromised_signal=dependency.compromised_signal,
+            action=self._classify_dependency_update_action(dependency),
+        )
+
+    def _should_queue_dependency_update(self, dependency: DependencyInsightOut) -> bool:
+        """Return true when a dependency needs a Codex update or security review."""
+
+        has_security_signal = (
+            dependency.risk_score > 0
+            or dependency.was_compromised
+            or dependency.risk_severity in {"critical", "high"}
+            or bool(dependency.vulnerability_ids)
+        )
+        has_latest_version_drift = (
+            dependency.latest_version_status in {"outdated", "constraint"}
+            and dependency.latest_version is not None
+        )
+        return has_security_signal or has_latest_version_drift
+
+    def _should_queue_runtime_finding(self, finding: RuntimeFindingOut) -> bool:
+        """Return true when an image, secret, or runtime finding should enter the update queue."""
+
+        return (
+            finding.risk_score >= 40
+            or finding.severity in {"critical", "high"}
+            or bool(finding.fix_version)
+        )
+
+    def _classify_dependency_update_action(self, dependency: DependencyInsightOut) -> str:
+        """Choose the safest next action for a queued dependency."""
+
+        if dependency.was_compromised:
+            return "replace_or_remove_compromised_package"
+        if dependency.latest_version and dependency.latest_version_status in {"outdated", "constraint"}:
+            return "update_to_latest_known_safe_version"
+        if dependency.vulnerability_ids or dependency.risk_score > 0:
+            return "investigate_security_fix"
+        return "review"
+
+    def _classify_update_priority(
+        self,
+        system: SystemInventoryOut,
+        dependencies: list[HighRiskDependencyUpdateOut],
+        runtime_findings: list[RuntimeFindingOut],
+    ) -> str:
+        """Classify a queue item by the strongest signal across system, dependency, and runtime data."""
+
+        if (
+            system.risk_score >= 90
+            or any(dependency.was_compromised for dependency in dependencies)
+            or any(dependency.risk_severity == "critical" for dependency in dependencies)
+            or any(finding.severity == "critical" or finding.risk_score >= 90 for finding in runtime_findings)
+        ):
+            return "critical"
+        if (
+            system.risk_score >= 70
+            or system.open_alert_count > 0
+            or any(dependency.risk_severity == "high" for dependency in dependencies)
+            or any(finding.severity == "high" or finding.risk_score >= 70 for finding in runtime_findings)
+        ):
+            return "high"
+        if dependencies or runtime_findings:
+            return "medium"
+        return "low"
+
+    def _build_update_reason(
+        self,
+        system: SystemInventoryOut,
+        dependencies: list[HighRiskDependencyUpdateOut],
+        runtime_findings: list[RuntimeFindingOut],
+    ) -> str:
+        """Create a short human-readable reason for the queue item."""
+
+        reasons = []
+        if system.risk_score >= 70:
+            reasons.append(f"system risk score {system.risk_score:.1f}")
+        if system.open_alert_count:
+            reasons.append(f"{system.open_alert_count} open alert(s)")
+        compromised_count = len([dependency for dependency in dependencies if dependency.was_compromised])
+        vulnerable_count = len([dependency for dependency in dependencies if dependency.vulnerability_ids])
+        outdated_count = len(
+            [
+                dependency
+                for dependency in dependencies
+                if dependency.latest_version_status in {"outdated", "constraint"}
+            ]
+        )
+        if compromised_count:
+            reasons.append(f"{compromised_count} compromised package(s)")
+        if vulnerable_count:
+            reasons.append(f"{vulnerable_count} vulnerable dependency update(s)")
+        if outdated_count:
+            reasons.append(f"{outdated_count} outdated dependency update(s)")
+        if runtime_findings:
+            reasons.append(f"{len(runtime_findings)} runtime/image finding(s)")
+        return "; ".join(reasons) or "latest-version maintenance"
+
+    def _format_high_risk_prompt_task(self, task: HighRiskSystemUpdateOut) -> str:
+        """Format one queue task as compact plain text for a Codex prompt."""
+
+        lines = [
+            f"- System: {task.full_name}",
+            f"  Display name: {task.display_name}",
+            f"  Source type: {task.source_type}",
+            f"  Repository/System id: {task.repository_id}",
+            f"  Priority: {task.priority}",
+            f"  Risk score: {task.risk_score}",
+            f"  Reason: {task.reason}",
+        ]
+
+        if task.dependencies:
+            lines.append("  Dependency actions:")
+            for dependency in task.dependencies[:15]:
+                lines.extend(
+                    [
+                        f"  - Package: {dependency.package_name}",
+                        f"    Ecosystem: {dependency.ecosystem}",
+                        f"    Manifest: {dependency.manifest_path}",
+                        f"    Current version: {dependency.current_version}",
+                        f"    Target version: {dependency.target_version or 'unknown'}",
+                        f"    Latest status: {dependency.latest_version_status}",
+                        f"    Risk severity: {dependency.risk_severity}",
+                        f"    Risk score: {dependency.risk_score}",
+                        f"    Vulnerabilities: {', '.join(dependency.vulnerability_ids) or 'none listed'}",
+                        f"    Previously compromised: {'yes' if dependency.was_compromised else 'no'}",
+                        f"    Action: {dependency.action}",
+                    ]
+                )
+
+        if task.runtime_findings:
+            lines.append("  Runtime or image findings:")
+            for finding in task.runtime_findings[:10]:
+                lines.extend(
+                    [
+                        f"  - Finding: {finding.title}",
+                        f"    Source type: {finding.source_type}",
+                        f"    Severity: {finding.severity}",
+                        f"    Risk score: {finding.risk_score}",
+                        f"    Package: {finding.package_name or 'n/a'}",
+                        f"    Installed version: {finding.installed_version or 'n/a'}",
+                        f"    Fix version: {finding.fix_version or 'unknown'}",
+                        f"    Target: {finding.target or 'n/a'}",
+                    ]
+                )
+
+        return "\n".join(lines)
 
     def _build_dependency_insight(
         self,

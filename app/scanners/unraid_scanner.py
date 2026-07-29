@@ -11,10 +11,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import docker
 from docker.errors import DockerException
 from sqlalchemy.orm import Session
 
+import docker
 from app.core.config import get_settings
 from app.repositories.store import upsert_repository
 

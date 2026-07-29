@@ -1,12 +1,13 @@
 <!--
 Purpose: Main synthwave dashboard for systems, dependencies, debugging exports, and remediation.
 Input/Output: Loaded by the browser and hydrated from `/reports`, `/systems`, `/diagnostics/export`,
-`/scan-jobs/latest`, and per-system Codex helper endpoints.
+`/automation/high-risk-updates/codex-prompt`, `/scan-jobs/latest`, and per-system Codex helper
+endpoints.
 Important invariants: Operators should be able to scan the whole platform quickly, then drill into
 one system and export structured data or a remediation prompt without leaving the page.
 Debugging: If one of the Codex helper buttons appears broken, inspect the browser requests to
-`/scan`, `/scan-jobs/latest`, `/diagnostics/export`, `/systems/{id}/debug-export`, and
-`/systems/{id}/codex-remediation`.
+`/scan`, `/scan-jobs/latest`, `/diagnostics/export`, `/automation/high-risk-updates/codex-prompt`,
+`/systems/{id}/debug-export`, and `/systems/{id}/codex-remediation`.
 -->
 <!DOCTYPE html>
 <html lang="de">
@@ -32,6 +33,9 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
           </div>
         </div>
         <div class="topbar-actions">
+          <button id="high-risk-update-button" class="action-button secondary-button">
+            High-Risk Updates
+          </button>
           <button id="debug-export-button" class="action-button secondary-button">
             Codex Debug Export
           </button>
@@ -698,6 +702,20 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         }
       }
 
+      async function openHighRiskUpdatePrompt(button) {
+        button.disabled = true;
+        button.textContent = 'Queue wird erstellt...';
+        try {
+          const payload = await fetchJson('/automation/high-risk-updates/codex-prompt');
+          showModal(payload.title, payload.prompt);
+        } catch (error) {
+          showRequestError('High-Risk Update Queue fehlgeschlagen', error);
+        } finally {
+          button.disabled = false;
+          button.textContent = 'High-Risk Updates';
+        }
+      }
+
       async function openSystemDebugExport(systemId, systemName, button) {
         button.disabled = true;
         button.textContent = 'Lade Debugdaten...';
@@ -787,6 +805,9 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
       document.getElementById('scan-button').addEventListener('click', triggerScan);
       document.getElementById('debug-export-button').addEventListener('click', (event) => {
         openPlatformDebugExport(event.currentTarget);
+      });
+      document.getElementById('high-risk-update-button').addEventListener('click', (event) => {
+        openHighRiskUpdatePrompt(event.currentTarget);
       });
       document.getElementById('system-search').addEventListener('input', renderSystems);
       document.getElementById('copy-modal-button').addEventListener('click', copyModalOutput);

@@ -17,6 +17,7 @@ How to debug: Start with `LOG_LEVEL=DEBUG`, inspect `/health`, `/reports`, worke
 - Collects threat intelligence from RSS, Reddit `r/netsec`, Hacker News RSS, and GitHub issues.
 - Uses an OpenAI-compatible API to extract structured malicious-package signals from unstructured articles.
 - Generates CycloneDX and SPDX SBOMs for every scanned asset.
+- Exports active alerts as SARIF 2.1.0 JSON for GitHub Code Scanning-compatible tooling.
 - Exposes REST endpoints and a browser dashboard.
 - Sends alerts to Slack, email, and GitHub issues.
 
@@ -24,8 +25,8 @@ How to debug: Start with `LOG_LEVEL=DEBUG`, inspect `/health`, `/reports`, worke
 
 ```bash
 cp .env.example .env
-docker compose pull
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.local.yml pull
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 open http://localhost:31337
 ```
 
@@ -41,8 +42,8 @@ python3.12 -m venv .venv
 
 ```bash
 cp .env.example .env
-docker compose -f docker-compose.yml -f docker-compose.build.yml build
-docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.build.yml build
+docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.build.yml up -d
 ```
 
 ## Run Tests
@@ -57,8 +58,12 @@ python3.12 -m venv .venv
 
 Key environment variables:
 
-- `SECURITY_WATCHDOG_IMAGE`: Standard image tag for Compose deployments, for example `ghcr.io/feberdin/security-watchdog:latest` or a pinned release tag.
+- `SECURITY_WATCHDOG_IMAGE`: Image tag for Compose deployments. Production defaults to `ghcr.io/feberdin/security-watchdog:latest`; review, rollback, or reproducible deployments can override this with a pinned branch tag, release tag, or digest.
+- `SECURITY_WATCHDOG_DATA_PATH`: Host path for `/app/data`. Local default is `./data`; Broker/Unraid default is `/mnt/user/appdata/security-watchdog`.
+- `LOG_MAX_SIZE`, `LOG_MAX_FILE`: Docker JSON log rotation limits used by the Compose stack.
 - `PUID`, `PGID`: Optional container runtime user/group mapping. On Unraid, `99`/`100` usually matches `nobody:users`.
+- `POSTGRES_PASSWORD`: Local Docker password for PostgreSQL. In Broker GitOps deployments this must be provided as the Broker secret `SECURITY_WATCHDOG_POSTGRES_PASSWORD`.
+- `SECURITY_WATCHDOG_DATABASE_URL`: Broker secret containing the PostgreSQL connection string for the application.
 - `GITHUB_TOKEN`: GitHub token with access to the repositories you want to monitor.
 - `SECRET_HISTORY_SCAN_ENABLED`: When `true`, public GitHub repositories are fetched with full history and scanned for secrets in old commits as well as the current tree.
 - `SECRET_HISTORY_MAX_COMMITS_PER_REPO`: Optional safety limit for history scanning. `0` means scan the full reachable history.
@@ -77,11 +82,14 @@ Key environment variables:
 - `GET /scan-jobs/latest`: Latest manual scan including queue/running/success/failure state.
 - `GET /scan-jobs/{job_id}`: One manual scan job with timestamps, counts, and error details.
 - `GET /reports`: Aggregated dashboard/report data.
+- `GET /reports/sarif`: Active alerts as SARIF 2.1.0 JSON. Add `?include_resolved=true` for audit exports.
 - `GET /alerts`: Latest alerts.
 - `GET /threats`: Recent threat articles and AI-extracted threat records.
 - `GET /dependencies`: Recently scanned dependencies.
 - `GET /repositories`: Repository-like assets, including Unraid and Home Assistant.
 - `GET /systems`: System-centric inventory for the dashboard with expandable dependency details and latest-version hints.
+- `GET /automation/high-risk-updates`: Prioritized update queue for high-risk and outdated dependencies.
+- `GET /automation/high-risk-updates/codex-prompt`: Master prompt for a controlled Codex update run across queued repositories.
 - `GET /health`: Liveness check.
 - Default port: `31337` because it is a memorable security-themed port and was free on the current host during setup.
 
@@ -90,6 +98,10 @@ Key environment variables:
 For Unraid Docker coverage:
 
 - Run the stack on Unraid or mount the Unraid Docker socket into the containers.
+- Deploy the GitOps stack through the Unraid Deployment Broker with `docker-compose.yml`; it contains `secret://...` references that the Broker resolves at runtime.
+- Required Broker secrets are `SECURITY_WATCHDOG_POSTGRES_PASSWORD`, `SECURITY_WATCHDOG_DATABASE_URL`, and `SECURITY_WATCHDOG_GITHUB_TOKEN`.
+- The Compose default network is pinned to `10.200.9.0/24` so the Broker can verify that Docker networking does not overlap LAN/VLAN ranges.
+- For local Docker usage outside the Broker, always add `docker-compose.local.yml` so `.env` values replace the Broker secret references.
 - Leave `UNRAID_DOCKER_ENABLED=true`.
 - Set `PUID=99` and `PGID=100` on Unraid unless your share permissions require different values.
 - The entrypoint maps the service user to those IDs and adds docker socket group access automatically when `/var/run/docker.sock` is mounted.
@@ -115,6 +127,8 @@ For Home Assistant coverage:
 
 - `Tower update failed with a macOS path`: the path `/Users/...` is only valid on the development machine. On Unraid, switch into the real Compose project directory first and then run `docker compose pull && docker compose up -d`.
 - `docker compose pull` says `no configuration file provided`: you are probably in `/mnt/user/appdata/security-watchdog`, which is only the persistent data directory for the Unraid template. Update the container through the Unraid template or switch into the actual Compose project directory first.
+- `secret://...` appears as the runtime password locally: start local Compose with `-f docker-compose.yml -f docker-compose.local.yml` and verify that `.env` exists.
+- `Broker blocks /var/run/docker.sock`: add a stack-scoped Broker policy allowance for `security-watchdog` before registering the stack source. Do not hide the mount behind a Compose variable.
 - `GitHub repos not syncing`: verify `GITHUB_TOKEN` scope and check worker logs for Git clone errors.
 - `Public repo history scan is too slow`: set `SECRET_HISTORY_MAX_COMMITS_PER_REPO` to a smaller number temporarily, or disable `SECRET_HISTORY_SCAN_ENABLED` while you triage the largest repositories.
 - `Unraid containers missing`: verify `/var/run/docker.sock` is mounted and readable inside `watchdog` and `worker`.
@@ -131,8 +145,9 @@ For Home Assistant coverage:
 - API logs: `docker compose logs -f watchdog`
 - Worker logs: `docker compose logs -f worker`
 - Manual scan progress: `curl -fsS http://localhost:31337/scan-jobs/latest`
-- Stable image upgrade: `docker compose pull && docker compose up -d`
-- Local source rebuild: `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`
+- SARIF export: `curl -fsS http://localhost:31337/reports/sarif > security-watchdog.sarif`
+- Stable local image upgrade: `docker compose -f docker-compose.yml -f docker-compose.local.yml pull && docker compose -f docker-compose.yml -f docker-compose.local.yml up -d`
+- Local source rebuild: `docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.build.yml up -d --build`
 - Database state: inspect `repositories`, `dependencies`, `vulnerabilities`, `scan_results`, `threat_articles`, `ai_extracted_threats`, and `alerts`.
 - SBOM output: `data/sbom/<asset>/cyclonedx.json` and `data/sbom/<asset>/spdx.json`
 
@@ -142,6 +157,12 @@ For Home Assistant coverage:
 - Prefer read-only mounts for Home Assistant paths.
 - Mounting the Docker socket grants powerful host access; restrict access to this stack accordingly.
 - Rotate any secret immediately if the secret scanner reports a real credential.
+
+## Acknowledgements
+
+- Inspired in part by [m3lixir/chumdump](https://github.com/m3lixir/chumdump), especially its
+  evidence-first security reporting and SARIF export ideas. Gruss und Danke an Melisa K. Savich
+  fuer die oeffentlichen Research-Ideen.
 
 ## License Note
 

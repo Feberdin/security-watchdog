@@ -4,16 +4,59 @@
 # you explicitly want Unraid container discovery inside this stack.
 # Debugging: If scans fail inside Docker, check service health and volume mounts defined here.
 
+# Why this exists: production Compose pulls the default published image, while review or rollback
+# deployments can override SECURITY_WATCHDOG_IMAGE with a pinned tag or digest.
 x-watchdog-image: &watchdog-image ${SECURITY_WATCHDOG_IMAGE:-ghcr.io/feberdin/security-watchdog:latest}
+x-watchdog-logging: &watchdog-logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-10m}
+    max-file: ${LOG_MAX_FILE:-3}
+x-watchdog-environment: &watchdog-environment
+  APP_NAME: ${APP_NAME:-security-watchdog}
+  ENVIRONMENT: ${ENVIRONMENT:-production}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  API_HOST: ${API_HOST:-0.0.0.0}
+  API_PORT: ${API_PORT:-31337}
+  RUN_EMBEDDED_SCHEDULER: ${RUN_EMBEDDED_SCHEDULER:-false}
+  PUID: ${PUID:-99}
+  PGID: ${PGID:-100}
+  DATABASE_URL: secret://SECURITY_WATCHDOG_DATABASE_URL
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  GITHUB_TOKEN: secret://SECURITY_WATCHDOG_GITHUB_TOKEN
+  GITHUB_USERNAME: ${GITHUB_USERNAME:-}
+  GITHUB_INCLUDE_PRIVATE: ${GITHUB_INCLUDE_PRIVATE:-true}
+  SECRET_HISTORY_SCAN_ENABLED: ${SECRET_HISTORY_SCAN_ENABLED:-true}
+  SECRET_HISTORY_MAX_COMMITS_PER_REPO: ${SECRET_HISTORY_MAX_COMMITS_PER_REPO:-0}
+  GITHUB_ALERT_REPOSITORY: ${GITHUB_ALERT_REPOSITORY:-}
+  UNRAID_DOCKER_ENABLED: ${UNRAID_DOCKER_ENABLED:-true}
+  UNRAID_DOCKER_HOST: ${UNRAID_DOCKER_HOST:-unix:///var/run/docker.sock}
+  UNRAID_VERIFY_TLS: ${UNRAID_VERIFY_TLS:-false}
+  HOMEASSISTANT_SCAN_ENABLED: ${HOMEASSISTANT_SCAN_ENABLED:-true}
+  HOMEASSISTANT_CONFIG_PATH: ${HOMEASSISTANT_CONFIG_PATH:-/opt/homeassistant-config}
+  HOMEASSISTANT_CORE_COMPONENTS_PATH: ${HOMEASSISTANT_CORE_COMPONENTS_PATH:-/opt/homeassistant-core/components}
+  HOMEASSISTANT_REMOTE_ENABLED: ${HOMEASSISTANT_REMOTE_ENABLED:-false}
+  HOMEASSISTANT_REMOTE_BASE_URL: ${HOMEASSISTANT_REMOTE_BASE_URL:-}
+  HOMEASSISTANT_REMOTE_VERIFY_TLS: ${HOMEASSISTANT_REMOTE_VERIFY_TLS:-true}
+  HOMEASSISTANT_REMOTE_TIMEOUT_SECONDS: ${HOMEASSISTANT_REMOTE_TIMEOUT_SECONDS:-15}
+  AI_ENABLED: ${AI_ENABLED:-false}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+  OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+  EMAIL_ENABLED: ${EMAIL_ENABLED:-false}
+  EMAIL_FROM: ${EMAIL_FROM:-watchdog@example.local}
+  SMTP_HOST: ${SMTP_HOST:-mailhog}
+  SMTP_PORT: ${SMTP_PORT:-1025}
+  SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
 
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *watchdog-logging
     environment:
       POSTGRES_DB: watchdog
       POSTGRES_USER: watchdog
-      POSTGRES_PASSWORD: watchdog
+      POSTGRES_PASSWORD: secret://SECURITY_WATCHDOG_POSTGRES_PASSWORD
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -25,6 +68,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *watchdog-logging
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
@@ -37,8 +81,9 @@ services:
   watchdog:
     image: *watchdog-image
     restart: unless-stopped
-    env_file:
-      - .env
+    logging: *watchdog-logging
+    environment:
+      <<: *watchdog-environment
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "31337"]
     ports:
       - "31337:31337"
@@ -48,7 +93,7 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      - ./data:/app/data
+      - ${SECURITY_WATCHDOG_DATA_PATH:-/mnt/user/appdata/security-watchdog}:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
       - /mnt/user/appdata/homeassistant:/opt/homeassistant-config:ro
       - /mnt/user/appdata/homeassistant-core/components:/opt/homeassistant-core/components:ro
@@ -61,8 +106,9 @@ services:
   worker:
     image: *watchdog-image
     restart: unless-stopped
-    env_file:
-      - .env
+    logging: *watchdog-logging
+    environment:
+      <<: *watchdog-environment
     command: ["python", "-m", "app.worker"]
     depends_on:
       postgres:
@@ -70,11 +116,27 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      - ./data:/app/data
+      - ${SECURITY_WATCHDOG_DATA_PATH:-/mnt/user/appdata/security-watchdog}:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
       - /mnt/user/appdata/homeassistant:/opt/homeassistant-config:ro
       - /mnt/user/appdata/homeassistant-core/components:/opt/homeassistant-core/components:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "from app.core.config import get_settings; get_settings()"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
 
 volumes:
   postgres-data:
   redis-data:
+
+# Why this exists: the Unraid Deployment Broker requires an explicit Docker bridge subnet so
+# Docker cannot auto-allocate a range that overlaps Joachim's LAN/VLAN networks.
+# What happens here: every service that uses the default Compose network gets the same
+# stack-local subnet and gateway during deployment.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.200.9.0/24
+          gateway: 10.200.9.1

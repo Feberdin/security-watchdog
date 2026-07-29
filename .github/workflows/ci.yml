@@ -1,0 +1,44 @@
+# Purpose: Run the local quality gate for pull requests and branch pushes.
+# Input/Output: Installs the Python package with dev dependencies, then runs lint, tests, and
+# bytecode compilation as a fast signal before Docker images are published.
+# Important invariants: CI must not require live GitHub, Unraid, Home Assistant, or AI credentials;
+# tests should stay deterministic and use local fixtures or in-memory databases.
+# Debugging: If CI fails, reproduce locally with the commands from the individual steps below.
+
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-quality:
+    name: Python quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Test
+        run: python -m pytest
+
+      - name: Compile
+        run: python -m compileall app tests

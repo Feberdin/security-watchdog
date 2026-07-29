@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
@@ -20,6 +20,7 @@ from app.models.entities import AIExtractedThreat, Alert, Dependency, Repository
 from app.models.schemas import (
     AlertOut,
     CodexPromptOut,
+    HighRiskUpdateQueueOut,
     ManualScanJobOut,
     ReportOut,
     RepositoryOut,
@@ -34,6 +35,7 @@ from app.services.manual_scan_jobs import (
     process_manual_scan_job,
 )
 from app.services.reporting import ReportingService
+from app.services.sarif import SarifReportingService
 
 router = APIRouter()
 LOGGER = logging.getLogger(__name__)
@@ -69,7 +71,7 @@ def trigger_scan(
             status=scan_job.status,
             status_url=str(http_request.url_for("get_scan_job", job_id=scan_job.id)),
         )
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         session.rollback()
         LOGGER.exception(
             "Manual scan request failed",
@@ -104,6 +106,21 @@ def get_report(session: Session = Depends(get_db_session)) -> ReportOut:
     """Return aggregated risk and activity metrics for operators."""
 
     return ReportingService().build_report(session)
+
+
+@router.get("/reports/sarif")
+def get_sarif_report(
+    include_resolved: bool = False,
+    limit: int = Query(default=500, ge=1, le=5000),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Return active alerts as SARIF so security tooling can consume the findings."""
+
+    return SarifReportingService().build_report(
+        session,
+        include_resolved=include_resolved,
+        limit=limit,
+    )
 
 
 @router.get("/alerts", response_model=list[AlertOut])
@@ -181,6 +198,29 @@ def get_systems(session: Session = Depends(get_db_session)) -> list[SystemInvent
     """Return all scanned systems with dependency details for the dashboard accordion view."""
 
     return ReportingService().build_system_inventory(session)
+
+
+@router.get("/automation/high-risk-updates", response_model=HighRiskUpdateQueueOut)
+def get_high_risk_update_queue(
+    limit: int = Query(default=25, ge=1, le=100),
+    session: Session = Depends(get_db_session),
+) -> HighRiskUpdateQueueOut:
+    """Return the prioritized update queue that a Codex automation can process safely."""
+
+    return ReportingService().build_high_risk_update_queue(session, limit=limit)
+
+
+@router.get("/automation/high-risk-updates/codex-prompt", response_model=CodexPromptOut)
+def get_high_risk_update_prompt(
+    limit: int = Query(default=25, ge=1, le=100),
+    session: Session = Depends(get_db_session),
+) -> CodexPromptOut:
+    """Generate the master prompt for a Codex high-risk update run."""
+
+    return CodexPromptOut(
+        title="Codex High-Risk Update Queue",
+        prompt=ReportingService().build_high_risk_update_prompt(session, limit=limit),
+    )
 
 
 @router.get("/diagnostics/export")

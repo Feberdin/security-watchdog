@@ -57,7 +57,7 @@ class AlertDispatcher:
         try:
             with httpx.Client(timeout=15) as client:
                 client.post(self.settings.slack_webhook_url, json=payload).raise_for_status()
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             LOGGER.warning("Slack alert delivery failed", extra={"alert_id": alert.id, "error": str(error)})
 
     def _send_email(self, alert: Alert, repository: Repository | None) -> None:
@@ -97,5 +97,5 @@ class AlertDispatcher:
         )
         try:
             self.github_client.create_issue(self.settings.github_alert_repository, title, body)
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             LOGGER.warning("GitHub issue alert delivery failed", extra={"alert_id": alert.id, "error": str(error)})

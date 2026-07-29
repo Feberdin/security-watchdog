@@ -81,8 +81,7 @@ class GitHubClient:
         for keyword in keywords:
             query = f'{keyword} in:title,body is:issue archived:false'
             results = self._request("GET", "/search/issues", params={"q": query, "per_page": 20})
-            for item in results.get("items", []):
-                yield item
+            yield from results.get("items", [])
 
     def list_advisories(self, ecosystem: str, package_name: str) -> list[dict[str, Any]]:
         """Fetch GitHub Security Advisories for one package/ecosystem pair."""

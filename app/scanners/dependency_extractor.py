@@ -12,8 +12,9 @@ import json
 import logging
 import re
 import tomllib
-import xml.etree.ElementTree as ET
 from pathlib import Path
+
+from defusedxml import ElementTree
 
 from app.models.schemas import DependencyRecord
 
@@ -72,7 +73,7 @@ class DependencyExtractor:
             return []
         try:
             return parser(manifest_path, relative_path)
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             LOGGER.warning(
                 "Dependency parsing failed",
                 extra={"manifest_path": str(manifest_path), "error": str(error)},
@@ -188,7 +189,7 @@ class DependencyExtractor:
     def _parse_pom_xml(self, manifest_path: Path, relative_path: str) -> list[DependencyRecord]:
         """Parse Maven dependencies from XML."""
 
-        tree = ET.parse(manifest_path)
+        tree = ElementTree.parse(manifest_path)
         root = tree.getroot()
         namespace = {"mvn": root.tag.split("}")[0].strip("{")} if "}" in root.tag else {}
         dependency_xpath = ".//mvn:dependency" if namespace else ".//dependency"

@@ -27,7 +27,13 @@ from app.models.entities import (
     ThreatArticle,
     Vulnerability,
 )
-from app.models.schemas import DependencyRecord, ScanRequest, ScanResponse, ThreatArticleRecord, VulnerabilityRecord
+from app.models.schemas import (
+    DependencyRecord,
+    ScanRequest,
+    ScanResponse,
+    ThreatArticleRecord,
+    VulnerabilityRecord,
+)
 
 LOGGER = logging.getLogger(__name__)
 

@@ -1,0 +1,31 @@
+# Purpose: Keep Python and GitHub Actions dependencies visible and current.
+# Input/Output: Dependabot opens pull requests for `pyproject.toml` and workflow action updates.
+# Important invariants: Updates should be reviewable, grouped by ecosystem, and must not require
+# credentials from the application runtime.
+# Debugging: If no update PRs appear, check the repository security settings and Dependabot logs.
+
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+      include: scope
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:30"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+      include: scope

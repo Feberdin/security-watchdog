@@ -17,8 +17,8 @@ from fastapi.staticfiles import StaticFiles
 from app.api.routes import router as api_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.db.session import initialize_database
 from app.dashboard.router import router as dashboard_router
+from app.db.session import initialize_database
 from app.scheduler.jobs import build_background_scheduler
 
 settings = get_settings()

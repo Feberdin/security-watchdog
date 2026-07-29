@@ -21,6 +21,16 @@ python3.12 -m venv .venv
 .venv/bin/pytest
 ```
 
+## Local Quality Gate
+
+Run the same checks as GitHub Actions before pushing:
+
+```bash
+.venv/bin/ruff check .
+.venv/bin/pytest
+.venv/bin/python -m compileall app tests
+```
+
 ## Code Style
 
 - Prefer readability over compactness.
@@ -38,6 +48,7 @@ python3.12 -m venv .venv
 
 - `GET /health` should return `{"status": "ok"}`.
 - `GET /reports` should load without server errors.
+- `GET /reports/sarif` should return a SARIF document with `version` set to `2.1.0`.
 - A manual `POST /scan` should return `202 Accepted`, create a `manual_scan_jobs` row, and
   eventually populate fresh `scan_results`.
 - If you change Docker or Home Assistant integration behavior, validate mounted-path assumptions in `deployment.md`.

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 import feedparser
 import httpx
@@ -117,20 +118,35 @@ class ThreatIntelligenceService:
             LOGGER.warning("GitHub issue threat feed failed", extra={"error": str(error)})
             return []
         for item in results:
+            title = self._text_or_default(item.get("title"), "Untitled GitHub issue")
+            body = self._text_or_empty(item.get("body"))
             articles.append(
                 ThreatArticleRecord(
                     source_type="github_issue",
-                    title=item.get("title", "Untitled GitHub issue"),
-                    source_url=item.get("html_url", ""),
+                    title=title,
+                    source_url=self._text_or_empty(item.get("html_url")),
                     published_at=self._parse_datetime(item.get("created_at")),
-                    raw_content=item.get("body", ""),
-                    normalized_text=self._normalize_text(
-                        f"{item.get('title', '')}\n{item.get('body', '')}"
-                    ),
+                    raw_content=body,
+                    normalized_text=self._normalize_text(f"{title}\n{body}"),
                     tags=["github_issue", "threat_intel"],
                 )
             )
         return articles
+
+    # Why this exists: third-party APIs sometimes return JSON null for optional text fields.
+    # What happens here: values are converted before Pydantic validation so one malformed item
+    # cannot abort the whole scheduled threat-feed collection job.
+    def _text_or_empty(self, value: Any) -> str:
+        """Return a string for optional external text fields."""
+
+        return value if isinstance(value, str) else ""
+
+    def _text_or_default(self, value: Any, default: str) -> str:
+        """Return a non-empty string title for optional external text fields."""
+
+        if isinstance(value, str) and value.strip():
+            return value
+        return default
 
     def _normalize_text(self, value: str) -> str:
         """Collapse whitespace so downstream AI prompts stay small and consistent."""

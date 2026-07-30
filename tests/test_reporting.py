@@ -25,6 +25,7 @@ from app.models.entities import (
     ScanResult,
     Vulnerability,
 )
+from app.repositories.store import build_alert_fingerprint
 from app.services.reporting import ReportingService
 from app.services.version_catalog import LatestVersionRecord
 
@@ -562,3 +563,77 @@ def test_build_system_inventory_surfaces_runtime_findings_from_alerts() -> None:
     assert runtime_finding.vulnerability_id == "CVE-2026-34040"
     assert runtime_finding.package_name == "github.com/docker/docker"
     assert runtime_finding.fix_version == "29.3.1"
+
+
+def test_report_counts_unique_secret_findings_not_history_duplicates() -> None:
+    """Repeated git-history rows for the same secret location should count as one finding."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="core",
+        full_name="Feberdin/core",
+        local_path="/tmp/core",
+        risk_score=95.0,
+    )
+    session.add(repository)
+    session.flush()
+
+    base_metadata = {
+        "file_path": "app/observer/WeatherWatcher.py",
+        "line_number": 42,
+        "detector": "high_entropy",
+        "excerpt": "abcd...wxyz",
+        "content_source": "git_history",
+    }
+    for index, commit_sha in enumerate(("a" * 40, "b" * 40), start=1):
+        session.add(
+            Alert(
+                repository_id=repository.id,
+                title="Potential secret in Feberdin/core",
+                description=f"Detector matched public git history commit {commit_sha[:12]}.",
+                severity="critical",
+                risk_score=95.0,
+                fingerprint=f"legacy-history-alert-{index}",
+                status="open",
+                source_type="secret_scanner",
+                metadata_json={**base_metadata, "commit_sha": commit_sha},
+            )
+        )
+    session.commit()
+
+    report = ReportingService(version_catalog=FakeVersionCatalog()).build_report(session)
+    systems = ReportingService(version_catalog=FakeVersionCatalog()).build_system_inventory(session)
+
+    assert report.alert_count == 1
+    assert report.critical_alert_count == 1
+    assert systems[0].open_alert_count == 1
+    assert len(systems[0].runtime_findings) == 1
+
+
+def test_secret_alert_fingerprint_ignores_git_history_commit_sha() -> None:
+    """New secret alert fingerprints should stay stable across repeated history scans."""
+
+    metadata = {
+        "file_path": "app/observer/WeatherWatcher.py",
+        "line_number": 42,
+        "detector": "high_entropy",
+        "excerpt": "abcd...wxyz",
+        "content_source": "git_history",
+    }
+
+    first = build_alert_fingerprint(
+        repository_id=7,
+        title="Potential secret in Feberdin/core",
+        source_type="secret_scanner",
+        metadata={**metadata, "commit_sha": "a" * 40},
+    )
+    second = build_alert_fingerprint(
+        repository_id=7,
+        title="Potential secret in Feberdin/core",
+        source_type="secret_scanner",
+        metadata={**metadata, "commit_sha": "b" * 40},
+    )
+
+    assert first == second

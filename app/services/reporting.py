@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from packaging.version import InvalidVersion, Version
-from sqlalchemy import desc, func, select
+from sqlalchemy import and_, case, desc, func, literal, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.entities import (
@@ -57,7 +57,7 @@ class ReportingService:
         repository_count = session.scalar(select(func.count(Repository.id))) or 0
         dependency_count = session.scalar(select(func.count(Dependency.id))) or 0
         vulnerability_count = session.scalar(select(func.count(Vulnerability.id))) or 0
-        active_alert_filter = Alert.status != "resolved"
+        active_alert_filter = self._operator_actionable_alert_filter()
         unique_open_alerts = self._deduplicate_alerts(
             self._open_alerts(session.scalars(select(Alert).where(active_alert_filter)).all())
         )
@@ -119,6 +119,105 @@ class ReportingService:
             recent_alerts=recent_alerts,
             top_vulnerabilities=top_vulnerabilities,
         )
+
+    def build_alert_diagnostics(self, session: Session, *, limit: int = 20) -> dict[str, Any]:
+        """
+        Return lightweight alert counters without loading every alert row into Python.
+
+        Why this exists:
+        The dashboard inventory intentionally renders rich per-system context, but that makes it
+        expensive when a legacy database contains many historical findings. These SQL summaries let
+        operators verify whether a large headline number is driven by containers, dependencies, or
+        scanner noise before opening the heavy accordion view.
+        """
+
+        actionable_filter = self._operator_actionable_alert_filter()
+        open_alert_rows = session.scalar(select(func.count(Alert.id)).where(Alert.status != "resolved")) or 0
+        actionable_rows = session.scalar(select(func.count(Alert.id)).where(actionable_filter)) or 0
+        excluded_legacy_rows = max(open_alert_rows - actionable_rows, 0)
+
+        count_label = func.count(Alert.id).label("alert_rows")
+        critical_rows = func.sum(case((Alert.severity == "critical", 1), else_=0)).label("critical_rows")
+        content_source = func.coalesce(
+            Alert.metadata_json["content_source"].as_string(),
+            literal("n/a"),
+        ).label("content_source")
+        finding_kind = func.coalesce(
+            Alert.metadata_json["detector"].as_string(),
+            Alert.metadata_json["vulnerability_id"].as_string(),
+            Alert.metadata_json["package_name"].as_string(),
+            literal("unknown"),
+        ).label("finding_kind")
+
+        by_source_and_severity = [
+            {
+                "source_type": source_type,
+                "severity": severity,
+                "alert_rows": alert_rows,
+            }
+            for source_type, severity, alert_rows in session.execute(
+                select(Alert.source_type, Alert.severity, count_label)
+                .where(actionable_filter)
+                .group_by(Alert.source_type, Alert.severity)
+                .order_by(desc("alert_rows"))
+                .limit(limit)
+            )
+        ]
+        by_finding_kind = [
+            {
+                "source_type": source_type,
+                "severity": severity,
+                "content_source": content_source_value,
+                "finding_kind": finding_kind_value,
+                "alert_rows": alert_rows,
+            }
+            for (
+                source_type,
+                severity,
+                content_source_value,
+                finding_kind_value,
+                alert_rows,
+            ) in session.execute(
+                select(Alert.source_type, Alert.severity, content_source, finding_kind, count_label)
+                .where(actionable_filter)
+                .group_by(Alert.source_type, Alert.severity, content_source, finding_kind)
+                .order_by(desc("alert_rows"))
+                .limit(limit)
+            )
+        ]
+        top_repositories = [
+            {
+                "repository_id": repository_id,
+                "full_name": full_name or "unknown",
+                "source_type": source_type or "unknown",
+                "alert_rows": alert_rows,
+                "critical_rows": critical_count or 0,
+            }
+            for repository_id, full_name, source_type, alert_rows, critical_count in session.execute(
+                select(
+                    Repository.id,
+                    Repository.full_name,
+                    Repository.source_type,
+                    count_label,
+                    critical_rows,
+                )
+                .join(Repository, Repository.id == Alert.repository_id, isouter=True)
+                .where(actionable_filter)
+                .group_by(Repository.id, Repository.full_name, Repository.source_type)
+                .order_by(desc("alert_rows"))
+                .limit(limit)
+            )
+        ]
+
+        return {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "open_alert_rows": open_alert_rows,
+            "operator_actionable_alert_rows": actionable_rows,
+            "excluded_legacy_git_history_entropy_rows": excluded_legacy_rows,
+            "by_source_and_severity": by_source_and_severity,
+            "by_finding_kind": by_finding_kind,
+            "top_repositories": top_repositories,
+        }
 
     def build_system_inventory(
         self,
@@ -800,7 +899,7 @@ class ReportingService:
                 selectinload(Repository.dependencies)
                 .selectinload(Dependency.vulnerability_links)
                 .selectinload(DependencyVulnerability.vulnerability),
-                selectinload(Repository.alerts),
+                selectinload(Repository.alerts.and_(self._operator_actionable_alert_filter())),
                 selectinload(Repository.scan_results),
             )
             .order_by(desc(Repository.risk_score), Repository.full_name)
@@ -816,7 +915,7 @@ class ReportingService:
                 selectinload(Repository.dependencies)
                 .selectinload(Dependency.vulnerability_links)
                 .selectinload(DependencyVulnerability.vulnerability),
-                selectinload(Repository.alerts),
+                selectinload(Repository.alerts.and_(self._operator_actionable_alert_filter())),
                 selectinload(Repository.scan_results),
             )
         )
@@ -930,6 +1029,30 @@ class ReportingService:
             for alert in alerts
             if alert.status != "resolved" and self._is_operator_actionable_alert(alert)
         ]
+
+    def _operator_actionable_alert_filter(self) -> Any:
+        """
+        Return the SQL equivalent of `_is_operator_actionable_alert`.
+
+        Why this exists:
+        Filtering in Python keeps the logic backend-agnostic, but large legacy databases should not
+        load low-confidence git-history entropy rows just to discard them. The explicit NULL checks
+        avoid SQL three-valued logic accidentally hiding container or dependency alerts that do not
+        carry secret-scanner metadata.
+        """
+
+        content_source = Alert.metadata_json["content_source"].as_string()
+        detector = Alert.metadata_json["detector"].as_string()
+        return and_(
+            Alert.status != "resolved",
+            or_(
+                Alert.source_type.not_in(["secret_scanner", "homeassistant_secret"]),
+                content_source.is_(None),
+                content_source != "git_history",
+                detector.is_(None),
+                detector != "high_entropy",
+            ),
+        )
 
     def _is_operator_actionable_alert(self, alert: Alert) -> bool:
         """

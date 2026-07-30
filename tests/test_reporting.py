@@ -583,8 +583,8 @@ def test_report_counts_unique_secret_findings_not_history_duplicates() -> None:
     base_metadata = {
         "file_path": "app/observer/WeatherWatcher.py",
         "line_number": 42,
-        "detector": "high_entropy",
-        "excerpt": "abcd...wxyz",
+        "detector": "github_token",
+        "excerpt": "ghp_...wxyz",
         "content_source": "git_history",
     }
     for index, commit_sha in enumerate(("a" * 40, "b" * 40), start=1):
@@ -618,8 +618,8 @@ def test_secret_alert_fingerprint_ignores_git_history_commit_sha() -> None:
     metadata = {
         "file_path": "app/observer/WeatherWatcher.py",
         "line_number": 42,
-        "detector": "high_entropy",
-        "excerpt": "abcd...wxyz",
+        "detector": "github_token",
+        "excerpt": "ghp_...wxyz",
         "content_source": "git_history",
     }
 
@@ -637,3 +637,49 @@ def test_secret_alert_fingerprint_ignores_git_history_commit_sha() -> None:
     )
 
     assert first == second
+
+
+def test_report_excludes_legacy_git_history_entropy_noise() -> None:
+    """Entropy-only history findings should not inflate critical operator metrics."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="core",
+        full_name="Feberdin/core",
+        local_path="/tmp/core",
+        risk_score=95.0,
+    )
+    session.add(repository)
+    session.flush()
+    session.add(
+        Alert(
+            repository_id=repository.id,
+            title="Potential secret in Feberdin/core",
+            description="Detector matched public git history commit abc123.",
+            severity="critical",
+            risk_score=95.0,
+            fingerprint="legacy-history-entropy-alert",
+            status="open",
+            source_type="secret_scanner",
+            metadata_json={
+                "file_path": "README.md",
+                "line_number": 46,
+                "detector": "high_entropy",
+                "excerpt": "abcd...wxyz",
+                "content_source": "git_history",
+                "commit_sha": "a" * 40,
+            },
+        )
+    )
+    session.commit()
+
+    service = ReportingService(version_catalog=FakeVersionCatalog())
+    report = service.build_report(session)
+    systems = service.build_system_inventory(session)
+
+    assert report.alert_count == 0
+    assert report.critical_alert_count == 0
+    assert systems[0].open_alert_count == 0
+    assert systems[0].runtime_findings == []

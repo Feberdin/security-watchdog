@@ -449,10 +449,48 @@ def build_alert_fingerprint(
                 "repository_id": repository_id,
                 "title": title,
                 "source_type": source_type,
-                "metadata": metadata,
+                "metadata": _stable_fingerprint_metadata(source_type, metadata),
             }
         )
     )
+
+
+def _stable_fingerprint_metadata(source_type: str, metadata: dict) -> dict:
+    """
+    Keep alert fingerprints tied to the finding identity, not to scan-run noise.
+
+    Why this exists:
+    Secret history scans can see the same leaked line in many commits. If the commit SHA is part of
+    the alert fingerprint, repeated full scans create thousands of open "new" critical alerts for
+    one operator action. The commit is still stored in alert metadata and description for triage,
+    but the dedupe key stays focused on the actionable finding.
+    """
+
+    if source_type in {"secret_scanner", "homeassistant_secret"}:
+        return {
+            "file_path": metadata.get("file_path", ""),
+            "line_number": metadata.get("line_number", ""),
+            "detector": metadata.get("detector", ""),
+            "excerpt": metadata.get("excerpt", ""),
+            "content_source": metadata.get("content_source", ""),
+        }
+    if source_type in {"container_scanner", "unraid_container"}:
+        return {
+            "target": metadata.get("target") or metadata.get("image_ref") or "",
+            "vulnerability_id": metadata.get("vulnerability_id", ""),
+            "package_name": metadata.get("package_name", ""),
+            "installed_version": metadata.get("installed_version", ""),
+        }
+    if source_type in {"dependency_vulnerability", "ai_correlation"}:
+        return {
+            "dependency": metadata.get("dependency", ""),
+            "version": metadata.get("version", ""),
+            "manifest_path": metadata.get("manifest_path", ""),
+            "vulnerability": metadata.get("vulnerability", ""),
+            "source_url": metadata.get("source_url", ""),
+            "attack_type": metadata.get("attack_type", ""),
+        }
+    return metadata
 
 
 def resolve_stale_alerts(

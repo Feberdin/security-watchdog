@@ -9,6 +9,7 @@ Debugging: If a dashboard card looks wrong, compare the raw query result with th
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -57,15 +58,12 @@ class ReportingService:
         dependency_count = session.scalar(select(func.count(Dependency.id))) or 0
         vulnerability_count = session.scalar(select(func.count(Vulnerability.id))) or 0
         active_alert_filter = Alert.status != "resolved"
-        alert_count = session.scalar(select(func.count(Alert.id)).where(active_alert_filter)) or 0
-        critical_alert_count = (
-            session.scalar(
-                select(func.count(Alert.id)).where(
-                    active_alert_filter,
-                    Alert.severity == "critical",
-                )
-            )
-            or 0
+        unique_open_alerts = self._deduplicate_alerts(
+            session.scalars(select(Alert).where(active_alert_filter)).all()
+        )
+        alert_count = len(unique_open_alerts)
+        critical_alert_count = len(
+            [alert for alert in unique_open_alerts if alert.severity == "critical"]
         )
 
         repository_risk = [
@@ -81,12 +79,12 @@ class ReportingService:
 
         recent_alerts = [
             AlertOut.model_validate(alert)
-            for alert in session.scalars(
-                select(Alert)
-                .where(active_alert_filter)
-                .order_by(desc(Alert.updated_at))
-                .limit(10)
+            for alert in sorted(
+                unique_open_alerts,
+                key=lambda item: self._alert_recency_key(item),
+                reverse=True,
             )
+            [:10]
         ]
 
         top_vulnerabilities = [
@@ -775,9 +773,7 @@ class ReportingService:
         vulnerable_dependency_count = len(
             [dependency for dependency in dependencies if dependency.risk_score > 0]
         )
-        open_alert_count = len(
-            [alert for alert in repository.alerts if alert.status != "resolved"]
-        )
+        open_alert_count = len(self._deduplicate_alerts(self._open_alerts(repository.alerts)))
         return SystemInventoryOut(
             id=repository.id,
             owner=repository.owner,
@@ -893,12 +889,10 @@ class ReportingService:
 
         findings: list[RuntimeFindingOut] = []
         for alert in sorted(
-            repository.alerts,
-            key=lambda item: (item.risk_score, item.updated_at),
+            self._deduplicate_alerts(self._open_alerts(repository.alerts)),
+            key=lambda item: self._alert_sort_key(item),
             reverse=True,
         ):
-            if alert.status == "resolved":
-                continue
             if alert.source_type in {"dependency_vulnerability", "ai_correlation"}:
                 continue
             metadata = alert.metadata_json or {}
@@ -927,6 +921,80 @@ class ReportingService:
                 )
             )
         return findings[:25]
+
+    def _open_alerts(self, alerts: Iterable[Alert]) -> list[Alert]:
+        """Return unresolved alerts in memory so duplicate grouping stays backend-agnostic."""
+
+        return [alert for alert in alerts if alert.status != "resolved"]
+
+    def _deduplicate_alerts(self, alerts: Iterable[Alert]) -> list[Alert]:
+        """
+        Collapse legacy duplicate alert rows into one operator-facing finding.
+
+        Why this exists:
+        Older scans included noisy metadata such as git-history commit SHA in fingerprints. The
+        database can therefore contain many open rows for one actionable finding. Reporting should
+        answer "how many findings need work?" instead of "how many duplicate rows exist?".
+        """
+
+        best_by_identity: dict[tuple[Any, ...], Alert] = {}
+        for alert in alerts:
+            identity = self._alert_identity(alert)
+            current = best_by_identity.get(identity)
+            if current is None or self._alert_sort_key(alert) > self._alert_sort_key(current):
+                best_by_identity[identity] = alert
+        return list(best_by_identity.values())
+
+    def _alert_identity(self, alert: Alert) -> tuple[Any, ...]:
+        """Return the stable finding identity used by report-level deduplication."""
+
+        metadata = alert.metadata_json or {}
+        if alert.source_type in {"secret_scanner", "homeassistant_secret"}:
+            return (
+                alert.repository_id,
+                alert.source_type,
+                alert.title,
+                metadata.get("file_path", ""),
+                metadata.get("line_number", ""),
+                metadata.get("detector", ""),
+                metadata.get("excerpt", ""),
+                metadata.get("content_source", ""),
+            )
+        if alert.source_type in {"container_scanner", "unraid_container"}:
+            return (
+                alert.repository_id,
+                alert.source_type,
+                alert.title,
+                metadata.get("target") or metadata.get("image_ref") or "",
+                metadata.get("vulnerability_id", ""),
+                metadata.get("package_name", ""),
+                metadata.get("installed_version", ""),
+            )
+        if alert.source_type in {"dependency_vulnerability", "ai_correlation"}:
+            return (
+                alert.repository_id,
+                alert.source_type,
+                alert.title,
+                metadata.get("dependency", ""),
+                metadata.get("version", ""),
+                metadata.get("manifest_path", ""),
+                metadata.get("vulnerability", ""),
+                metadata.get("source_url", ""),
+                metadata.get("attack_type", ""),
+            )
+        return (alert.repository_id, alert.source_type, alert.fingerprint)
+
+    def _alert_sort_key(self, alert: Alert) -> tuple[float, datetime, int]:
+        """Prefer the newest high-risk row when duplicate alert rows exist."""
+
+        updated_at = self._normalize_datetime(alert.updated_at) or datetime.min.replace(tzinfo=UTC)
+        return (alert.risk_score, updated_at, alert.id or 0)
+
+    def _alert_recency_key(self, alert: Alert) -> tuple[datetime, int]:
+        """Sort alert summaries by the latest persisted update timestamp."""
+
+        updated_at = self._normalize_datetime(alert.updated_at) or datetime.min.replace(tzinfo=UTC)
+        return (updated_at, alert.id or 0)
 
     def _build_scheduler_health(self, session: Session) -> dict[str, dict[str, Any]]:
         """Summarize the most recent recurring job activity from stored scan results."""

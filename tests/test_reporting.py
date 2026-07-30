@@ -439,6 +439,83 @@ def test_build_high_risk_update_prompt_contains_safe_codex_rules() -> None:
     assert "Target version: 2.32.3" in prompt
     assert "wait for CI for the exact pushed commit" in prompt
     assert "use only the `unraid_deploy` MCP broker flow" in prompt
+    assert "Do not update solely because a target version is higher" in prompt
+    assert "Treat `constraint` status as a warning" in prompt
+    assert "If compatibility cannot be proven locally, do not force the update" in prompt
+
+
+def test_high_risk_update_queue_marks_constraints_for_review() -> None:
+    """Constraint drift should tell Codex to inspect compatibility before changing ranges."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="security-watchdog",
+        full_name="Feberdin/security-watchdog",
+        local_path="/tmp/security-watchdog",
+        risk_score=20.0,
+    )
+    session.add(repository)
+    session.flush()
+
+    session.add(
+        Dependency(
+            repository_id=repository.id,
+            manifest_path="pyproject.toml",
+            package_name="requests",
+            version=">=2.25,<2.26",
+            ecosystem="pypi",
+        )
+    )
+    session.commit()
+
+    queue = ReportingService(version_catalog=FakeVersionCatalog()).build_high_risk_update_queue(session)
+
+    assert queue.task_count == 1
+    dependency_action = queue.tasks[0].dependencies[0]
+    assert dependency_action.latest_version_status == "constraint"
+    assert dependency_action.action == "review_constraint_and_update_config_if_safe"
+
+
+def test_build_daily_security_automation_returns_machine_readable_runbook() -> None:
+    """The daily automation API payload should include queue data and the strict update guardrails."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="security-watchdog",
+        full_name="Feberdin/security-watchdog",
+        local_path="/tmp/security-watchdog",
+        risk_score=20.0,
+    )
+    session.add(repository)
+    session.flush()
+
+    session.add(
+        Dependency(
+            repository_id=repository.id,
+            manifest_path="requirements.txt",
+            package_name="requests",
+            version="2.25.0",
+            ecosystem="pypi",
+        )
+    )
+    session.commit()
+
+    runbook = ReportingService(version_catalog=FakeVersionCatalog()).build_daily_security_automation(
+        session,
+        max_tasks_per_run=2,
+    )
+
+    assert runbook.api_version == "2026-07-30"
+    assert runbook.recommended_schedule == "daily"
+    assert runbook.max_tasks_per_run == 2
+    assert runbook.source_endpoints["runbook"] == "/automation/daily-security-check"
+    assert runbook.queue.task_count == 1
+    assert "Do not update solely because a target version is higher" in runbook.guardrails[0]
+    assert "Do not merge pull requests and do not deploy automatically" in runbook.codex_prompt
 
 
 def test_build_system_inventory_surfaces_runtime_findings_from_alerts() -> None:

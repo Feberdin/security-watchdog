@@ -480,7 +480,7 @@ def test_high_risk_update_queue_marks_constraints_for_review() -> None:
 
 
 def test_build_daily_security_automation_returns_machine_readable_runbook() -> None:
-    """The daily automation API payload should include queue data and the strict update guardrails."""
+    """The daily automation runbook should stay fast and avoid live latest-version lookups."""
 
     session = build_test_session()
     repository = Repository(
@@ -494,18 +494,39 @@ def test_build_daily_security_automation_returns_machine_readable_runbook() -> N
     session.add(repository)
     session.flush()
 
+    dependency = Dependency(
+        repository_id=repository.id,
+        manifest_path="requirements.txt",
+        package_name="requests",
+        version="2.25.0",
+        ecosystem="pypi",
+    )
+    session.add(dependency)
+    session.flush()
+
+    vulnerability = Vulnerability(
+        source="osv",
+        source_identifier="CVE-2026-0001",
+        package_name="requests",
+        ecosystem="pypi",
+        summary="Example vulnerability",
+        severity="high",
+        malicious_package=True,
+    )
+    session.add(vulnerability)
+    session.flush()
+
     session.add(
-        Dependency(
-            repository_id=repository.id,
-            manifest_path="requirements.txt",
-            package_name="requests",
-            version="2.25.0",
-            ecosystem="pypi",
+        DependencyVulnerability(
+            dependency_id=dependency.id,
+            vulnerability_id=vulnerability.id,
+            risk_score=82.5,
+            match_reason="Unit test match",
         )
     )
     session.commit()
 
-    runbook = ReportingService(version_catalog=FakeVersionCatalog()).build_daily_security_automation(
+    runbook = ReportingService(version_catalog=ExplodingVersionCatalog()).build_daily_security_automation(
         session,
         max_tasks_per_run=2,
     )
@@ -515,6 +536,8 @@ def test_build_daily_security_automation_returns_machine_readable_runbook() -> N
     assert runbook.max_tasks_per_run == 2
     assert runbook.source_endpoints["runbook"] == "/automation/daily-security-check"
     assert runbook.queue.task_count == 1
+    assert runbook.queue.tasks[0].dependencies[0].target_version is None
+    assert runbook.queue.tasks[0].dependencies[0].latest_version_status == "skipped"
     assert "Do not update solely because a target version is higher" in runbook.guardrails[0]
     assert "Do not merge pull requests and do not deploy automatically" in runbook.codex_prompt
 

@@ -393,6 +393,7 @@ class ReportingService:
         session: Session,
         *,
         limit: int = 25,
+        resolve_latest_versions: bool = True,
     ) -> HighRiskUpdateQueueOut:
         """
         Build a high-risk-first queue for Codex-managed repository updates.
@@ -403,7 +404,10 @@ class ReportingService:
         leaves the actual repository writes to a later Codex task with tests, CI, and PR review.
         """
 
-        systems = self.build_system_inventory(session)
+        systems = self.build_system_inventory(
+            session,
+            resolve_latest_versions=resolve_latest_versions,
+        )
         tasks = [
             task
             for system in systems
@@ -450,7 +454,11 @@ class ReportingService:
         endpoints, and the exact prompt it should execute.
         """
 
-        queue = self.build_high_risk_update_queue(session, limit=limit)
+        queue = self.build_high_risk_update_queue(
+            session,
+            limit=limit,
+            resolve_latest_versions=False,
+        )
         return DailySecurityAutomationOut(
             api_version=DAILY_AUTOMATION_API_VERSION,
             generated_at=datetime.now(UTC),

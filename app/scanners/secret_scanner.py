@@ -266,7 +266,10 @@ class SecretScanner:
                     line=line[1:],
                     file_path=current_file,
                     line_number=current_line_number,
-                    allow_entropy_scan=self._allow_entropy_scan(current_file),
+                    # Git history contains every transient generated value ever committed. Entropy
+                    # alone is too noisy there, so history scans keep high-confidence regex
+                    # detectors and skip entropy-only findings.
+                    allow_entropy_scan=False,
                     content_source="git_history",
                     commit_sha=current_commit,
                 )

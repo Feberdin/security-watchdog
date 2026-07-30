@@ -92,3 +92,29 @@ def test_detects_secret_in_git_history(monkeypatch, tmp_path):
     assert findings
     assert all(finding.content_source == "git_history" for finding in findings)
     assert any(finding.commit_sha == "abc123def456" for finding in findings)
+
+
+def test_skips_entropy_only_findings_in_git_history(monkeypatch, tmp_path):
+    """History scans should avoid entropy-only noise while keeping regex detectors active."""
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+
+    scanner = SecretScanner(entropy_threshold=3.5)
+    monkeypatch.setattr(
+        scanner,
+        "_iter_git_history_lines",
+        lambda root_path: iter(
+            [
+                "__COMMIT__abc123def456\n",
+                "diff --git a/app.py b/app.py\n",
+                "+++ b/app.py\n",
+                "@@ -0,0 +1 @@\n",
+                '+headers = {"Authorization": "A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6"}\n',
+            ]
+        ),
+    )
+
+    findings = scanner.scan_git_history(repo)
+
+    assert findings == []

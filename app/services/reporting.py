@@ -59,7 +59,7 @@ class ReportingService:
         vulnerability_count = session.scalar(select(func.count(Vulnerability.id))) or 0
         active_alert_filter = Alert.status != "resolved"
         unique_open_alerts = self._deduplicate_alerts(
-            session.scalars(select(Alert).where(active_alert_filter)).all()
+            self._open_alerts(session.scalars(select(Alert).where(active_alert_filter)).all())
         )
         alert_count = len(unique_open_alerts)
         critical_alert_count = len(
@@ -923,9 +923,31 @@ class ReportingService:
         return findings[:25]
 
     def _open_alerts(self, alerts: Iterable[Alert]) -> list[Alert]:
-        """Return unresolved alerts in memory so duplicate grouping stays backend-agnostic."""
+        """Return unresolved operator-actionable alerts so grouping stays backend-agnostic."""
 
-        return [alert for alert in alerts if alert.status != "resolved"]
+        return [
+            alert
+            for alert in alerts
+            if alert.status != "resolved" and self._is_operator_actionable_alert(alert)
+        ]
+
+    def _is_operator_actionable_alert(self, alert: Alert) -> bool:
+        """
+        Exclude legacy low-confidence noise from operator counts.
+
+        Why this exists:
+        Earlier releases treated entropy-only findings in full git history as critical alerts. Large
+        public forks can produce tens of thousands of these rows, even though they are not confirmed
+        current secrets and are not useful as one alert per historical line. Regex/signature-based
+        history findings still count because they carry stronger evidence.
+        """
+
+        metadata = alert.metadata_json or {}
+        return not (
+            alert.source_type in {"secret_scanner", "homeassistant_secret"}
+            and metadata.get("content_source") == "git_history"
+            and metadata.get("detector") == "high_entropy"
+        )
 
     def _deduplicate_alerts(self, alerts: Iterable[Alert]) -> list[Alert]:
         """

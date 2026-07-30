@@ -683,3 +683,158 @@ def test_report_excludes_legacy_git_history_entropy_noise() -> None:
     assert report.critical_alert_count == 0
     assert systems[0].open_alert_count == 0
     assert systems[0].runtime_findings == []
+
+
+def test_system_debug_export_loads_only_actionable_alerts() -> None:
+    """Single-system exports should not spend time rendering legacy entropy-only history rows."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="core",
+        full_name="Feberdin/core",
+        local_path="/tmp/core",
+        risk_score=95.0,
+    )
+    session.add(repository)
+    session.flush()
+    session.add_all(
+        [
+            Alert(
+                repository_id=repository.id,
+                title="Legacy entropy-only history finding",
+                description="Low-confidence git history entropy match.",
+                severity="critical",
+                risk_score=95.0,
+                fingerprint="legacy-history-entropy-alert",
+                status="open",
+                source_type="secret_scanner",
+                metadata_json={
+                    "file_path": "README.md",
+                    "line_number": 46,
+                    "detector": "high_entropy",
+                    "excerpt": "abcd...wxyz",
+                    "content_source": "git_history",
+                    "commit_sha": "a" * 40,
+                },
+            ),
+            Alert(
+                repository_id=repository.id,
+                title="Signature-based history finding",
+                description="High-confidence token pattern in git history.",
+                severity="critical",
+                risk_score=95.0,
+                fingerprint="history-github-token-alert",
+                status="open",
+                source_type="secret_scanner",
+                metadata_json={
+                    "file_path": "app/config.py",
+                    "line_number": 12,
+                    "detector": "github_token",
+                    "excerpt": "ghp_...wxyz",
+                    "content_source": "git_history",
+                    "commit_sha": "b" * 40,
+                },
+            ),
+        ]
+    )
+    session.commit()
+    session.expire_all()
+
+    export_payload = ReportingService(version_catalog=FakeVersionCatalog()).build_system_debug_export(
+        session,
+        repository.id,
+    )
+
+    assert export_payload["system"]["open_alert_count"] == 1
+    assert len(export_payload["system"]["runtime_findings"]) == 1
+    assert export_payload["system"]["runtime_findings"][0]["vulnerability_id"] == "github_token"
+    assert [alert["title"] for alert in export_payload["recent_alerts"]] == ["Signature-based history finding"]
+
+
+def test_alert_diagnostics_summarizes_actionable_rows_without_secret_values() -> None:
+    """Alert diagnostics should expose aggregate causes while excluding legacy noise."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="security-watchdog",
+        full_name="Feberdin/security-watchdog",
+        local_path="/tmp/security-watchdog",
+        risk_score=95.0,
+    )
+    session.add(repository)
+    session.flush()
+    session.add_all(
+        [
+            Alert(
+                repository_id=repository.id,
+                title="Legacy entropy-only history finding",
+                description="Low-confidence git history entropy match.",
+                severity="critical",
+                risk_score=95.0,
+                fingerprint="legacy-history-entropy-alert",
+                status="open",
+                source_type="secret_scanner",
+                metadata_json={
+                    "file_path": "README.md",
+                    "line_number": 46,
+                    "detector": "high_entropy",
+                    "excerpt": "abcd...wxyz",
+                    "content_source": "git_history",
+                },
+            ),
+            Alert(
+                repository_id=repository.id,
+                title="Signature-based history finding",
+                description="High-confidence token pattern in git history.",
+                severity="critical",
+                risk_score=95.0,
+                fingerprint="history-github-token-alert",
+                status="open",
+                source_type="secret_scanner",
+                metadata_json={
+                    "file_path": "app/config.py",
+                    "line_number": 12,
+                    "detector": "github_token",
+                    "excerpt": "ghp_...wxyz",
+                    "content_source": "git_history",
+                },
+            ),
+            Alert(
+                repository_id=repository.id,
+                title="Container CVE",
+                description="Container package vulnerability.",
+                severity="high",
+                risk_score=80.0,
+                fingerprint="container-cve-alert",
+                status="open",
+                source_type="unraid_container",
+                metadata_json={
+                    "vulnerability_id": "CVE-2026-34040",
+                    "package_name": "github.com/docker/docker",
+                    "target": "containrrr/watchtower:latest",
+                },
+            ),
+        ]
+    )
+    session.commit()
+
+    diagnostics = ReportingService(version_catalog=FakeVersionCatalog()).build_alert_diagnostics(
+        session,
+        limit=10,
+    )
+
+    assert diagnostics["open_alert_rows"] == 3
+    assert diagnostics["operator_actionable_alert_rows"] == 2
+    assert diagnostics["excluded_legacy_git_history_entropy_rows"] == 1
+    assert {
+        (entry["source_type"], entry["severity"], entry["alert_rows"])
+        for entry in diagnostics["by_source_and_severity"]
+    } == {("secret_scanner", "critical", 1), ("unraid_container", "high", 1)}
+    assert any(
+        entry["finding_kind"] == "github_token" and entry["content_source"] == "git_history"
+        for entry in diagnostics["by_finding_kind"]
+    )

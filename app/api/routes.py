@@ -246,6 +246,16 @@ def get_diagnostics_export(session: Session = Depends(get_db_session)) -> dict[s
     return ReportingService().build_platform_debug_export(session)
 
 
+@router.get("/diagnostics/alerts")
+def get_alert_diagnostics(
+    limit: int = Query(default=20, ge=1, le=100),
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Return lightweight alert groupings for checking unexpectedly large counters."""
+
+    return ReportingService().build_alert_diagnostics(session, limit=limit)
+
+
 @router.get("/systems/{system_id}/codex-remediation", response_model=CodexPromptOut)
 def get_codex_remediation_prompt(
     system_id: int,

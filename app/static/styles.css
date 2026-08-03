@@ -314,6 +314,97 @@ p {
   word-break: break-word;
 }
 
+.scan-progress {
+  grid-column: 1 / -1;
+  min-width: 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-default);
+}
+
+.scan-progress-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+
+.scan-progress-heading span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.scan-progress-heading strong {
+  flex: 0 0 auto;
+  color: var(--color-cyber-cyan);
+  font-family: var(--font-mono);
+  font-size: 1rem;
+}
+
+.scan-progress-track {
+  height: 10px;
+  margin-top: 10px;
+  overflow: hidden;
+  background: rgba(156, 170, 203, 0.16);
+  border: 1px solid rgba(0, 231, 255, 0.2);
+  border-radius: 5px;
+}
+
+.scan-progress-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--color-cyber-cyan);
+  transition: width 240ms ease;
+}
+
+.scan-progress-log-heading {
+  margin-top: 16px;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+}
+
+.scan-progress-log {
+  display: grid;
+  gap: 6px;
+  max-height: 150px;
+  padding: 0;
+  margin: 8px 0 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.scan-progress-event {
+  display: grid;
+  grid-template-columns: minmax(135px, auto) minmax(0, 1fr);
+  gap: 10px;
+  padding-left: 10px;
+  color: var(--text-secondary);
+  border-left: 2px solid rgba(0, 231, 255, 0.38);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.scan-progress-event time {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.scan-progress-event span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.scan-progress-event-warning {
+  border-left-color: var(--color-sunset-orange);
+}
+
+.scan-progress-event-error {
+  border-left-color: var(--color-neon-pink);
+}
+
 .panel {
   padding: 22px;
 }
@@ -744,6 +835,11 @@ p {
 @media (max-width: 860px) {
   .page-shell {
     padding-inline: 14px;
+  }
+
+  .scan-progress-event {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
 
   .brand {

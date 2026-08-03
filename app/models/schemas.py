@@ -375,6 +375,34 @@ class ScanAcceptedResponse(BaseModel):
     status_url: str
 
 
+class ScanProgressUpdate(BaseModel):
+    """Validated internal progress update emitted by the scan orchestrator."""
+
+    phase: str = Field(min_length=1, max_length=50)
+    message: str = Field(min_length=1, max_length=1000)
+    level: Literal["info", "warning", "error"] = "info"
+    current: int = Field(default=0, ge=0)
+    total: int = Field(default=0, ge=0)
+    percent: float = Field(default=0.0, ge=0.0, le=100.0)
+
+
+class ManualScanProgressEventOut(ScanProgressUpdate):
+    """One timestamped progress line returned to dashboard clients."""
+
+    created_at: datetime
+
+
+class ManualScanProgressOut(BaseModel):
+    """Current progress snapshot plus a small chronological operator log."""
+
+    phase: str
+    message: str
+    current: int = 0
+    total: int = 0
+    percent: float = Field(default=0.0, ge=0.0, le=100.0)
+    events: list[ManualScanProgressEventOut] = Field(default_factory=list)
+
+
 class ManualScanJobOut(BaseModel):
     """API-friendly view of one manual scan job and its current lifecycle state."""
 
@@ -391,6 +419,7 @@ class ManualScanJobOut(BaseModel):
     alert_count: int = 0
     failed_system_count: int = 0
     error_message: str | None = None
+    progress: ManualScanProgressOut
 
 
 class ReportOut(BaseModel):

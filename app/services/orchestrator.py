@@ -37,6 +37,7 @@ from app.services.alerts import AlertDispatcher
 from app.services.matching import is_exact_version, version_matches
 from app.services.risk import calculate_risk_score
 from app.services.sbom import SbomService
+from app.services.scan_progress import ScanProgressCallback, ScanProgressReporter
 from app.services.threat_intelligence import ThreatIntelligenceService
 from app.services.vulnerability_service import VulnerabilityService
 
@@ -59,9 +60,22 @@ class ScanOrchestrator:
         self.sbom_service = SbomService()
         self.alert_dispatcher = AlertDispatcher()
 
-    def run_manual_scan(self, session: Session, request: ScanRequest) -> ScanResponse:
+    def run_manual_scan(
+        self,
+        session: Session,
+        request: ScanRequest,
+        progress_callback: ScanProgressCallback | None = None,
+    ) -> ScanResponse:
         """Run the complete asset scan workflow immediately."""
 
+        progress = ScanProgressReporter(progress_callback)
+        progress.emit(
+            phase="inventory",
+            message="GitHub-Repository-Inventar wird aktualisiert.",
+            percent=2.0,
+            current=0,
+            total=0,
+        )
         repositories = self._run_inventory_stage(
             session,
             scanner_name="repository_inventory",
@@ -75,11 +89,25 @@ class ScanOrchestrator:
                 include_archived=request.include_archived,
             ),
         )
+        progress.emit(
+            phase="inventory",
+            message=f"GitHub-Inventar geladen: {len(repositories)} Repositories.",
+            percent=5.0,
+            current=0,
+            total=0,
+        )
         unraid_assets = self._run_inventory_stage(
             session,
             scanner_name="unraid_inventory",
             details={"source_type": "unraid_docker"},
             loader=lambda: self.unraid_scanner.sync_assets(session),
+        )
+        progress.emit(
+            phase="inventory",
+            message=f"Container-Inventar geladen: {len(unraid_assets)} Systeme.",
+            percent=7.0,
+            current=0,
+            total=0,
         )
         homeassistant_assets = self._run_inventory_stage(
             session,
@@ -87,12 +115,26 @@ class ScanOrchestrator:
             details={"source_type": "homeassistant"},
             loader=lambda: self.homeassistant_scanner.sync_assets(session),
         )
+        progress.emit(
+            phase="inventory",
+            message=f"Home-Assistant-Inventar geladen: {len(homeassistant_assets)} Integrationen.",
+            percent=9.0,
+            current=0,
+            total=0,
+        )
+        progress.configure_assets(len(repositories) + len(unraid_assets) + len(homeassistant_assets))
 
         processed_count = 0
         created_alerts = 0
         failed_system_count = 0
 
         for repository in repositories:
+            progress.asset_step(
+                phase="repository",
+                asset_name=repository.full_name,
+                message="Repository-Scan wird vorbereitet.",
+                fraction=0.0,
+            )
             alerts_created, failed = self._run_guarded_asset_scan(
                 session,
                 repository=repository,
@@ -101,14 +143,25 @@ class ScanOrchestrator:
                     "full_name": repository.full_name,
                     "source_type": repository.source_type,
                 },
-                scan_callable=lambda repository=repository: self._scan_repository_asset(session, repository),
+                scan_callable=lambda repository=repository: self._scan_repository_asset(
+                    session,
+                    repository,
+                    progress,
+                ),
             )
             created_alerts += alerts_created
             processed_count += 1
             failed_system_count += failed
+            progress.finish_asset(asset_name=repository.full_name, failed=bool(failed))
 
         for asset in unraid_assets:
             repository = asset["repository"]
+            progress.asset_step(
+                phase="container",
+                asset_name=repository.full_name,
+                message="Laufzeit-Container wird vorbereitet.",
+                fraction=0.0,
+            )
             alerts_created, failed = self._run_guarded_asset_scan(
                 session,
                 repository=repository,
@@ -122,14 +175,22 @@ class ScanOrchestrator:
                     session,
                     asset["repository"],
                     asset["image_ref"],
+                    progress,
                 ),
             )
             created_alerts += alerts_created
             processed_count += 1
             failed_system_count += failed
+            progress.finish_asset(asset_name=repository.full_name, failed=bool(failed))
 
         for asset in homeassistant_assets:
             repository = asset["repository"]
+            progress.asset_step(
+                phase="homeassistant",
+                asset_name=repository.full_name,
+                message="Integration wird vorbereitet.",
+                fraction=0.0,
+            )
             alerts_created, failed = self._run_guarded_asset_scan(
                 session,
                 repository=repository,
@@ -143,12 +204,21 @@ class ScanOrchestrator:
                     session,
                     asset["repository"],
                     asset["manifest_path"],
+                    progress,
                 ),
             )
             created_alerts += alerts_created
             processed_count += 1
             failed_system_count += failed
+            progress.finish_asset(asset_name=repository.full_name, failed=bool(failed))
 
+        progress.emit(
+            phase="finalizing",
+            message="Offene Alerts und Scan-Ergebnisse werden abgeschlossen.",
+            percent=98.0,
+            current=processed_count,
+            total=progress.total_assets,
+        )
         self._dispatch_open_alerts(session)
         session.commit()
         return ScanResponse(
@@ -172,10 +242,22 @@ class ScanOrchestrator:
         session.commit()
         return count
 
-    def _scan_repository_asset(self, session: Session, repository: Repository) -> int:
+    def _scan_repository_asset(
+        self,
+        session: Session,
+        repository: Repository,
+        progress: ScanProgressReporter | None = None,
+    ) -> int:
         """Run dependency, secret, container, and SBOM stages for a GitHub repository."""
 
         local_path = Path(repository.local_path)
+        if progress:
+            progress.asset_step(
+                phase="dependencies",
+                asset_name=repository.full_name,
+                message="Manifest-Dateien werden ausgewertet.",
+                fraction=0.03,
+            )
         dependencies = self.dependency_extractor.extract_from_repository(local_path)
         orm_dependencies = replace_repository_dependencies(session, repository, dependencies)
         record_scan_result(
@@ -186,6 +268,13 @@ class ScanOrchestrator:
             findings_count=len(orm_dependencies),
             details={"source_type": repository.source_type},
         )
+        if progress:
+            progress.asset_step(
+                phase="dependencies",
+                asset_name=repository.full_name,
+                message=f"{len(orm_dependencies)} Abhängigkeiten gefunden.",
+                fraction=0.10,
+            )
 
         alerts_created = 0
         active_alerts_by_source = {
@@ -198,12 +287,22 @@ class ScanOrchestrator:
             session,
             repository,
             orm_dependencies,
+            progress=progress,
+            progress_start=0.12,
+            progress_end=0.70,
         )
         alerts_created += dependency_alerts_created
         for source_type, fingerprints in dependency_active_alerts.items():
             active_alerts_by_source[source_type].update(fingerprints)
 
         include_git_history = self._should_scan_repository_git_history(repository)
+        if progress:
+            progress.asset_step(
+                phase="secrets",
+                asset_name=repository.full_name,
+                message="Dateien und freigegebene Git-Historie werden auf Secrets geprüft.",
+                fraction=0.74,
+            )
         secrets = self.secret_scanner.scan_directory(
             local_path,
             include_git_history=include_git_history,
@@ -242,7 +341,14 @@ class ScanOrchestrator:
             alerts_created += 1 if alert else 0
 
         dockerfile_paths = [path for path in local_path.rglob("Dockerfile") if path.is_file()]
-        for dockerfile_path in dockerfile_paths:
+        for dockerfile_index, dockerfile_path in enumerate(dockerfile_paths, start=1):
+            if progress:
+                progress.asset_step(
+                    phase="container",
+                    asset_name=repository.full_name,
+                    message=(f"Dockerfile {dockerfile_index}/{len(dockerfile_paths)} wird geprüft."),
+                    fraction=0.82 + (dockerfile_index - 1) / max(len(dockerfile_paths), 1) * 0.10,
+                )
             findings = self.container_scanner.scan_dockerfile(dockerfile_path)
             record_scan_result(
                 session,
@@ -280,11 +386,24 @@ class ScanOrchestrator:
             source_types=list(active_alerts_by_source),
             active_fingerprints=self._merge_active_alert_fingerprints(active_alerts_by_source),
         )
+        if progress:
+            progress.asset_step(
+                phase="sbom",
+                asset_name=repository.full_name,
+                message="SBOM und Risikowert werden aktualisiert.",
+                fraction=0.96,
+            )
         self.sbom_service.generate(repository, orm_dependencies)
         repository.risk_score = self._calculate_repository_risk(session, repository.id)
         return alerts_created
 
-    def _scan_unraid_asset(self, session: Session, repository: Repository, image_ref: str) -> int:
+    def _scan_unraid_asset(
+        self,
+        session: Session,
+        repository: Repository,
+        image_ref: str,
+        progress: ScanProgressReporter | None = None,
+    ) -> int:
         """Scan one running Unraid container image and persist alerts/findings."""
 
         synthetic_dependency = DependencyRecord(
@@ -295,7 +414,21 @@ class ScanOrchestrator:
             metadata={"image_ref": image_ref},
         )
         orm_dependencies = replace_repository_dependencies(session, repository, [synthetic_dependency])
+        if progress:
+            progress.asset_step(
+                phase="container",
+                asset_name=repository.full_name,
+                message=f"Container-Image {image_ref} wird analysiert.",
+                fraction=0.15,
+            )
         findings = self.container_scanner.scan_image(image_ref)
+        if progress:
+            progress.asset_step(
+                phase="container",
+                asset_name=repository.full_name,
+                message=f"Image-Scan abgeschlossen: {len(findings)} Findings.",
+                fraction=0.65,
+            )
         record_scan_result(
             session,
             repository_id=repository.id,
@@ -313,6 +446,9 @@ class ScanOrchestrator:
             session,
             repository,
             orm_dependencies,
+            progress=progress,
+            progress_start=0.68,
+            progress_end=0.90,
         )
         for source_type, fingerprints in dependency_active_alerts.items():
             active_alerts_by_source[source_type].update(fingerprints)
@@ -351,10 +487,18 @@ class ScanOrchestrator:
         session: Session,
         repository: Repository,
         manifest_path: Path | None,
+        progress: ScanProgressReporter | None = None,
     ) -> int:
         """Scan a Home Assistant integration manifest and optional local files."""
 
         dependencies: list[DependencyRecord] = []
+        if progress:
+            progress.asset_step(
+                phase="homeassistant",
+                asset_name=repository.full_name,
+                message="Manifest und Requirements werden ausgewertet.",
+                fraction=0.08,
+            )
         if manifest_path and manifest_path.exists():
             dependencies = self.dependency_extractor.extract_from_path(
                 manifest_path,
@@ -384,11 +528,21 @@ class ScanOrchestrator:
             session,
             repository,
             orm_dependencies,
+            progress=progress,
+            progress_start=0.15,
+            progress_end=0.72,
         )
         for source_type, fingerprints in dependency_active_alerts.items():
             active_alerts_by_source[source_type].update(fingerprints)
         if repository.local_path:
             integration_path = Path(repository.local_path)
+            if progress:
+                progress.asset_step(
+                    phase="secrets",
+                    asset_name=repository.full_name,
+                    message="Integrationsdateien werden auf Secrets geprüft.",
+                    fraction=0.78,
+                )
             secrets = self.secret_scanner.scan_directory(integration_path)
             for finding in secrets:
                 metadata = finding.model_dump()
@@ -422,6 +576,13 @@ class ScanOrchestrator:
             source_types=list(active_alerts_by_source),
             active_fingerprints=self._merge_active_alert_fingerprints(active_alerts_by_source),
         )
+        if progress:
+            progress.asset_step(
+                phase="sbom",
+                asset_name=repository.full_name,
+                message="SBOM und Risikowert werden aktualisiert.",
+                fraction=0.96,
+            )
         self.sbom_service.generate(repository, orm_dependencies)
         repository.risk_score = self._calculate_repository_risk(session, repository.id)
         return alerts_created
@@ -431,6 +592,10 @@ class ScanOrchestrator:
         session: Session,
         repository: Repository,
         orm_dependencies: list[Dependency],
+        *,
+        progress: ScanProgressReporter | None = None,
+        progress_start: float = 0.15,
+        progress_end: float = 0.75,
     ) -> tuple[int, dict[str, set[str]]]:
         """Match dependencies against known vulnerabilities and AI-derived malicious versions."""
 
@@ -439,7 +604,25 @@ class ScanOrchestrator:
             "dependency_vulnerability": set(),
             "ai_correlation": set(),
         }
-        for dependency in orm_dependencies:
+        dependency_count = len(orm_dependencies)
+        progress_interval = max(1, dependency_count // 20)
+        for dependency_index, dependency in enumerate(orm_dependencies, start=1):
+            if progress and (
+                dependency_index == 1
+                or dependency_index == dependency_count
+                or (dependency_index - 1) % progress_interval == 0
+            ):
+                fraction = progress_start + ((dependency_index - 1) / max(dependency_count, 1)) * (
+                    progress_end - progress_start
+                )
+                progress.asset_step(
+                    phase="vulnerabilities",
+                    asset_name=repository.full_name,
+                    message=(
+                        f"Abhängigkeit {dependency.package_name} wird geprüft ({dependency_index}/{dependency_count})."
+                    ),
+                    fraction=fraction,
+                )
             dependency_record = DependencyRecord(
                 package_name=dependency.package_name,
                 version=dependency.version,
@@ -458,6 +641,13 @@ class ScanOrchestrator:
             ai_alerts_created, ai_fingerprints = self._match_ai_threats(session, repository, dependency)
             created_alerts += ai_alerts_created
             active_alerts_by_source["ai_correlation"].update(ai_fingerprints)
+        if progress:
+            progress.asset_step(
+                phase="vulnerabilities",
+                asset_name=repository.full_name,
+                message=f"{dependency_count} Abhängigkeiten korreliert.",
+                fraction=progress_end,
+            )
         return created_alerts, active_alerts_by_source
 
     def _should_scan_repository_git_history(self, repository: Repository) -> bool:

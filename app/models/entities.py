@@ -155,6 +155,33 @@ class Vulnerability(Base):
     )
 
 
+class VulnerabilityProviderCache(Base):
+    """Successful normalized provider response cached for one exact dependency version."""
+
+    __tablename__ = "vulnerability_provider_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "ecosystem",
+            "package_name",
+            "version",
+            name="uq_vulnerability_provider_cache_lookup",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    provider: Mapped[str] = mapped_column(String(50), index=True)
+    ecosystem: Mapped[str] = mapped_column(String(100), index=True)
+    package_name: Mapped[str] = mapped_column(String(255), index=True)
+    version: Mapped[str] = mapped_column(String(255), index=True)
+    findings_json: Mapped[list[dict]] = mapped_column("findings", JSON, default=list)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class DependencyVulnerability(Base):
     """Link table that captures which dependency matched which vulnerability and why."""
 

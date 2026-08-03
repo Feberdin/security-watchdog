@@ -632,7 +632,10 @@ class ScanOrchestrator:
                 direct_dependency=dependency.direct_dependency,
                 metadata=dependency.metadata_json,
             )
-            vulnerability_records = self.vulnerability_service.correlate_dependency(dependency_record)
+            vulnerability_records = self.vulnerability_service.correlate_dependency(
+                dependency_record,
+                cache_session=session,
+            )
             dependency_alerts_created, vulnerability_fingerprints = self._persist_vulnerability_matches(
                 session, repository, dependency, vulnerability_records
             )

@@ -10,6 +10,7 @@ and records its own scan result from here.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -39,11 +40,13 @@ from app.services.alerts import AlertDispatcher
 from app.services.matching import is_exact_version, version_matches
 from app.services.risk import calculate_risk_score
 from app.services.sbom import SbomService
+from app.services.scan_control import ScanCanceledError
 from app.services.scan_progress import ScanProgressCallback, ScanProgressReporter
 from app.services.threat_intelligence import ThreatIntelligenceService
 from app.services.vulnerability_service import VulnerabilityService
 
 LOGGER = logging.getLogger(__name__)
+ScanCancellationCheck = Callable[[], None]
 
 
 class ScanOrchestrator:
@@ -70,30 +73,41 @@ class ScanOrchestrator:
         job_id: int | None = None,
         resume_started_at: datetime | None = None,
         progress_callback: ScanProgressCallback | None = None,
+        cancellation_check: ScanCancellationCheck | None = None,
     ) -> ScanResponse:
         """Run the complete asset scan workflow immediately."""
 
+        selected_sources = set(request.scan_sources)
         progress = ScanProgressReporter(progress_callback)
+        self._check_cancellation(cancellation_check)
         progress.emit(
             phase="inventory",
-            message="GitHub-Repository-Inventar wird aktualisiert.",
+            message="Scan-Inventar wird aktualisiert.",
             percent=2.0,
             current=0,
             total=0,
         )
-        repositories = self._run_inventory_stage(
-            session,
-            scanner_name="repository_inventory",
-            details={
-                "repository_full_name": request.repository_full_name or "",
-                "include_archived": request.include_archived,
-            },
-            loader=lambda: self.repository_scanner.sync_repositories(
+        repositories = []
+        if "github" in selected_sources:
+            repositories = self._run_inventory_stage(
                 session,
-                repository_full_name=request.repository_full_name,
-                include_archived=request.include_archived,
-            ),
-        )
+                scanner_name="repository_inventory",
+                details={
+                    "repository_full_name": request.repository_full_name or "",
+                    "include_archived": request.include_archived,
+                },
+                loader=lambda: self.repository_scanner.sync_repositories(
+                    session,
+                    repository_full_name=request.repository_full_name,
+                    include_archived=request.include_archived,
+                ),
+            )
+            repositories = [
+                repository
+                for repository in repositories
+                if self._should_scan_repository_for_request(repository, request)
+            ]
+        self._check_cancellation(cancellation_check)
         progress.emit(
             phase="inventory",
             message=f"GitHub-Inventar geladen: {len(repositories)} Repositories.",
@@ -101,12 +115,20 @@ class ScanOrchestrator:
             current=0,
             total=0,
         )
-        unraid_assets = self._run_inventory_stage(
-            session,
-            scanner_name="unraid_inventory",
-            details={"source_type": "unraid_docker"},
-            loader=lambda: self.unraid_scanner.sync_assets(session),
-        )
+        unraid_assets = []
+        if "unraid" in selected_sources:
+            unraid_assets = self._run_inventory_stage(
+                session,
+                scanner_name="unraid_inventory",
+                details={"source_type": "unraid_docker"},
+                loader=lambda: self.unraid_scanner.sync_assets(session),
+            )
+            unraid_assets = [
+                asset
+                for asset in unraid_assets
+                if self._should_scan_repository_for_request(asset["repository"], request)
+            ]
+        self._check_cancellation(cancellation_check)
         progress.emit(
             phase="inventory",
             message=f"Container-Inventar geladen: {len(unraid_assets)} Systeme.",
@@ -114,12 +136,20 @@ class ScanOrchestrator:
             current=0,
             total=0,
         )
-        homeassistant_assets = self._run_inventory_stage(
-            session,
-            scanner_name="homeassistant_inventory",
-            details={"source_type": "homeassistant"},
-            loader=lambda: self.homeassistant_scanner.sync_assets(session),
-        )
+        homeassistant_assets = []
+        if "homeassistant" in selected_sources:
+            homeassistant_assets = self._run_inventory_stage(
+                session,
+                scanner_name="homeassistant_inventory",
+                details={"source_type": "homeassistant"},
+                loader=lambda: self.homeassistant_scanner.sync_assets(session),
+            )
+            homeassistant_assets = [
+                asset
+                for asset in homeassistant_assets
+                if self._should_scan_repository_for_request(asset["repository"], request)
+            ]
+        self._check_cancellation(cancellation_check)
         progress.emit(
             phase="inventory",
             message=f"Home-Assistant-Inventar geladen: {len(homeassistant_assets)} Integrationen.",
@@ -136,6 +166,7 @@ class ScanOrchestrator:
         resume_counts_are_persisted = processed_count > 0
 
         for repository in repositories:
+            self._check_cancellation(cancellation_check)
             already_finished, previously_failed = self._asset_scan_finished_since(
                 session,
                 repository=repository,
@@ -184,6 +215,7 @@ class ScanOrchestrator:
                     session,
                     repository,
                     progress,
+                    cancellation_check=cancellation_check,
                 ),
             )
             created_alerts += alerts_created
@@ -199,6 +231,7 @@ class ScanOrchestrator:
             progress.finish_asset(asset_name=repository.full_name, failed=bool(failed))
 
         for asset in unraid_assets:
+            self._check_cancellation(cancellation_check)
             repository = asset["repository"]
             already_finished, previously_failed = self._asset_scan_finished_since(
                 session,
@@ -250,6 +283,7 @@ class ScanOrchestrator:
                     asset["repository"],
                     asset["image_ref"],
                     progress,
+                    cancellation_check=cancellation_check,
                 ),
             )
             created_alerts += alerts_created
@@ -265,6 +299,7 @@ class ScanOrchestrator:
             progress.finish_asset(asset_name=repository.full_name, failed=bool(failed))
 
         for asset in homeassistant_assets:
+            self._check_cancellation(cancellation_check)
             repository = asset["repository"]
             already_finished, previously_failed = self._asset_scan_finished_since(
                 session,
@@ -316,6 +351,7 @@ class ScanOrchestrator:
                     asset["repository"],
                     asset["manifest_path"],
                     progress,
+                    cancellation_check=cancellation_check,
                 ),
             )
             created_alerts += alerts_created
@@ -337,6 +373,7 @@ class ScanOrchestrator:
             current=processed_count,
             total=progress.total_assets,
         )
+        self._check_cancellation(cancellation_check)
         self._dispatch_open_alerts(session)
         session.commit()
         return ScanResponse(
@@ -360,14 +397,38 @@ class ScanOrchestrator:
         session.commit()
         return count
 
+    def _should_scan_repository_for_request(self, repository: Repository, request: ScanRequest) -> bool:
+        """
+        Apply operator scan selection to one repository-like asset.
+
+        Why this exists:
+        Inventory refresh and scan execution are separate decisions. Operators can keep irrelevant
+        assets in the database for audit history while excluding them from future scan work and
+        dashboard reports.
+        """
+
+        if not repository.scan_enabled:
+            return False
+        if request.repository_full_name and repository.full_name != request.repository_full_name:
+            return False
+        return True
+
+    def _check_cancellation(self, cancellation_check: ScanCancellationCheck | None) -> None:
+        """Run the supplied cancellation checkpoint when a scan job is cancelable."""
+
+        if cancellation_check is not None:
+            cancellation_check()
+
     def _scan_repository_asset(
         self,
         session: Session,
         repository: Repository,
         progress: ScanProgressReporter | None = None,
+        cancellation_check: ScanCancellationCheck | None = None,
     ) -> int:
         """Run dependency, secret, container, and SBOM stages for a GitHub repository."""
 
+        self._check_cancellation(cancellation_check)
         local_path = Path(repository.local_path)
         if progress:
             progress.asset_step(
@@ -408,11 +469,13 @@ class ScanOrchestrator:
             progress=progress,
             progress_start=0.12,
             progress_end=0.70,
+            cancellation_check=cancellation_check,
         )
         alerts_created += dependency_alerts_created
         for source_type, fingerprints in dependency_active_alerts.items():
             active_alerts_by_source[source_type].update(fingerprints)
 
+        self._check_cancellation(cancellation_check)
         include_git_history = self._should_scan_repository_git_history(repository)
         if progress:
             progress.asset_step(
@@ -460,6 +523,7 @@ class ScanOrchestrator:
 
         dockerfile_paths = [path for path in local_path.rglob("Dockerfile") if path.is_file()]
         for dockerfile_index, dockerfile_path in enumerate(dockerfile_paths, start=1):
+            self._check_cancellation(cancellation_check)
             if progress:
                 progress.asset_step(
                     phase="container",
@@ -498,6 +562,7 @@ class ScanOrchestrator:
                 )
                 alerts_created += 1 if alert else 0
 
+        self._check_cancellation(cancellation_check)
         resolve_stale_alerts(
             session,
             repository_id=repository.id,
@@ -521,9 +586,11 @@ class ScanOrchestrator:
         repository: Repository,
         image_ref: str,
         progress: ScanProgressReporter | None = None,
+        cancellation_check: ScanCancellationCheck | None = None,
     ) -> int:
         """Scan one running Unraid container image and persist alerts/findings."""
 
+        self._check_cancellation(cancellation_check)
         synthetic_dependency = DependencyRecord(
             package_name=image_ref.split(":")[0],
             version=image_ref.split(":")[1] if ":" in image_ref else "latest",
@@ -540,6 +607,7 @@ class ScanOrchestrator:
                 fraction=0.15,
             )
         findings = self.container_scanner.scan_image(image_ref)
+        self._check_cancellation(cancellation_check)
         if progress:
             progress.asset_step(
                 phase="container",
@@ -567,10 +635,12 @@ class ScanOrchestrator:
             progress=progress,
             progress_start=0.68,
             progress_end=0.90,
+            cancellation_check=cancellation_check,
         )
         for source_type, fingerprints in dependency_active_alerts.items():
             active_alerts_by_source[source_type].update(fingerprints)
         for finding in findings:
+            self._check_cancellation(cancellation_check)
             metadata = finding.model_dump()
             active_alerts_by_source["unraid_container"].add(
                 build_alert_fingerprint(
@@ -606,9 +676,11 @@ class ScanOrchestrator:
         repository: Repository,
         manifest_path: Path | None,
         progress: ScanProgressReporter | None = None,
+        cancellation_check: ScanCancellationCheck | None = None,
     ) -> int:
         """Scan a Home Assistant integration manifest and optional local files."""
 
+        self._check_cancellation(cancellation_check)
         dependencies: list[DependencyRecord] = []
         if progress:
             progress.asset_step(
@@ -649,10 +721,12 @@ class ScanOrchestrator:
             progress=progress,
             progress_start=0.15,
             progress_end=0.72,
+            cancellation_check=cancellation_check,
         )
         for source_type, fingerprints in dependency_active_alerts.items():
             active_alerts_by_source[source_type].update(fingerprints)
         if repository.local_path:
+            self._check_cancellation(cancellation_check)
             integration_path = Path(repository.local_path)
             if progress:
                 progress.asset_step(
@@ -663,6 +737,7 @@ class ScanOrchestrator:
                 )
             secrets = self.secret_scanner.scan_directory(integration_path)
             for finding in secrets:
+                self._check_cancellation(cancellation_check)
                 metadata = finding.model_dump()
                 active_alerts_by_source["homeassistant_secret"].add(
                     build_alert_fingerprint(
@@ -714,6 +789,7 @@ class ScanOrchestrator:
         progress: ScanProgressReporter | None = None,
         progress_start: float = 0.15,
         progress_end: float = 0.75,
+        cancellation_check: ScanCancellationCheck | None = None,
     ) -> tuple[int, dict[str, set[str]]]:
         """Match dependencies against known vulnerabilities and AI-derived malicious versions."""
 
@@ -725,6 +801,8 @@ class ScanOrchestrator:
         dependency_count = len(orm_dependencies)
         progress_interval = max(1, dependency_count // 20)
         for dependency_index, dependency in enumerate(orm_dependencies, start=1):
+            if dependency_index == 1 or (dependency_index - 1) % progress_interval == 0:
+                self._check_cancellation(cancellation_check)
             if progress and (
                 dependency_index == 1
                 or dependency_index == dependency_count
@@ -1124,6 +1202,9 @@ class ScanOrchestrator:
             )
             session.commit()
             return alerts_created, 0
+        except ScanCanceledError:
+            session.rollback()
+            raise
         except Exception as error:
             session.rollback()
             LOGGER.exception(

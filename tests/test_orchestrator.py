@@ -60,14 +60,13 @@ def test_manual_scan_continues_when_one_repository_asset_fails() -> None:
     orchestrator.unraid_scanner.sync_assets = lambda *args, **kwargs: []
     orchestrator.homeassistant_scanner.sync_assets = lambda *args, **kwargs: []
     orchestrator._dispatch_open_alerts = lambda *args, **kwargs: None
-    orchestrator.repository_scanner.get_checkout_commit_sha = (
-        lambda *args, **kwargs: "a" * 40
-    )
+    orchestrator.repository_scanner.get_checkout_commit_sha = lambda *args, **kwargs: "a" * 40
 
     def fake_repository_scan(
         _session: Session,
         repository: Repository,
         _progress=None,
+        cancellation_check=None,
     ) -> int:
         if repository.id == failing_repository.id:
             raise RuntimeError("simulated repository scan failure")
@@ -95,9 +94,7 @@ def test_manual_scan_continues_when_one_repository_asset_fails() -> None:
         failing_repository.id: "error",
         healthy_repository.id: "success",
     }
-    healthy_result = next(
-        result for result in failure_results if result.repository_id == healthy_repository.id
-    )
+    healthy_result = next(result for result in failure_results if result.repository_id == healthy_repository.id)
     assert healthy_result.details_json["commit_sha"] == "a" * 40
     assert progress_updates[-1].phase == "finalizing"
     assert progress_updates[-1].percent == 98
@@ -163,7 +160,12 @@ def test_manual_scan_resume_uses_existing_asset_outcomes_and_updates_checkpoint(
     orchestrator.repository_scanner.get_checkout_commit_sha = lambda *args, **kwargs: "b" * 40
     scanned_repositories: list[str] = []
 
-    def fake_repository_scan(_session: Session, repository: Repository, _progress=None) -> int:
+    def fake_repository_scan(
+        _session: Session,
+        repository: Repository,
+        _progress=None,
+        cancellation_check=None,
+    ) -> int:
         scanned_repositories.append(repository.full_name)
         return 3
 
@@ -228,7 +230,12 @@ def test_manual_scan_resume_does_not_double_count_checkpointed_assets() -> None:
     orchestrator.repository_scanner.get_checkout_commit_sha = lambda *args, **kwargs: "b" * 40
     scanned_repositories: list[str] = []
 
-    def fake_repository_scan(_session: Session, repository: Repository, _progress=None) -> int:
+    def fake_repository_scan(
+        _session: Session,
+        repository: Repository,
+        _progress=None,
+        cancellation_check=None,
+    ) -> int:
         scanned_repositories.append(repository.full_name)
         return 2
 
@@ -249,3 +256,111 @@ def test_manual_scan_resume_does_not_double_count_checkpointed_assets() -> None:
     assert stored_job is not None
     assert stored_job.repository_count == 2
     assert stored_job.alert_count == 6
+
+
+def test_manual_scan_respects_source_selection() -> None:
+    """A source-specific request should avoid unrelated inventory and scan stages."""
+
+    session = build_test_session()
+    unraid_repository = Repository(
+        source_type="unraid_docker",
+        owner="unraid",
+        name="app",
+        full_name="unraid/app",
+        local_path="",
+    )
+    session.add(unraid_repository)
+    session.commit()
+
+    orchestrator = ScanOrchestrator()
+    orchestrator.repository_scanner.sync_repositories = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("GitHub inventory should not run for an Unraid-only scan")
+    )
+    orchestrator.homeassistant_scanner.sync_assets = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("Home Assistant inventory should not run for an Unraid-only scan")
+    )
+    orchestrator.unraid_scanner.sync_assets = lambda *args, **kwargs: [
+        {"repository": unraid_repository, "image_ref": "example/app:latest"}
+    ]
+    orchestrator._dispatch_open_alerts = lambda *args, **kwargs: None
+    scanned_assets: list[str] = []
+
+    def fake_unraid_scan(
+        _session: Session,
+        repository: Repository,
+        image_ref: str,
+        _progress=None,
+        cancellation_check=None,
+    ) -> int:
+        scanned_assets.append(f"{repository.full_name}:{image_ref}")
+        return 1
+
+    orchestrator._scan_unraid_asset = fake_unraid_scan
+
+    response = orchestrator.run_manual_scan(
+        session,
+        ScanRequest(
+            repository_full_name=None,
+            include_archived=False,
+            force=True,
+            scan_sources=["unraid"],
+        ),
+    )
+
+    assert scanned_assets == ["unraid/app:example/app:latest"]
+    assert response.repository_count == 1
+    assert response.alert_count == 1
+
+
+def test_manual_scan_skips_disabled_repositories() -> None:
+    """Disabled repositories should stay in inventory history but not receive new scan work."""
+
+    session = build_test_session()
+    disabled_repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="disabled",
+        full_name="Feberdin/disabled",
+        local_path="/tmp/disabled",
+        scan_enabled=False,
+    )
+    enabled_repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="enabled",
+        full_name="Feberdin/enabled",
+        local_path="/tmp/enabled",
+    )
+    session.add_all([disabled_repository, enabled_repository])
+    session.commit()
+
+    orchestrator = ScanOrchestrator()
+    orchestrator.repository_scanner.sync_repositories = lambda *args, **kwargs: [
+        disabled_repository,
+        enabled_repository,
+    ]
+    orchestrator.unraid_scanner.sync_assets = lambda *args, **kwargs: []
+    orchestrator.homeassistant_scanner.sync_assets = lambda *args, **kwargs: []
+    orchestrator._dispatch_open_alerts = lambda *args, **kwargs: None
+    orchestrator.repository_scanner.get_checkout_commit_sha = lambda *args, **kwargs: "c" * 40
+    scanned_repositories: list[str] = []
+
+    def fake_repository_scan(
+        _session: Session,
+        repository: Repository,
+        _progress=None,
+        cancellation_check=None,
+    ) -> int:
+        scanned_repositories.append(repository.full_name)
+        return 1
+
+    orchestrator._scan_repository_asset = fake_repository_scan
+
+    response = orchestrator.run_manual_scan(
+        session,
+        ScanRequest(repository_full_name=None, include_archived=False, force=True),
+    )
+
+    assert scanned_repositories == ["Feberdin/enabled"]
+    assert response.repository_count == 1
+    assert response.alert_count == 1

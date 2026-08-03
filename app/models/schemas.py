@@ -14,6 +14,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+ScanSource = Literal["github", "unraid", "homeassistant"]
+DEFAULT_SCAN_SOURCES: tuple[ScanSource, ...] = ("github", "unraid", "homeassistant")
+
 
 class RepositoryOut(BaseModel):
     """Repository summary used by the API and dashboard."""
@@ -27,6 +30,7 @@ class RepositoryOut(BaseModel):
     full_name: str
     default_branch: str
     archived: bool
+    scan_enabled: bool = True
     local_path: str
     last_scanned_at: datetime | None
     risk_score: float
@@ -181,6 +185,7 @@ class SystemInventoryOut(BaseModel):
     full_name: str
     display_name: str
     source_type: str
+    scan_enabled: bool = True
     risk_score: float
     dependency_count: int
     vulnerable_dependency_count: int
@@ -355,6 +360,33 @@ class ScanRequest(BaseModel):
     repository_full_name: str | None = None
     include_archived: bool = False
     force: bool = False
+    scan_sources: list[ScanSource] = Field(default_factory=lambda: list(DEFAULT_SCAN_SOURCES))
+
+    @field_validator("repository_full_name")
+    @classmethod
+    def normalize_repository_full_name(cls, value: str | None) -> str | None:
+        """Treat blank UI values as an estate-wide scan instead of a broken exact target."""
+
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("scan_sources")
+    @classmethod
+    def validate_scan_sources(cls, value: list[ScanSource]) -> list[ScanSource]:
+        """Keep scan selection explicit, non-empty, and deterministic for persistence."""
+
+        deduplicated = list(dict.fromkeys(value))
+        if not deduplicated:
+            raise ValueError("scan_sources must contain at least one source")
+        return deduplicated
+
+
+class RepositoryScanSettingsRequest(BaseModel):
+    """Operator-controlled repository scan visibility update."""
+
+    scan_enabled: bool
 
 
 class ScanResponse(BaseModel):
@@ -412,6 +444,8 @@ class ManualScanJobOut(BaseModel):
     repository_full_name: str | None = None
     include_archived: bool
     force: bool
+    scan_sources: list[ScanSource] = Field(default_factory=lambda: list(DEFAULT_SCAN_SOURCES))
+    cancel_requested: bool = False
     requested_at: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None

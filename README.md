@@ -19,6 +19,7 @@ How to debug: Start with `LOG_LEVEL=DEBUG`, inspect `/health`, `/reports`, worke
 - Generates CycloneDX and SPDX SBOMs for every scanned asset.
 - Exports active alerts as SARIF 2.1.0 JSON for GitHub Code Scanning-compatible tooling.
 - Exposes REST endpoints and a browser dashboard.
+- Lets operators start full or targeted scans, cancel a running manual scan, and disable irrelevant assets without deleting historical findings.
 - Sends alerts to Slack, email, and GitHub issues.
 
 ## Quickstart
@@ -83,9 +84,10 @@ Key environment variables:
 
 ## API Overview
 
-- `POST /scan`: Queue an immediate full scan and return `202 Accepted` plus a status URL.
+- `POST /scan`: Queue an immediate scan and return `202 Accepted` plus a status URL. Optional JSON fields: `repository_full_name` for one asset, `scan_sources` with `github`, `unraid`, and/or `homeassistant`, `force`, and `include_archived`.
 - `GET /scan-jobs/latest`: Latest manual scan including lifecycle state, percentage, phase, and recent progress events.
 - `GET /scan-jobs/{job_id}`: One manual scan job with timestamps, counts, error details, and a bounded operator log.
+- `POST /scan-jobs/{job_id}/cancel`: Request cooperative cancellation for a queued or running scan. Running scans stop at the next safe checkpoint; already committed asset results stay stored.
 
 Manual scans are stored in PostgreSQL before execution. The dedicated `worker`, or the API's
 embedded scheduler in single-container installations, claims queued work. Running jobs persist
@@ -97,6 +99,7 @@ restart or deployment.
 - `GET /threats`: Recent threat articles and AI-extracted threat records.
 - `GET /dependencies`: Recently scanned dependencies.
 - `GET /repositories`: Repository-like assets, including Unraid and Home Assistant.
+- `PATCH /repositories/{repository_id}/scan-settings`: Set `scan_enabled` to include or exclude an asset from future scans and normal reports without deleting its history.
 - `GET /systems`: System-centric inventory for the dashboard with expandable dependency details and latest-version hints.
 - `GET /automation/high-risk-updates`: Prioritized update queue for high-risk and outdated dependencies.
 - `GET /automation/high-risk-updates/codex-prompt`: Master prompt for a controlled Codex update run across queued repositories.
@@ -157,8 +160,9 @@ For Home Assistant coverage:
   several minutes. Successful OSV, GitHub, and NVD package/version responses are cached in
   PostgreSQL for 24 hours by default. Provider errors are not cached; NVD is paused briefly after a
   `429` response while OSV and GitHub checks continue.
-- `Manual scan failed after a restart`: the previous runner was interrupted and cannot safely resume
-  its in-memory scan. Start a new manual scan after the worker is healthy.
+- `Manual scan should stop`: click `Scan abbrechen` in the dashboard or call `POST /scan-jobs/{id}/cancel`. If an external scanner binary is running, the worker stops after that command returns or times out.
+- `Manual scan resumed after a restart`: this is expected. Running jobs stay resumable and continue from committed asset outcomes after the worker restarts.
+- `Irrelevant repo keeps appearing`: disable it from the dashboard target selector or call `PATCH /repositories/{id}/scan-settings` with `{"scan_enabled": false}`. Disabled assets stay visible in `/repositories` so they can be re-enabled later.
 - `Deployment gate returns 401`: verify that the Broker sends the dedicated Bearer token configured through the secure secret flow.
 - `Deployment gate returns 503`: configure `SECURITY_WATCHDOG_DEPLOYMENT_GATE_TOKEN` or inspect API/database errors in the watchdog logs.
 - `Deployment gate returns indeterminate`: scan the exact requested full commit and ensure the aggregate scan is fresh and successful.

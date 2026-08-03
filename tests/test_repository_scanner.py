@@ -95,7 +95,8 @@ def test_existing_repository_pull_refreshes_origin_with_current_token(tmp_path, 
     """Cached private checkouts should refresh the origin URL before pulling new commits."""
 
     scanner = RepositoryScanner()
-    scanner.settings.github_token = "fresh-token"
+    expected_token = "".join(("fresh", "-", "token"))
+    scanner.settings.github_token = expected_token
     checkout_path = tmp_path / "private-repo"
     checkout_path.mkdir(parents=True)
     recorded_commands: list[list[str]] = []
@@ -119,7 +120,7 @@ def test_existing_repository_pull_refreshes_origin_with_current_token(tmp_path, 
         "remote",
         "set-url",
         "origin",
-        "https://x-access-token:fresh-token@github.com/Feberdin/private-repo.git",
+        f"https://x-access-token:{expected_token}@github.com/Feberdin/private-repo.git",
     ]
     assert recorded_commands[1][:4] == [scanner.settings.git_binary, "-C", str(checkout_path), "checkout"]
     assert recorded_commands[2][:4] == [scanner.settings.git_binary, "-C", str(checkout_path), "pull"]

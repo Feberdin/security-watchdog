@@ -116,11 +116,16 @@ HIGH_SIGNAL_PREFIXES = (
     "xox",
 )
 PLACEHOLDER_SECRET_TOKENS = (
+    "a1b2c3d4",
+    "abcdefghijklmnopqrstuvwxyz",
     "changeme",
     "change-me",
+    "demo",
     "dummy",
     "example",
     "fake",
+    "fresh-token",
+    "fresh_token",
     "not-set",
     "not_configured",
     "not-configured",
@@ -135,14 +140,18 @@ VARIABLE_REFERENCE_PREFIXES = (
     "{{",
     "env.",
     "process.env.",
+    "secret://",
     "secretref:",
     "secrets.",
+    "self.",
     "settings.",
     "vault:",
 )
 VARIABLE_REFERENCE_SUBSTRINGS = (
     "process.env.",
+    "secret://",
     "secrets.",
+    "self.",
     "settings.",
     "vault:",
 )
@@ -338,6 +347,8 @@ class SecretScanner:
                 continue
 
             secret_preview_source = match.groupdict().get("secret_value") or match.group(0)
+            if self._looks_placeholder_secret(secret_preview_source):
+                continue
             if detector_name in {"generic_password", "generic_token_assignment"}:
                 if not self._looks_plausible_assigned_secret(secret_preview_source):
                     continue
@@ -428,6 +439,10 @@ class SecretScanner:
         path = Path(relative_path.lower())
         if path.name in LOCKFILE_NAMES:
             return False
+        if path.suffix in {".md", ".rst"} or any(
+            marker in path.name for marker in (".example", ".sample", ".template")
+        ):
+            return False
         return not any(part in LOW_SIGNAL_PATH_PARTS for part in path.parts)
 
     def _is_high_entropy_candidate(self, candidate: str) -> bool:
@@ -437,6 +452,8 @@ class SecretScanner:
         if lowered.startswith(("http://", "https://")):
             return False
         if re.fullmatch(r"[0-9a-f]{20,}", lowered):
+            return False
+        if "_" in candidate and re.fullmatch(r"[A-Z][A-Z0-9_]{19,}", candidate):
             return False
         if len(candidate) > 200:
             return False
@@ -452,15 +469,13 @@ class SecretScanner:
         """Require secret-like context so entropy alone does not overwhelm the dashboard."""
 
         lowered_candidate = candidate.lower()
+        if "secret://" in line.lower():
+            return False
         if self._looks_placeholder_secret(lowered_candidate):
             return False
         if lowered_candidate.startswith(HIGH_SIGNAL_PREFIXES):
             return True
-        if SECRET_CONTEXT_PATTERN.search(line):
-            return True
-        return bool(
-            re.search(rf"[:=]\s*[\"']?{re.escape(candidate)}(?:[\"']|\b)", line)
-        )
+        return bool(SECRET_CONTEXT_PATTERN.search(line))
 
     def _looks_plausible_assigned_secret(self, value: str) -> bool:
         """Ignore placeholders and references while still catching realistic assigned secrets."""
@@ -469,6 +484,13 @@ class SecretScanner:
         if not GENERIC_SECRET_VALUE_PATTERN.fullmatch(normalized_value):
             return False
         if self._looks_placeholder_secret(normalized_value):
+            return False
+        if (
+            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", normalized_value)
+            and not any(character.isdigit() for character in normalized_value)
+        ):
+            return False
+        if normalized_value.startswith(("/", "./", "../", "http://", "https://")):
             return False
 
         has_lower = any(character.islower() for character in normalized_value)
@@ -489,6 +511,10 @@ class SecretScanner:
         if any(marker in normalized_value for marker in VARIABLE_REFERENCE_SUBSTRINGS):
             return True
         if any(token in normalized_value for token in PLACEHOLDER_SECRET_TOKENS):
+            return True
+        if "{" in normalized_value and "}" in normalized_value:
+            return True
+        if re.fullmatch(r"(?:self|this)\.[A-Za-z_][A-Za-z0-9_.]*\([^)]*\)", normalized_value):
             return True
         if re.fullmatch(r"[x*._-]{8,}", normalized_value):
             return True

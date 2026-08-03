@@ -18,7 +18,7 @@ import app.models.entities  # noqa: F401
 from app.db.base import Base
 from app.models.entities import ManualScanJobStatus
 from app.models.schemas import ScanRequest, ScanResponse
-from app.repositories.store import get_manual_scan_job
+from app.repositories.store import claim_manual_scan_job, get_manual_scan_job
 from app.services import manual_scan_jobs
 
 
@@ -57,6 +57,69 @@ def test_enqueue_manual_scan_reuses_active_job() -> None:
     assert second_created is False
     assert second_job.id == first_job.id
     assert second_job.status == ManualScanJobStatus.QUEUED.value
+
+
+def test_recover_interrupted_manual_scan_jobs_marks_running_job_failed(monkeypatch) -> None:
+    """A runner restart should expose an interrupted scan as failed and unblock the queue."""
+
+    session_factory = build_session_factory()
+    monkeypatch.setattr(manual_scan_jobs, "SessionLocal", session_factory)
+
+    with session_factory() as session:
+        job, _ = manual_scan_jobs.enqueue_manual_scan(
+            session,
+            ScanRequest(repository_full_name=None, include_archived=False, force=True),
+        )
+        session.commit()
+        job_id = job.id
+
+        claimed_job = claim_manual_scan_job(session, job_id=job_id)
+        session.commit()
+        assert claimed_job is not None
+        assert claimed_job.status == ManualScanJobStatus.RUNNING.value
+
+    recovered_count = manual_scan_jobs.recover_interrupted_manual_scan_jobs()
+
+    with session_factory() as session:
+        stored_job = get_manual_scan_job(session, job_id)
+        replacement_job, replacement_created = manual_scan_jobs.enqueue_manual_scan(
+            session,
+            ScanRequest(repository_full_name=None, include_archived=False, force=True),
+        )
+
+    assert recovered_count == 1
+    assert stored_job is not None
+    assert stored_job.status == ManualScanJobStatus.FAILED.value
+    assert stored_job.completed_at is not None
+    assert stored_job.error_message == manual_scan_jobs.INTERRUPTED_SCAN_MESSAGE
+    assert replacement_created is True
+    assert replacement_job.id != job_id
+
+
+def test_recover_interrupted_manual_scan_jobs_leaves_queued_job_active(monkeypatch) -> None:
+    """Recovery must not fail a queued scan that no process has claimed yet."""
+
+    session_factory = build_session_factory()
+    monkeypatch.setattr(manual_scan_jobs, "SessionLocal", session_factory)
+
+    with session_factory() as session:
+        queued_job, _ = manual_scan_jobs.enqueue_manual_scan(
+            session,
+            ScanRequest(repository_full_name="Feberdin/security-watchdog", include_archived=False, force=False),
+        )
+        session.commit()
+        queued_job_id = queued_job.id
+
+    recovered_count = manual_scan_jobs.recover_interrupted_manual_scan_jobs()
+
+    with session_factory() as session:
+        stored_job = get_manual_scan_job(session, queued_job_id)
+
+    assert recovered_count == 0
+    assert stored_job is not None
+    assert stored_job.status == ManualScanJobStatus.QUEUED.value
+    assert stored_job.completed_at is None
+    assert stored_job.error_message is None
 
 
 def test_process_manual_scan_job_marks_job_succeeded(monkeypatch) -> None:

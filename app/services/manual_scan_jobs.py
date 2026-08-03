@@ -3,7 +3,7 @@ Purpose: Queue, execute, and serialize manual scan jobs independently from HTTP 
 Input/Output: Accepts `ScanRequest` objects, persists durable queue rows, and returns API-friendly
 scan-job snapshots that the dashboard can poll.
 Important invariants: Only one manual scan should actively run at a time; job claims must be
-idempotent so API fallback processing and the worker never execute the same scan twice.
+idempotent, and only a durable worker or embedded scheduler executes queued scans.
 Debugging: If a scan seems stuck, inspect `manual_scan_jobs.status`, `started_at`,
 `completed_at`, and `error_message` first to see whether the job is queued, running, or failed.
 """
@@ -20,6 +20,7 @@ from app.models.schemas import ManualScanJobOut, ScanRequest
 from app.repositories.store import (
     claim_manual_scan_job,
     create_manual_scan_job,
+    fail_running_manual_scan_jobs,
     get_active_manual_scan_job,
     get_latest_manual_scan_job,
     get_manual_scan_job,
@@ -29,6 +30,10 @@ from app.repositories.store import (
 from app.services.orchestrator import ScanOrchestrator
 
 LOGGER = logging.getLogger(__name__)
+INTERRUPTED_SCAN_MESSAGE = (
+    "Scan runner restarted before this scan completed. The interrupted run cannot be resumed; "
+    "start a new manual scan."
+)
 
 
 def enqueue_manual_scan(session: Session, request: ScanRequest) -> tuple[ManualScanJob, bool]:
@@ -66,13 +71,44 @@ def get_latest_manual_scan_job_out(session: Session) -> ManualScanJobOut | None:
     return serialize_manual_scan_job(job)
 
 
+def recover_interrupted_manual_scan_jobs() -> int:
+    """
+    Mark jobs owned by a previous runner process as failed before accepting queue work.
+
+    Why this exists:
+    Scan orchestration state lives in memory while the durable job status lives in PostgreSQL. Once
+    a runner restarts, any row still marked `running` is orphaned and must not block future scans.
+    """
+
+    recovery_session = SessionLocal()
+    try:
+        recovered_count = fail_running_manual_scan_jobs(
+            recovery_session,
+            error_message=INTERRUPTED_SCAN_MESSAGE,
+        )
+        recovery_session.commit()
+    except Exception:
+        recovery_session.rollback()
+        LOGGER.exception("Failed to recover interrupted manual scan jobs")
+        raise
+    finally:
+        recovery_session.close()
+
+    if recovered_count:
+        LOGGER.warning(
+            "Recovered interrupted manual scan jobs",
+            extra={"recovered_job_count": recovered_count},
+        )
+    return recovered_count
+
+
 def process_manual_scan_job(job_id: int | None = None) -> ManualScanJobOut | None:
     """
     Claim and execute one queued manual scan job outside the request transaction.
 
     Why this exists:
     The API should acknowledge scan requests quickly, while the actual orchestration happens in a
-    dedicated job context that survives much longer than the original HTTP request.
+    dedicated runner context that is independent from the original HTTP request.
     """
 
     claim_session = SessionLocal()

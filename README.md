@@ -65,6 +65,7 @@ Key environment variables:
 - `POSTGRES_PASSWORD`: Local Docker password for PostgreSQL. In Broker GitOps deployments this must be provided as the Broker secret `SECURITY_WATCHDOG_POSTGRES_PASSWORD`.
 - `SECURITY_WATCHDOG_DATABASE_URL`: Broker secret containing the PostgreSQL connection string for the application.
 - `GITHUB_TOKEN`: GitHub token with access to the repositories you want to monitor.
+- `GITHUB_INCLUDE_FORKS`: Include forked GitHub repositories in repository scans and reports. Defaults to `false`, so forks such as large upstream mirrors stay out of the normal security queue.
 - `SECRET_HISTORY_SCAN_ENABLED`: When `true`, public GitHub repositories are fetched with full history and scanned for secrets in old commits as well as the current tree.
 - `SECRET_HISTORY_MAX_COMMITS_PER_REPO`: Optional safety limit for history scanning. `0` means scan the full reachable history.
 - `DATABASE_URL`: PostgreSQL connection string.
@@ -81,6 +82,7 @@ Key environment variables:
 - `POST /scan`: Queue an immediate full scan and return `202 Accepted` plus a status URL.
 - `GET /scan-jobs/latest`: Latest manual scan including queue/running/success/failure state.
 - `GET /scan-jobs/{job_id}`: One manual scan job with timestamps, counts, and error details.
+- Manual scan jobs persist counters after each asset and resume a still-running job after a worker restart or deployment.
 - `GET /reports`: Aggregated dashboard/report data.
 - `GET /reports/sarif`: Active alerts as SARIF 2.1.0 JSON. Add `?include_resolved=true` for audit exports.
 - `GET /alerts`: Latest alerts.

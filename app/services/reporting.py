@@ -17,6 +17,7 @@ from packaging.version import InvalidVersion, Version
 from sqlalchemy import and_, case, desc, func, literal, or_, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import get_settings
 from app.models.entities import (
     Alert,
     Dependency,
@@ -50,16 +51,42 @@ class ReportingService:
 
     def __init__(self, version_catalog: VersionCatalogService | None = None) -> None:
         self.version_catalog = version_catalog or DEFAULT_VERSION_CATALOG
+        self.settings = get_settings()
 
     def build_report(self, session: Session) -> ReportOut:
         """Aggregate the main metrics needed by operators."""
 
-        repository_count = session.scalar(select(func.count(Repository.id))) or 0
-        dependency_count = session.scalar(select(func.count(Dependency.id))) or 0
-        vulnerability_count = session.scalar(select(func.count(Vulnerability.id))) or 0
+        included_repository_ids = self._included_repository_ids(session)
+        repository_count = len(included_repository_ids)
+        dependency_count = (
+            session.scalar(
+                select(func.count(Dependency.id)).where(Dependency.repository_id.in_(included_repository_ids))
+            )
+            if included_repository_ids
+            else 0
+        ) or 0
+        vulnerability_count = (
+            session.scalar(
+                select(func.count(func.distinct(Vulnerability.id)))
+                .join(DependencyVulnerability, DependencyVulnerability.vulnerability_id == Vulnerability.id)
+                .join(Dependency, Dependency.id == DependencyVulnerability.dependency_id)
+                .where(Dependency.repository_id.in_(included_repository_ids))
+            )
+            if included_repository_ids
+            else 0
+        ) or 0
         active_alert_filter = self._operator_actionable_alert_filter()
         unique_open_alerts = self._deduplicate_alerts(
-            self._open_alerts(session.scalars(select(Alert).where(active_alert_filter)).all())
+            self._open_alerts(
+                session.scalars(
+                    select(Alert).where(
+                        active_alert_filter,
+                        Alert.repository_id.in_(included_repository_ids),
+                    )
+                ).all()
+            )
+            if included_repository_ids
+            else []
         )
         alert_count = len(unique_open_alerts)
         critical_alert_count = len(
@@ -73,7 +100,10 @@ class ReportingService:
                 "risk_score": repository.risk_score,
             }
             for repository in session.scalars(
-                select(Repository).order_by(desc(Repository.risk_score)).limit(10)
+                select(Repository)
+                .where(Repository.id.in_(included_repository_ids))
+                .order_by(desc(Repository.risk_score))
+                .limit(10)
             )
         ]
 
@@ -102,6 +132,8 @@ class ReportingService:
                     func.count(DependencyVulnerability.id).label("affected_dependencies"),
                 )
                 .join(DependencyVulnerability, DependencyVulnerability.vulnerability_id == Vulnerability.id)
+                .join(Dependency, Dependency.id == DependencyVulnerability.dependency_id)
+                .where(Dependency.repository_id.in_(included_repository_ids))
                 .group_by(Vulnerability.id)
                 .order_by(desc("affected_dependencies"))
                 .limit(10)
@@ -131,8 +163,21 @@ class ReportingService:
         scanner noise before opening the heavy accordion view.
         """
 
-        actionable_filter = self._operator_actionable_alert_filter()
-        open_alert_rows = session.scalar(select(func.count(Alert.id)).where(Alert.status != "resolved")) or 0
+        included_repository_ids = self._included_repository_ids(session)
+        actionable_filter = and_(
+            self._operator_actionable_alert_filter(),
+            Alert.repository_id.in_(included_repository_ids),
+        )
+        open_alert_rows = (
+            session.scalar(
+                select(func.count(Alert.id)).where(
+                    Alert.status != "resolved",
+                    Alert.repository_id.in_(included_repository_ids),
+                )
+            )
+            if included_repository_ids
+            else 0
+        ) or 0
         actionable_rows = session.scalar(select(func.count(Alert.id)).where(actionable_filter)) or 0
         excluded_legacy_rows = max(open_alert_rows - actionable_rows, 0)
 
@@ -901,7 +946,7 @@ class ReportingService:
     def _load_repositories_with_inventory(self, session: Session) -> list[Repository]:
         """Load all repositories with the relationships needed for inventory and prompt views."""
 
-        return session.scalars(
+        repositories = session.scalars(
             select(Repository)
             .options(
                 selectinload(Repository.dependencies)
@@ -911,7 +956,32 @@ class ReportingService:
                 selectinload(Repository.scan_results),
             )
             .order_by(desc(Repository.risk_score), Repository.full_name)
-        ).all()
+        ).unique().all()
+        return [
+            repository
+            for repository in repositories
+            if self._should_include_repository(repository)
+        ]
+
+    def _included_repository_ids(self, session: Session) -> list[int]:
+        """Return repository IDs that should participate in operator reports and automation queues."""
+
+        repositories = session.scalars(select(Repository)).all()
+        return [
+            repository.id
+            for repository in repositories
+            if self._should_include_repository(repository)
+        ]
+
+    def _should_include_repository(self, repository: Repository) -> bool:
+        """Apply reporting visibility rules that mirror scanner inventory selection."""
+
+        metadata = repository.metadata_json or {}
+        return not (
+            repository.source_type == "github"
+            and bool(metadata.get("fork"))
+            and not self.settings.github_include_forks
+        )
 
     def _load_repository_with_inventory(self, session: Session, repository_id: int) -> Repository:
         """Load one repository-like asset with its related findings or raise a lookup error."""

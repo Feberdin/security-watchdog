@@ -48,7 +48,16 @@ def test_post_scan_returns_accepted_and_exposes_latest_job(monkeypatch) -> None:
     class FakeOrchestrator:
         """Deterministic stand-in so the route test does not hit real scanners."""
 
-        def run_manual_scan(self, session: Session, request: ScanRequest) -> ScanResponse:
+        def run_manual_scan(
+            self,
+            session: Session,
+            request: ScanRequest,
+            *,
+            job_id: int | None = None,
+            resume_started_at=None,
+        ) -> ScanResponse:
+            assert job_id is not None
+            assert resume_started_at is not None
             return ScanResponse(
                 message="Scan completed",
                 repository_count=6,

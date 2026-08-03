@@ -9,7 +9,7 @@ Debugging: If the UI shows duplicates or stale findings, start here and verify r
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, desc, func, select, update
 from sqlalchemy.orm import Session
@@ -36,6 +36,7 @@ from app.models.schemas import (
 )
 
 LOGGER = logging.getLogger(__name__)
+MANUAL_SCAN_RESUME_GRACE_SECONDS = 60
 
 
 def utcnow() -> datetime:
@@ -139,14 +140,18 @@ def get_active_manual_scan_job(session: Session) -> ManualScanJob | None:
 
 def claim_manual_scan_job(session: Session, *, job_id: int | None = None) -> ManualScanJob | None:
     """
-    Atomically transition one queued job into the running state.
+    Atomically transition one queued job into the running state or resume a running job.
 
     Why this exists:
     Both the API process and the dedicated worker may attempt to pick up the same queued scan. The
     conditional update below ensures only one process wins the claim even if both notice the job at
-    roughly the same time.
+    roughly the same time. A deployment can stop the worker after it already marked a job as
+    running, so the queue worker also treats the oldest still-running job as resumable when there is
+    no queued job left.
     """
 
+    requested_job_id = job_id
+    resume_existing_running = False
     if job_id is None:
         job_id = session.scalar(
             select(ManualScanJob.id)
@@ -155,7 +160,31 @@ def claim_manual_scan_job(session: Session, *, job_id: int | None = None) -> Man
             .limit(1)
         )
     if job_id is None:
+        resume_cutoff = utcnow() - timedelta(seconds=MANUAL_SCAN_RESUME_GRACE_SECONDS)
+        job_id = session.scalar(
+            select(ManualScanJob.id)
+            .where(
+                ManualScanJob.status == ManualScanJobStatus.RUNNING.value,
+                ManualScanJob.started_at.is_not(None),
+                ManualScanJob.started_at <= resume_cutoff,
+            )
+            .order_by(ManualScanJob.requested_at.asc(), ManualScanJob.id.asc())
+            .limit(1)
+        )
+        resume_existing_running = job_id is not None
+    if job_id is None:
         return None
+
+    existing_job = get_manual_scan_job(session, job_id)
+    if existing_job is None:
+        return None
+    if existing_job.status == ManualScanJobStatus.RUNNING.value:
+        if requested_job_id is not None or not resume_existing_running:
+            return None
+        existing_job.completed_at = None
+        existing_job.error_message = None
+        session.flush()
+        return existing_job
 
     claim_result = session.execute(
         update(ManualScanJob)
@@ -176,6 +205,34 @@ def claim_manual_scan_job(session: Session, *, job_id: int | None = None) -> Man
 
     session.flush()
     return get_manual_scan_job(session, job_id)
+
+
+def update_manual_scan_job_checkpoint(
+    session: Session,
+    *,
+    job_id: int,
+    repository_count: int,
+    alert_count: int,
+    failed_system_count: int,
+) -> ManualScanJob | None:
+    """
+    Store durable progress counters for a running manual scan.
+
+    Why this exists:
+    Manual scans can outlive a container deployment. Persisting counters after each asset keeps the
+    dashboard useful after restart and gives the resumed worker a conservative base count instead of
+    resetting visible progress to zero.
+    """
+
+    job = get_manual_scan_job(session, job_id)
+    if job is None:
+        return None
+
+    job.repository_count = repository_count
+    job.alert_count = alert_count
+    job.failed_system_count = failed_system_count
+    session.flush()
+    return job
 
 
 def mark_manual_scan_job_succeeded(
@@ -235,8 +292,19 @@ def replace_repository_dependencies(
         )
     session.execute(delete(Dependency).where(Dependency.repository_id == repository.id))
 
+    deduplicated_dependencies = _deduplicate_dependency_records(dependencies)
+    if len(deduplicated_dependencies) != len(dependencies):
+        LOGGER.debug(
+            "Deduplicated dependency records before replacement",
+            extra={
+                "repository": repository.full_name,
+                "input_count": len(dependencies),
+                "deduplicated_count": len(deduplicated_dependencies),
+            },
+        )
+
     orm_dependencies: list[Dependency] = []
-    for dependency in dependencies:
+    for dependency in deduplicated_dependencies:
         orm_dependency = Dependency(
             repository_id=repository.id,
             manifest_path=dependency.manifest_path,
@@ -252,6 +320,41 @@ def replace_repository_dependencies(
     repository.last_scanned_at = utcnow()
     session.flush()
     return orm_dependencies
+
+
+def _deduplicate_dependency_records(dependencies: list[DependencyRecord]) -> list[DependencyRecord]:
+    """
+    Collapse scanner duplicates before they hit the database uniqueness constraint.
+
+    Why this exists:
+    Some manifests can report the same package/version pair more than once, for example Dockerfiles
+    with repeated base stages or lockfiles plus direct manifests. The database intentionally stores
+    one current row per repository, manifest, package, version, and ecosystem, so the in-memory scan
+    result must follow the same identity rule before insertion.
+    """
+
+    deduplicated: dict[tuple[str, str, str, str], DependencyRecord] = {}
+    for dependency in dependencies:
+        key = (
+            dependency.manifest_path,
+            dependency.package_name,
+            dependency.version,
+            dependency.ecosystem,
+        )
+        existing = deduplicated.get(key)
+        if existing is None:
+            deduplicated[key] = dependency
+            continue
+
+        merged_metadata = {**dependency.metadata, **existing.metadata}
+        deduplicated[key] = existing.model_copy(
+            update={
+                "direct_dependency": existing.direct_dependency or dependency.direct_dependency,
+                "group_name": existing.group_name or dependency.group_name,
+                "metadata": merged_metadata,
+            }
+        )
+    return list(deduplicated.values())
 
 
 def upsert_vulnerability(session: Session, record: VulnerabilityRecord) -> Vulnerability:

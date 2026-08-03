@@ -10,6 +10,8 @@ Debugging: If a dashboard scan looks stuck, start with these tests and then insp
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -68,8 +70,17 @@ def test_process_manual_scan_job_marks_job_succeeded(monkeypatch) -> None:
     class FakeOrchestrator:
         """Minimal orchestrator stub that keeps the test offline and deterministic."""
 
-        def run_manual_scan(self, session: Session, request: ScanRequest) -> ScanResponse:
+        def run_manual_scan(
+            self,
+            session: Session,
+            request: ScanRequest,
+            *,
+            job_id: int | None = None,
+            resume_started_at=None,
+        ) -> ScanResponse:
             assert request.force is True
+            assert job_id == 1
+            assert resume_started_at is not None
             return ScanResponse(
                 message="Scan completed with warnings",
                 repository_count=4,
@@ -114,7 +125,16 @@ def test_process_manual_scan_job_marks_job_failed(monkeypatch) -> None:
     class ExplodingOrchestrator:
         """Force a reproducible failure so the queue error path can be asserted."""
 
-        def run_manual_scan(self, session: Session, request: ScanRequest) -> ScanResponse:
+        def run_manual_scan(
+            self,
+            session: Session,
+            request: ScanRequest,
+            *,
+            job_id: int | None = None,
+            resume_started_at=None,
+        ) -> ScanResponse:
+            assert job_id == 1
+            assert resume_started_at is not None
             raise RuntimeError("simulated queue failure")
 
     monkeypatch.setattr(manual_scan_jobs, "ScanOrchestrator", ExplodingOrchestrator)
@@ -139,3 +159,57 @@ def test_process_manual_scan_job_marks_job_failed(monkeypatch) -> None:
     assert stored_job is not None
     assert stored_job.status == ManualScanJobStatus.FAILED.value
     assert stored_job.completed_at is not None
+
+
+def test_process_manual_scan_job_resumes_running_job_after_restart(monkeypatch) -> None:
+    """A job left running by a worker restart should be picked up by the queue processor."""
+
+    session_factory = build_session_factory()
+    monkeypatch.setattr(manual_scan_jobs, "SessionLocal", session_factory)
+    captured_context: dict[str, object] = {}
+
+    class FakeOrchestrator:
+        """Capture resume context without running any external scanners."""
+
+        def run_manual_scan(
+            self,
+            session: Session,
+            request: ScanRequest,
+            *,
+            job_id: int | None = None,
+            resume_started_at=None,
+        ) -> ScanResponse:
+            captured_context["job_id"] = job_id
+            captured_context["resume_started_at"] = resume_started_at
+            assert request.repository_full_name is None
+            return ScanResponse(
+                message="Scan completed",
+                repository_count=6,
+                alert_count=2,
+                failed_system_count=0,
+            )
+
+    monkeypatch.setattr(manual_scan_jobs, "ScanOrchestrator", FakeOrchestrator)
+
+    with session_factory() as session:
+        job, created = manual_scan_jobs.enqueue_manual_scan(
+            session,
+            ScanRequest(repository_full_name=None, include_archived=False, force=False),
+        )
+        job.status = ManualScanJobStatus.RUNNING.value
+        job.started_at = datetime.now(UTC) - timedelta(minutes=5)
+        session.commit()
+        job_id = job.id
+
+    result = manual_scan_jobs.process_manual_scan_job()
+
+    with session_factory() as session:
+        stored_job = get_manual_scan_job(session, job_id)
+
+    assert created is True
+    assert result is not None
+    assert result.status == ManualScanJobStatus.SUCCEEDED.value
+    assert captured_context["job_id"] == job_id
+    assert captured_context["resume_started_at"] is not None
+    assert stored_job is not None
+    assert stored_job.status == ManualScanJobStatus.SUCCEEDED.value

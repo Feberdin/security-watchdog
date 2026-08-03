@@ -67,6 +67,69 @@ def test_sync_repositories_skips_only_the_repo_that_failed_checkout() -> None:
     assert [repository.full_name for repository in repositories] == ["Feberdin/healthy-repo"]
 
 
+def test_sync_repositories_skips_forks_by_default() -> None:
+    """Forked repositories should stay out of normal scans unless explicitly enabled."""
+
+    session = build_test_session()
+    scanner = RepositoryScanner()
+    scanner.github_client.list_repositories = lambda: [
+        {
+            "id": 1,
+            "name": "core",
+            "full_name": "Feberdin/core",
+            "clone_url": "https://github.com/Feberdin/core.git",
+            "default_branch": "dev",
+            "archived": False,
+            "fork": True,
+            "owner": {"login": "Feberdin"},
+        },
+        {
+            "id": 2,
+            "name": "security-watchdog",
+            "full_name": "Feberdin/security-watchdog",
+            "clone_url": "https://github.com/Feberdin/security-watchdog.git",
+            "default_branch": "main",
+            "archived": False,
+            "fork": False,
+            "owner": {"login": "Feberdin"},
+        },
+    ]
+    scanner._sync_local_checkout = lambda *args, **kwargs: None
+
+    repositories = scanner.sync_repositories(session)
+
+    assert [repository.full_name for repository in repositories] == ["Feberdin/security-watchdog"]
+
+
+def test_sync_repositories_can_include_forks_when_configured() -> None:
+    """Operators can still opt into fork scans for explicit review setups."""
+
+    session = build_test_session()
+    scanner = RepositoryScanner()
+    original_include_forks = scanner.settings.github_include_forks
+    scanner.settings.github_include_forks = True
+    scanner.github_client.list_repositories = lambda: [
+        {
+            "id": 1,
+            "name": "core",
+            "full_name": "Feberdin/core",
+            "clone_url": "https://github.com/Feberdin/core.git",
+            "default_branch": "dev",
+            "archived": False,
+            "fork": True,
+            "owner": {"login": "Feberdin"},
+        }
+    ]
+    scanner._sync_local_checkout = lambda *args, **kwargs: None
+
+    try:
+        repositories = scanner.sync_repositories(session)
+    finally:
+        scanner.settings.github_include_forks = original_include_forks
+
+    assert [repository.full_name for repository in repositories] == ["Feberdin/core"]
+
+
 def test_public_repository_clone_uses_full_history(tmp_path, monkeypatch) -> None:
     """Public repositories should be cloned without `--depth 1` so history scans can run."""
 

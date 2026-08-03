@@ -10,12 +10,13 @@ and records its own scan result from here.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from app.models.entities import AIExtractedThreat, Alert, Dependency, Repository
+from app.models.entities import AIExtractedThreat, Alert, Dependency, ManualScanJob, Repository, ScanResult
 from app.models.schemas import DependencyRecord, ScanRequest, ScanResponse, VulnerabilityRecord
 from app.repositories.store import (
     build_alert_fingerprint,
@@ -23,6 +24,7 @@ from app.repositories.store import (
     record_scan_result,
     replace_repository_dependencies,
     resolve_stale_alerts,
+    update_manual_scan_job_checkpoint,
     upsert_alert,
     upsert_vulnerability,
 )
@@ -59,7 +61,14 @@ class ScanOrchestrator:
         self.sbom_service = SbomService()
         self.alert_dispatcher = AlertDispatcher()
 
-    def run_manual_scan(self, session: Session, request: ScanRequest) -> ScanResponse:
+    def run_manual_scan(
+        self,
+        session: Session,
+        request: ScanRequest,
+        *,
+        job_id: int | None = None,
+        resume_started_at: datetime | None = None,
+    ) -> ScanResponse:
         """Run the complete asset scan workflow immediately."""
 
         repositories = self._run_inventory_stage(
@@ -88,11 +97,35 @@ class ScanOrchestrator:
             loader=lambda: self.homeassistant_scanner.sync_assets(session),
         )
 
-        processed_count = 0
-        created_alerts = 0
-        failed_system_count = 0
+        processed_count, created_alerts, failed_system_count = self._load_manual_scan_checkpoint(
+            session,
+            job_id,
+        )
+        resume_counts_are_persisted = processed_count > 0
 
         for repository in repositories:
+            already_finished, previously_failed = self._asset_scan_finished_since(
+                session,
+                repository=repository,
+                scanner_name="repository_asset_scan",
+                started_at=resume_started_at,
+            )
+            if already_finished:
+                processed_count, failed_system_count = self._count_resumed_asset(
+                    processed_count,
+                    failed_system_count,
+                    previously_failed=previously_failed,
+                    resume_counts_are_persisted=resume_counts_are_persisted,
+                )
+                self._save_manual_scan_checkpoint(
+                    session,
+                    job_id=job_id,
+                    repository_count=processed_count,
+                    alert_count=created_alerts,
+                    failed_system_count=failed_system_count,
+                )
+                continue
+
             alerts_created, failed = self._run_guarded_asset_scan(
                 session,
                 repository=repository,
@@ -106,9 +139,38 @@ class ScanOrchestrator:
             created_alerts += alerts_created
             processed_count += 1
             failed_system_count += failed
+            self._save_manual_scan_checkpoint(
+                session,
+                job_id=job_id,
+                repository_count=processed_count,
+                alert_count=created_alerts,
+                failed_system_count=failed_system_count,
+            )
 
         for asset in unraid_assets:
             repository = asset["repository"]
+            already_finished, previously_failed = self._asset_scan_finished_since(
+                session,
+                repository=repository,
+                scanner_name="unraid_asset_scan",
+                started_at=resume_started_at,
+            )
+            if already_finished:
+                processed_count, failed_system_count = self._count_resumed_asset(
+                    processed_count,
+                    failed_system_count,
+                    previously_failed=previously_failed,
+                    resume_counts_are_persisted=resume_counts_are_persisted,
+                )
+                self._save_manual_scan_checkpoint(
+                    session,
+                    job_id=job_id,
+                    repository_count=processed_count,
+                    alert_count=created_alerts,
+                    failed_system_count=failed_system_count,
+                )
+                continue
+
             alerts_created, failed = self._run_guarded_asset_scan(
                 session,
                 repository=repository,
@@ -127,9 +189,38 @@ class ScanOrchestrator:
             created_alerts += alerts_created
             processed_count += 1
             failed_system_count += failed
+            self._save_manual_scan_checkpoint(
+                session,
+                job_id=job_id,
+                repository_count=processed_count,
+                alert_count=created_alerts,
+                failed_system_count=failed_system_count,
+            )
 
         for asset in homeassistant_assets:
             repository = asset["repository"]
+            already_finished, previously_failed = self._asset_scan_finished_since(
+                session,
+                repository=repository,
+                scanner_name="homeassistant_asset_scan",
+                started_at=resume_started_at,
+            )
+            if already_finished:
+                processed_count, failed_system_count = self._count_resumed_asset(
+                    processed_count,
+                    failed_system_count,
+                    previously_failed=previously_failed,
+                    resume_counts_are_persisted=resume_counts_are_persisted,
+                )
+                self._save_manual_scan_checkpoint(
+                    session,
+                    job_id=job_id,
+                    repository_count=processed_count,
+                    alert_count=created_alerts,
+                    failed_system_count=failed_system_count,
+                )
+                continue
+
             alerts_created, failed = self._run_guarded_asset_scan(
                 session,
                 repository=repository,
@@ -148,6 +239,13 @@ class ScanOrchestrator:
             created_alerts += alerts_created
             processed_count += 1
             failed_system_count += failed
+            self._save_manual_scan_checkpoint(
+                session,
+                job_id=job_id,
+                repository_count=processed_count,
+                alert_count=created_alerts,
+                failed_system_count=failed_system_count,
+            )
 
         self._dispatch_open_alerts(session)
         session.commit()
@@ -607,6 +705,140 @@ class ScanOrchestrator:
         for alert in alerts:
             repository = session.get(Repository, alert.repository_id) if alert.repository_id else None
             self.alert_dispatcher.dispatch(alert, repository)
+
+    def _load_manual_scan_checkpoint(
+        self,
+        session: Session,
+        job_id: int | None,
+    ) -> tuple[int, int, int]:
+        """
+        Return persisted manual-scan counters before a resumed run continues.
+
+        Why this exists:
+        A deployment can interrupt the worker after several assets already committed their scan
+        results. The job row stores conservative progress counters, so the resumed worker does not
+        reset visible progress or double-count assets that were checkpointed before restart.
+        """
+
+        if job_id is None:
+            return 0, 0, 0
+
+        job = session.get(ManualScanJob, job_id)
+        if job is None:
+            return 0, 0, 0
+
+        return job.repository_count, job.alert_count, job.failed_system_count
+
+    def _save_manual_scan_checkpoint(
+        self,
+        session: Session,
+        *,
+        job_id: int | None,
+        repository_count: int,
+        alert_count: int,
+        failed_system_count: int,
+    ) -> None:
+        """
+        Persist current manual-scan counters after one asset decision.
+
+        Why this exists:
+        The worker may be restarted by a deployment at any time. Committing the checkpoint after
+        each asset keeps the job resumable without requiring a separate migration or external state
+        store.
+        """
+
+        if job_id is None:
+            return
+
+        update_manual_scan_job_checkpoint(
+            session,
+            job_id=job_id,
+            repository_count=repository_count,
+            alert_count=alert_count,
+            failed_system_count=failed_system_count,
+        )
+        session.commit()
+
+    def _asset_scan_finished_since(
+        self,
+        session: Session,
+        *,
+        repository: Repository,
+        scanner_name: str,
+        started_at: datetime | None,
+    ) -> tuple[bool, bool]:
+        """
+        Decide whether a resumed job can skip one asset.
+
+        Why this exists:
+        Successful scans update `repositories.last_scanned_at`; failed guarded asset scans write an
+        error `scan_results` row. Combining those two existing signals lets a restarted manual scan
+        continue after the last durable asset outcome without adding a new table.
+        """
+
+        normalized_started_at = self._normalize_datetime(started_at)
+        if normalized_started_at is None:
+            return False, False
+
+        last_scanned_at = self._normalize_datetime(repository.last_scanned_at)
+        if last_scanned_at is not None and last_scanned_at >= normalized_started_at:
+            LOGGER.info(
+                "Skipping already scanned asset during manual scan resume",
+                extra={"repository": repository.full_name, "scanner_name": scanner_name},
+            )
+            return True, False
+
+        failed_scan_id = session.scalar(
+            select(ScanResult.id)
+            .where(
+                ScanResult.repository_id == repository.id,
+                ScanResult.scanner_name == scanner_name,
+                ScanResult.status == "error",
+                ScanResult.started_at >= normalized_started_at,
+            )
+            .order_by(desc(ScanResult.started_at))
+            .limit(1)
+        )
+        if failed_scan_id is not None:
+            LOGGER.info(
+                "Skipping already failed asset during manual scan resume",
+                extra={"repository": repository.full_name, "scanner_name": scanner_name},
+            )
+            return True, True
+
+        return False, False
+
+    def _count_resumed_asset(
+        self,
+        processed_count: int,
+        failed_system_count: int,
+        *,
+        previously_failed: bool,
+        resume_counts_are_persisted: bool,
+    ) -> tuple[int, int]:
+        """
+        Count skipped assets only when the job row did not already checkpoint counters.
+
+        Example:
+        A pre-upgrade scan has no checkpoint counters yet, but it may have committed
+        `last_scanned_at` on 20 repositories. On resume those 20 skipped assets still need to count
+        as processed. A post-upgrade restart already has those counters on the job row, so counting
+        skipped assets again would inflate progress.
+        """
+
+        if resume_counts_are_persisted:
+            return processed_count, failed_system_count
+
+        return processed_count + 1, failed_system_count + (1 if previously_failed else 0)
+
+    def _normalize_datetime(self, value: datetime | None) -> datetime | None:
+        """Normalize database datetimes so SQLite and PostgreSQL comparisons behave the same."""
+
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
     def _run_inventory_stage(
         self,

@@ -88,6 +88,7 @@ def process_manual_scan_job(job_id: int | None = None) -> ManualScanJobOut | Non
             force=claimed_job.force,
         )
         claimed_job_id = claimed_job.id
+        claimed_job_started_at = claimed_job.started_at
         claim_session.commit()
     except Exception:
         claim_session.rollback()
@@ -98,7 +99,12 @@ def process_manual_scan_job(job_id: int | None = None) -> ManualScanJobOut | Non
 
     work_session = SessionLocal()
     try:
-        response = ScanOrchestrator().run_manual_scan(work_session, request)
+        response = ScanOrchestrator().run_manual_scan(
+            work_session,
+            request,
+            job_id=claimed_job_id,
+            resume_started_at=claimed_job_started_at,
+        )
     except Exception as error:
         work_session.rollback()
         LOGGER.exception(

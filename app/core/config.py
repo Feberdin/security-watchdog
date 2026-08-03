@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     github_alert_repository: str = ""
     github_request_timeout_seconds: int = 30
     github_include_private: bool = True
+    github_include_forks: bool = False
     secret_history_scan_enabled: bool = True
     secret_history_max_commits_per_repo: int = 0
 

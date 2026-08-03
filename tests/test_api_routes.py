@@ -73,6 +73,9 @@ def test_post_scan_returns_accepted_and_leaves_job_queued_for_worker() -> None:
     assert latest_job["status"] == "queued"
     assert latest_job["repository_count"] == 0
     assert latest_job["alert_count"] == 0
+    assert latest_job["progress"]["phase"] == "queued"
+    assert latest_job["progress"]["percent"] == 0
+    assert latest_job["progress"]["events"][0]["message"].startswith("Scan wurde eingereiht")
 
 
 def test_daily_security_check_endpoint_returns_codex_runbook() -> None:

@@ -22,6 +22,7 @@ from app.models.entities import (
     DependencyVulnerability,
     ManualScanJob,
     ManualScanJobStatus,
+    ManualScanProgressEvent,
     Repository,
     ScanResult,
     ThreatArticle,
@@ -107,6 +108,64 @@ def create_manual_scan_job(session: Session, request: ScanRequest) -> ManualScan
     session.add(job)
     session.flush()
     return job
+
+
+def record_manual_scan_progress(
+    session: Session,
+    *,
+    job_id: int,
+    phase: str,
+    message: str,
+    level: str,
+    current: int,
+    total: int,
+    percent: float,
+    retention_limit: int = 100,
+) -> ManualScanProgressEvent:
+    """Persist one progress line and keep only the newest bounded set for the job."""
+
+    event = ManualScanProgressEvent(
+        job_id=job_id,
+        phase=phase,
+        message=message,
+        level=level,
+        current=current,
+        total=total,
+        percent=percent,
+    )
+    session.add(event)
+    session.flush()
+
+    stale_event_ids = session.scalars(
+        select(ManualScanProgressEvent.id)
+        .where(ManualScanProgressEvent.job_id == job_id)
+        .order_by(desc(ManualScanProgressEvent.id))
+        .offset(retention_limit)
+    ).all()
+    if stale_event_ids:
+        session.execute(
+            delete(ManualScanProgressEvent).where(
+                ManualScanProgressEvent.id.in_(stale_event_ids)
+            )
+        )
+    return event
+
+
+def list_manual_scan_progress_events(
+    session: Session,
+    *,
+    job_id: int,
+    limit: int = 12,
+) -> list[ManualScanProgressEvent]:
+    """Return the newest progress events in chronological order for readable UI output."""
+
+    newest_first = session.scalars(
+        select(ManualScanProgressEvent)
+        .where(ManualScanProgressEvent.job_id == job_id)
+        .order_by(desc(ManualScanProgressEvent.id))
+        .limit(limit)
+    ).all()
+    return list(reversed(newest_first))
 
 
 def get_manual_scan_job(session: Session, job_id: int) -> ManualScanJob | None:

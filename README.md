@@ -82,8 +82,8 @@ Key environment variables:
 ## API Overview
 
 - `POST /scan`: Queue an immediate full scan and return `202 Accepted` plus a status URL.
-- `GET /scan-jobs/latest`: Latest manual scan including queue/running/success/failure state.
-- `GET /scan-jobs/{job_id}`: One manual scan job with timestamps, counts, and error details.
+- `GET /scan-jobs/latest`: Latest manual scan including lifecycle state, percentage, phase, and recent progress events.
+- `GET /scan-jobs/{job_id}`: One manual scan job with timestamps, counts, error details, and a bounded operator log.
 
 Manual scans are stored in PostgreSQL before execution. The dedicated `worker`, or the API's
 embedded scheduler in single-container installations, claims queued work. On runner startup,
@@ -151,6 +151,10 @@ For Home Assistant coverage:
 - `AI extraction not running`: set `AI_ENABLED=true`, provide `OPENAI_API_KEY`, and inspect worker logs.
 - `Manual scan remains queued`: verify the `worker` is healthy, or enable
   `RUN_EMBEDDED_SCHEDULER=true` for a supported single-container installation.
+- `Manual scan takes a long time`: open the dashboard progress log or query `/scan-jobs/latest`.
+  Full-estate runs query multiple advisory providers for exact dependency versions and can take
+  several minutes. Repeated package versions are cached per run, and NVD is paused briefly after a
+  `429` response while OSV and GitHub checks continue.
 - `Manual scan failed after a restart`: the previous runner was interrupted and cannot safely resume
   its in-memory scan. Start a new manual scan after the worker is healthy.
 - `Deployment gate returns 401`: verify that the Broker sends the dedicated Bearer token configured through the secure secret flow.
@@ -166,7 +170,9 @@ For Home Assistant coverage:
 - SARIF export: `curl -fsS http://localhost:31337/reports/sarif > security-watchdog.sarif`
 - Stable local image upgrade: `docker compose -f docker-compose.yml -f docker-compose.local.yml pull && docker compose -f docker-compose.yml -f docker-compose.local.yml up -d`
 - Local source rebuild: `docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.build.yml up -d --build`
-- Database state: inspect `repositories`, `dependencies`, `vulnerabilities`, `scan_results`, `threat_articles`, `ai_extracted_threats`, and `alerts`.
+- Database state: inspect `repositories`, `dependencies`, `vulnerabilities`, `scan_results`,
+  `manual_scan_jobs`, `manual_scan_progress_events`, `threat_articles`, `ai_extracted_threats`, and
+  `alerts`.
 - SBOM output: `data/sbom/<asset>/cyclonedx.json` and `data/sbom/<asset>/spdx.json`
 
 ## Security Notes

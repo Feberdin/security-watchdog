@@ -10,13 +10,15 @@ orchestrator and this regression test first.
 
 from __future__ import annotations
 
+from itertools import pairwise
+
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 import app.models.entities  # noqa: F401
 from app.db.base import Base
 from app.models.entities import Repository, ScanResult
-from app.models.schemas import ScanRequest
+from app.models.schemas import ScanProgressUpdate, ScanRequest
 from app.services.orchestrator import ScanOrchestrator
 
 
@@ -61,16 +63,22 @@ def test_manual_scan_continues_when_one_repository_asset_fails() -> None:
         lambda *args, **kwargs: "a" * 40
     )
 
-    def fake_repository_scan(_session: Session, repository: Repository) -> int:
+    def fake_repository_scan(
+        _session: Session,
+        repository: Repository,
+        _progress=None,
+    ) -> int:
         if repository.id == failing_repository.id:
             raise RuntimeError("simulated repository scan failure")
         return 2
 
     orchestrator._scan_repository_asset = fake_repository_scan
 
+    progress_updates: list[ScanProgressUpdate] = []
     response = orchestrator.run_manual_scan(
         session,
         ScanRequest(repository_full_name=None, include_archived=False, force=True),
+        progress_callback=progress_updates.append,
     )
 
     failure_results = session.scalars(
@@ -90,3 +98,7 @@ def test_manual_scan_continues_when_one_repository_asset_fails() -> None:
         result for result in failure_results if result.repository_id == healthy_repository.id
     )
     assert healthy_result.details_json["commit_sha"] == "a" * 40
+    assert progress_updates[-1].phase == "finalizing"
+    assert progress_updates[-1].percent == 98
+    assert any(update.level == "warning" for update in progress_updates)
+    assert all(current.percent <= following.percent for current, following in pairwise(progress_updates))

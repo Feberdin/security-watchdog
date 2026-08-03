@@ -17,7 +17,7 @@ from sqlalchemy.pool import StaticPool
 import app.models.entities  # noqa: F401
 from app.db.base import Base
 from app.models.entities import ManualScanJobStatus
-from app.models.schemas import ScanRequest, ScanResponse
+from app.models.schemas import ScanProgressUpdate, ScanRequest, ScanResponse
 from app.repositories.store import claim_manual_scan_job, get_manual_scan_job
 from app.services import manual_scan_jobs
 
@@ -131,8 +131,23 @@ def test_process_manual_scan_job_marks_job_succeeded(monkeypatch) -> None:
     class FakeOrchestrator:
         """Minimal orchestrator stub that keeps the test offline and deterministic."""
 
-        def run_manual_scan(self, session: Session, request: ScanRequest) -> ScanResponse:
+        def run_manual_scan(
+            self,
+            session: Session,
+            request: ScanRequest,
+            progress_callback=None,
+        ) -> ScanResponse:
             assert request.force is True
+            assert progress_callback is not None
+            progress_callback(
+                ScanProgressUpdate(
+                    phase="vulnerabilities",
+                    message="Dependency 2/4 wird geprüft.",
+                    current=2,
+                    total=4,
+                    percent=50.0,
+                )
+            )
             return ScanResponse(
                 message="Scan completed with warnings",
                 repository_count=4,
@@ -161,6 +176,9 @@ def test_process_manual_scan_job_marks_job_succeeded(monkeypatch) -> None:
     assert result.repository_count == 4
     assert result.alert_count == 9
     assert result.failed_system_count == 1
+    assert result.progress.phase == "completed"
+    assert result.progress.percent == 100
+    assert any(event.percent == 50 for event in result.progress.events)
     assert stored_job is not None
     assert stored_job.status == ManualScanJobStatus.SUCCEEDED.value
     assert stored_job.started_at is not None
@@ -177,7 +195,12 @@ def test_process_manual_scan_job_marks_job_failed(monkeypatch) -> None:
     class ExplodingOrchestrator:
         """Force a reproducible failure so the queue error path can be asserted."""
 
-        def run_manual_scan(self, session: Session, request: ScanRequest) -> ScanResponse:
+        def run_manual_scan(
+            self,
+            session: Session,
+            request: ScanRequest,
+            progress_callback=None,
+        ) -> ScanResponse:
             raise RuntimeError("simulated queue failure")
 
     monkeypatch.setattr(manual_scan_jobs, "ScanOrchestrator", ExplodingOrchestrator)
@@ -199,6 +222,8 @@ def test_process_manual_scan_job_marks_job_failed(monkeypatch) -> None:
     assert result is not None
     assert result.status == ManualScanJobStatus.FAILED.value
     assert "RuntimeError: simulated queue failure" in (result.error_message or "")
+    assert result.progress.phase == "failed"
+    assert result.progress.events[-1].level == "error"
     assert stored_job is not None
     assert stored_job.status == ManualScanJobStatus.FAILED.value
     assert stored_job.completed_at is not None

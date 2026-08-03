@@ -273,3 +273,21 @@ class ManualScanJob(Base):
     alert_count: Mapped[int] = mapped_column(Integer, default=0)
     failed_system_count: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ManualScanProgressEvent(Base):
+    """Bounded operator-facing progress event emitted while a manual scan is running."""
+
+    __tablename__ = "manual_scan_progress_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("manual_scan_jobs.id"), index=True)
+    phase: Mapped[str] = mapped_column(String(50), index=True)
+    message: Mapped[str] = mapped_column(String(1000))
+    level: Mapped[str] = mapped_column(String(20), default="info")
+    current: Mapped[int] = mapped_column(Integer, default=0)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    percent: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )

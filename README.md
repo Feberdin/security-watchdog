@@ -72,6 +72,7 @@ Key environment variables:
 - `SECRET_HISTORY_MAX_COMMITS_PER_REPO`: Optional safety limit for history scanning. `0` means scan the full reachable history.
 - `DATABASE_URL`: PostgreSQL connection string.
 - `REDIS_URL`: Redis instance for lightweight dedupe and job heartbeats.
+- `VULNERABILITY_CACHE_TTL_HOURS`: Reuse successful per-provider package/version responses; defaults to `24` hours.
 - `UNRAID_DOCKER_HOST`: Usually `unix:///var/run/docker.sock` when deployed on Unraid.
 - `HOMEASSISTANT_CONFIG_PATH`: Mounted Home Assistant config directory.
 - `HOMEASSISTANT_CORE_COMPONENTS_PATH`: Optional mounted path for built-in component manifests.
@@ -153,7 +154,8 @@ For Home Assistant coverage:
   `RUN_EMBEDDED_SCHEDULER=true` for a supported single-container installation.
 - `Manual scan takes a long time`: open the dashboard progress log or query `/scan-jobs/latest`.
   Full-estate runs query multiple advisory providers for exact dependency versions and can take
-  several minutes. Repeated package versions are cached per run, and NVD is paused briefly after a
+  several minutes. Successful OSV, GitHub, and NVD package/version responses are cached in
+  PostgreSQL for 24 hours by default. Provider errors are not cached; NVD is paused briefly after a
   `429` response while OSV and GitHub checks continue.
 - `Manual scan failed after a restart`: the previous runner was interrupted and cannot safely resume
   its in-memory scan. Start a new manual scan after the worker is healthy.
@@ -171,8 +173,8 @@ For Home Assistant coverage:
 - Stable local image upgrade: `docker compose -f docker-compose.yml -f docker-compose.local.yml pull && docker compose -f docker-compose.yml -f docker-compose.local.yml up -d`
 - Local source rebuild: `docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.build.yml up -d --build`
 - Database state: inspect `repositories`, `dependencies`, `vulnerabilities`, `scan_results`,
-  `manual_scan_jobs`, `manual_scan_progress_events`, `threat_articles`, `ai_extracted_threats`, and
-  `alerts`.
+  `manual_scan_jobs`, `manual_scan_progress_events`, `vulnerability_provider_cache`,
+  `threat_articles`, `ai_extracted_threats`, and `alerts`.
 - SBOM output: `data/sbom/<asset>/cyclonedx.json` and `data/sbom/<asset>/spdx.json`
 
 ## Security Notes

@@ -64,6 +64,9 @@ Key environment variables:
 - `PUID`, `PGID`: Optional container runtime user/group mapping. On Unraid, `99`/`100` usually matches `nobody:users`.
 - `POSTGRES_PASSWORD`: Local Docker password for PostgreSQL. In Broker GitOps deployments this must be provided as the Broker secret `SECURITY_WATCHDOG_POSTGRES_PASSWORD`.
 - `SECURITY_WATCHDOG_DATABASE_URL`: Broker secret containing the PostgreSQL connection string for the application.
+- `SECURITY_WATCHDOG_DEPLOYMENT_GATE_TOKEN`: Dedicated Broker secret for authenticating pre-deployment security checks. Do not reuse the Broker administration token.
+- `DEPLOYMENT_GATE_MAX_SCAN_AGE_HOURS`: Maximum age of successful exact-commit scan evidence; default `24`.
+- `DEPLOYMENT_GATE_MAX_BLOCKERS`: Maximum blocker details returned per response; counts always cover all findings.
 - `GITHUB_TOKEN`: GitHub token with access to the repositories you want to monitor.
 - `SECRET_HISTORY_SCAN_ENABLED`: When `true`, public GitHub repositories are fetched with full history and scanned for secrets in old commits as well as the current tree.
 - `SECRET_HISTORY_MAX_COMMITS_PER_REPO`: Optional safety limit for history scanning. `0` means scan the full reachable history.
@@ -97,6 +100,7 @@ queued jobs remain available for processing.
 - `GET /automation/high-risk-updates`: Prioritized update queue for high-risk and outdated dependencies.
 - `GET /automation/high-risk-updates/codex-prompt`: Master prompt for a controlled Codex update run across queued repositories.
 - `GET /automation/daily-security-check`: Machine-readable runbook for the recurring Codex security task.
+- `POST /automation/deployment-security-gate`: Authenticated, fail-closed pre-deployment decision for one exact Git commit. See [Deployment Broker security gate](docs/deployment-broker-security-gate.md).
 - `GET /health`: Liveness check.
 - Default port: `31337` because it is a memorable security-themed port and was free on the current host during setup.
 
@@ -106,7 +110,7 @@ For Unraid Docker coverage:
 
 - Run the stack on Unraid or mount the Unraid Docker socket into the containers.
 - Deploy the GitOps stack through the Unraid Deployment Broker with `docker-compose.yml`; it contains `secret://...` references that the Broker resolves at runtime.
-- Required Broker secrets are `SECURITY_WATCHDOG_POSTGRES_PASSWORD`, `SECURITY_WATCHDOG_DATABASE_URL`, and `SECURITY_WATCHDOG_GITHUB_TOKEN`.
+- Required Broker secrets are `SECURITY_WATCHDOG_POSTGRES_PASSWORD`, `SECURITY_WATCHDOG_DATABASE_URL`, `SECURITY_WATCHDOG_GITHUB_TOKEN`, and `SECURITY_WATCHDOG_DEPLOYMENT_GATE_TOKEN`.
 - The Compose default network is pinned to `10.200.9.0/24` so the Broker can verify that Docker networking does not overlap LAN/VLAN ranges.
 - For local Docker usage outside the Broker, always add `docker-compose.local.yml` so `.env` values replace the Broker secret references.
 - Leave `UNRAID_DOCKER_ENABLED=true`.
@@ -149,6 +153,9 @@ For Home Assistant coverage:
   `RUN_EMBEDDED_SCHEDULER=true` for a supported single-container installation.
 - `Manual scan failed after a restart`: the previous runner was interrupted and cannot safely resume
   its in-memory scan. Start a new manual scan after the worker is healthy.
+- `Deployment gate returns 401`: verify that the Broker sends the dedicated Bearer token configured through the secure secret flow.
+- `Deployment gate returns 503`: configure `SECURITY_WATCHDOG_DEPLOYMENT_GATE_TOKEN` or inspect API/database errors in the watchdog logs.
+- `Deployment gate returns indeterminate`: scan the exact requested full commit and ensure the aggregate scan is fresh and successful.
 
 ## Logs and Debugging
 
@@ -168,6 +175,7 @@ For Home Assistant coverage:
 - Prefer read-only mounts for Home Assistant paths.
 - Mounting the Docker socket grants powerful host access; restrict access to this stack accordingly.
 - Rotate any secret immediately if the secret scanner reports a real credential.
+- The deployment gate returns only allowlisted alert metadata and never returns secret excerpts or raw scanner payloads.
 
 ## Acknowledgements
 

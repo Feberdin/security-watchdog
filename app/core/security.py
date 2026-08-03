@@ -15,12 +15,14 @@ SENSITIVE_KEYS = {
     "authorization",
     "api_key",
     "apikey",
+    "deployment_gate_token",
     "github_token",
     "openai_api_key",
     "password",
     "secret",
     "slack_webhook_url",
     "smtp_password",
+    "security_watchdog_gate_token",
     "token",
 }
 

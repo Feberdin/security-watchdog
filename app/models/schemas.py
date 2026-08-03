@@ -10,9 +10,9 @@ to an unexpected field shape from a scanner or external API.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class RepositoryOut(BaseModel):
@@ -245,6 +245,101 @@ class DailySecurityAutomationOut(BaseModel):
     blocked_actions: list[str] = Field(default_factory=list)
     source_endpoints: dict[str, str] = Field(default_factory=dict)
     codex_prompt: str
+
+
+class DeploymentSecurityGateRequest(BaseModel):
+    """Deployment candidate identity supplied by the Deployment Broker."""
+
+    api_version: Literal["2026-08-03"] = "2026-08-03"
+    stack_name: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$")
+    repository_full_name: str = Field(
+        min_length=3,
+        max_length=255,
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+    )
+    commit_sha: str = Field(min_length=40, max_length=40, pattern=r"^[0-9a-fA-F]{40}$")
+    compose_file: str = Field(default="docker-compose.yml", min_length=1, max_length=512)
+
+    @field_validator("commit_sha")
+    @classmethod
+    def normalize_commit_sha(cls, value: str) -> str:
+        """Normalize full Git SHAs so comparisons are deterministic."""
+
+        return value.lower()
+
+    @field_validator("compose_file")
+    @classmethod
+    def validate_compose_file(cls, value: str) -> str:
+        """Reject absolute or parent-traversing paths before they enter audit records."""
+
+        normalized = value.strip().replace("\\", "/")
+        if normalized.startswith("/") or ".." in normalized.split("/"):
+            raise ValueError("compose_file must be a repository-relative path without '..'")
+        return normalized
+
+
+class DeploymentSecurityGatePolicyOut(BaseModel):
+    """Server-controlled policy values used for one deployment decision."""
+
+    max_scan_age_hours: int
+    blocked_severities: list[str]
+    unresolved_statuses: list[str]
+    max_returned_blockers: int
+
+
+class DeploymentSecurityGateEvidenceOut(BaseModel):
+    """Commit-bound aggregate scan evidence used by the deployment gate."""
+
+    scan_result_id: int
+    scanner_name: str
+    status: str
+    scanned_commit_sha: str | None = None
+    completed_at: datetime | None = None
+    age_hours: float | None = None
+    commit_matches: bool = False
+
+
+class DeploymentSecurityGateBlockerOut(BaseModel):
+    """One actionable reason why a deployment must not continue."""
+
+    code: str
+    finding_id: str
+    severity: str
+    title: str
+    source_type: str
+    remediation: str
+    context: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+
+
+class DeploymentSecurityGateSummaryOut(BaseModel):
+    """Compact blocker counts for broker policy and audit logs."""
+
+    blocker_count: int
+    returned_blocker_count: int
+    critical_count: int
+    high_count: int
+    evidence_blocker_count: int
+    results_truncated: bool
+
+
+class DeploymentSecurityGateResponse(BaseModel):
+    """Fail-closed deployment decision returned to the Deployment Broker."""
+
+    api_version: str
+    request_id: str
+    checked_at: datetime
+    decision: Literal["allow", "deny", "indeterminate"]
+    deploy_allowed: bool
+    reason_codes: list[str]
+    stack_name: str
+    repository_full_name: str
+    requested_commit_sha: str
+    compose_file: str
+    policy: DeploymentSecurityGatePolicyOut
+    evidence: DeploymentSecurityGateEvidenceOut | None = None
+    summary: DeploymentSecurityGateSummaryOut
+    blockers: list[DeploymentSecurityGateBlockerOut] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class CodexPromptOut(BaseModel):

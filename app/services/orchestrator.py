@@ -662,20 +662,36 @@ class ScanOrchestrator:
         remaining repository, container, and Home Assistant integration from being processed.
         """
 
+        effective_details = dict(details)
         try:
+            if scanner_name == "repository_asset_scan":
+                effective_details["commit_sha"] = self.repository_scanner.get_checkout_commit_sha(
+                    Path(repository.local_path)
+                )
             alerts_created = scan_callable()
+            record_scan_result(
+                session,
+                repository_id=repository.id,
+                scanner_name=scanner_name,
+                status="success",
+                findings_count=alerts_created,
+                details=effective_details,
+            )
             session.commit()
             return alerts_created, 0
         except Exception as error:
             session.rollback()
-            LOGGER.exception("Asset scan failed", extra={"repository": repository.full_name, **details})
+            LOGGER.exception(
+                "Asset scan failed",
+                extra={"repository": repository.full_name, **effective_details},
+            )
             record_scan_result(
                 session,
                 repository_id=repository.id,
                 scanner_name=scanner_name,
                 status="error",
                 findings_count=0,
-                details={**details, "error": str(error)},
+                details={**effective_details, "error": str(error)},
             )
             session.commit()
             return 0, 1

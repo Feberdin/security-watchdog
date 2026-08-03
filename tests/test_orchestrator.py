@@ -57,6 +57,9 @@ def test_manual_scan_continues_when_one_repository_asset_fails() -> None:
     orchestrator.unraid_scanner.sync_assets = lambda *args, **kwargs: []
     orchestrator.homeassistant_scanner.sync_assets = lambda *args, **kwargs: []
     orchestrator._dispatch_open_alerts = lambda *args, **kwargs: None
+    orchestrator.repository_scanner.get_checkout_commit_sha = (
+        lambda *args, **kwargs: "a" * 40
+    )
 
     def fake_repository_scan(_session: Session, repository: Repository) -> int:
         if repository.id == failing_repository.id:
@@ -78,6 +81,12 @@ def test_manual_scan_continues_when_one_repository_asset_fails() -> None:
     assert response.repository_count == 2
     assert response.alert_count == 2
     assert response.failed_system_count == 1
-    assert len(failure_results) == 1
-    assert failure_results[0].repository_id == failing_repository.id
-    assert failure_results[0].status == "error"
+    assert len(failure_results) == 2
+    assert {result.repository_id: result.status for result in failure_results} == {
+        failing_repository.id: "error",
+        healthy_repository.id: "success",
+    }
+    healthy_result = next(
+        result for result in failure_results if result.repository_id == healthy_repository.id
+    )
+    assert healthy_result.details_json["commit_sha"] == "a" * 40

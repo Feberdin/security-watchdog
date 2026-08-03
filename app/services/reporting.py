@@ -933,6 +933,7 @@ class ReportingService:
             full_name=repository.full_name,
             display_name=self._build_display_name(repository),
             source_type=repository.source_type,
+            scan_enabled=repository.scan_enabled,
             risk_score=repository.risk_score,
             dependency_count=len(dependencies),
             vulnerable_dependency_count=vulnerable_dependency_count,
@@ -977,6 +978,8 @@ class ReportingService:
         """Apply reporting visibility rules that mirror scanner inventory selection."""
 
         metadata = repository.metadata_json or {}
+        if not repository.scan_enabled:
+            return False
         return not (
             repository.source_type == "github"
             and bool(metadata.get("fork"))

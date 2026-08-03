@@ -39,7 +39,6 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
           <button id="debug-export-button" class="action-button secondary-button">
             Codex Debug Export
           </button>
-          <button id="scan-button" class="action-button primary-button">Vollscan starten</button>
         </div>
       </header>
 
@@ -99,6 +98,48 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
             Nach dem Start erscheint hier, wann der Lauf angefragt, gestartet und abgeschlossen
             wurde.
           </p>
+        </div>
+        <div class="scan-controls">
+          <label class="scan-control-field">
+            <span class="search-label">Scan-Ziel</span>
+            <select id="scan-target-select" class="synth-input">
+              <option value="">Gesamte Plattform</option>
+            </select>
+          </label>
+          <fieldset class="scan-source-fieldset">
+            <legend class="search-label">Quellen</legend>
+            <label class="scan-checkbox">
+              <input type="checkbox" name="scan-source" value="github" checked />
+              <span>GitHub-Repos</span>
+            </label>
+            <label class="scan-checkbox">
+              <input type="checkbox" name="scan-source" value="unraid" checked />
+              <span>Unraid-Container</span>
+            </label>
+            <label class="scan-checkbox">
+              <input type="checkbox" name="scan-source" value="homeassistant" checked />
+              <span>Home Assistant</span>
+            </label>
+          </fieldset>
+          <div class="scan-options">
+            <label class="scan-checkbox">
+              <input id="scan-force-checkbox" type="checkbox" checked />
+              <span>Erneut prüfen</span>
+            </label>
+            <label class="scan-checkbox">
+              <input id="scan-include-archived-checkbox" type="checkbox" />
+              <span>Archivierte einschließen</span>
+            </label>
+          </div>
+          <div class="scan-control-actions">
+            <button id="scan-button" class="action-button primary-button" type="button">Scan starten</button>
+            <button id="cancel-scan-button" class="action-button danger-button" type="button" hidden>
+              Scan abbrechen
+            </button>
+            <button id="toggle-scan-enabled-button" class="action-button secondary-button" type="button" disabled>
+              Asset umschalten
+            </button>
+          </div>
         </div>
         <div id="scan-progress" class="scan-progress" hidden>
           <div class="scan-progress-heading">
@@ -197,6 +238,8 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
 
     <script>
       let allSystems = [];
+      let allRepositories = [];
+      let currentScanJob = null;
       let scanStatusPollHandle = null;
       let dashboardRefreshAfterJobId = null;
 
@@ -255,6 +298,34 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         return 'low';
       }
 
+      function scanSourceForSystem(sourceType) {
+        if (sourceType === 'github') {
+          return 'github';
+        }
+        if (String(sourceType || '').startsWith('unraid')) {
+          return 'unraid';
+        }
+        if (String(sourceType || '').startsWith('homeassistant')) {
+          return 'homeassistant';
+        }
+        return 'github';
+      }
+
+      function labelForScanSource(sourceType) {
+        const scanSource = scanSourceForSystem(sourceType);
+        if (scanSource === 'unraid') {
+          return 'Unraid';
+        }
+        if (scanSource === 'homeassistant') {
+          return 'Home Assistant';
+        }
+        return 'GitHub';
+      }
+
+      function repositoryByFullName(fullName) {
+        return allRepositories.find((repository) => repository.full_name === fullName) || null;
+      }
+
       function renderRows(targetId, rows, renderer) {
         const target = document.getElementById(targetId);
         if (!rows.length) {
@@ -269,7 +340,7 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
       }
 
       function isTerminalScanJob(job) {
-        return Boolean(job && ['succeeded', 'failed'].includes(job.status));
+        return Boolean(job && ['succeeded', 'failed', 'canceled'].includes(job.status));
       }
 
       function describeScanScope(job) {
@@ -285,6 +356,9 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         }
         if (job.status === 'failed') {
           return 'critical';
+        }
+        if (job.status === 'canceled') {
+          return 'high';
         }
         if (job.status === 'running' || job.status === 'queued') {
           return 'medium';
@@ -307,6 +381,9 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         }
         if (job.status === 'failed') {
           return 'fehler';
+        }
+        if (job.status === 'canceled') {
+          return 'abgebrochen';
         }
         if (Number(job.failed_system_count || 0) > 0) {
           return 'warnungen';
@@ -383,12 +460,16 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
       }
 
       function renderScanStatus(job) {
+        currentScanJob = job || null;
         const pill = document.getElementById('scan-status-pill');
         const scope = document.getElementById('scan-status-scope');
         const message = document.getElementById('scan-status-message');
         const details = document.getElementById('scan-status-details');
         const live = document.getElementById('scan-status-live');
         const button = document.getElementById('scan-button');
+        const cancelButton = document.getElementById('cancel-scan-button');
+        const toggleButton = document.getElementById('toggle-scan-enabled-button');
+        const activeJob = isActiveScanJob(job);
 
         pill.className = `severity-pill severity-${scanStatusSeverity(job)}`;
         pill.textContent = scanStatusLabel(job);
@@ -399,6 +480,10 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         details.textContent = buildScanStatusDetails(job);
         live.textContent = message.textContent;
         renderScanProgress(job);
+        cancelButton.hidden = !activeJob;
+        cancelButton.disabled = Boolean(job?.cancel_requested);
+        cancelButton.textContent = job?.cancel_requested ? 'Abbruch angefordert...' : 'Scan abbrechen';
+        toggleButton.disabled = activeJob || !document.getElementById('scan-target-select').value;
 
         if (job && job.status === 'queued') {
           button.disabled = true;
@@ -408,7 +493,7 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
           button.textContent = 'Scan läuft...';
         } else {
           button.disabled = false;
-          button.textContent = 'Vollscan starten';
+          button.textContent = 'Scan starten';
         }
       }
 
@@ -417,6 +502,80 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
           clearTimeout(scanStatusPollHandle);
           scanStatusPollHandle = null;
         }
+      }
+
+      function selectedScanSources() {
+        return Array.from(document.querySelectorAll('input[name="scan-source"]:checked'))
+          .map((input) => input.value);
+      }
+
+      function renderScanControls() {
+        const targetSelect = document.getElementById('scan-target-select');
+        const currentValue = targetSelect.value;
+        const options = ['<option value="">Gesamte Plattform</option>'];
+        const sortedRepositories = [...allRepositories].sort((left, right) =>
+          left.full_name.localeCompare(right.full_name, 'de')
+        );
+
+        for (const repository of sortedRepositories) {
+          const disabledLabel = repository.scan_enabled ? '' : ' · deaktiviert';
+          options.push(`
+            <option
+              value="${escapeHtml(repository.full_name)}"
+              data-source-type="${escapeHtml(repository.source_type)}"
+              data-scan-enabled="${repository.scan_enabled ? 'true' : 'false'}"
+            >
+              ${escapeHtml(labelForScanSource(repository.source_type))} · ${escapeHtml(repository.full_name)}${disabledLabel}
+            </option>
+          `);
+        }
+
+        targetSelect.innerHTML = options.join('');
+        if ([...targetSelect.options].some((option) => option.value === currentValue)) {
+          targetSelect.value = currentValue;
+        }
+        syncTargetSourceSelection();
+        updateToggleScanEnabledButton();
+      }
+
+      function syncTargetSourceSelection() {
+        const targetSelect = document.getElementById('scan-target-select');
+        const selectedOption = targetSelect.selectedOptions[0];
+          const selectedSourceType = selectedOption?.dataset.sourceType || '';
+
+        document.querySelectorAll('input[name="scan-source"]').forEach((input) => {
+          if (!selectedSourceType) {
+            input.disabled = false;
+            input.checked = true;
+            return;
+          }
+          input.checked = input.value === scanSourceForSystem(selectedSourceType);
+          input.disabled = input.value !== scanSourceForSystem(selectedSourceType);
+        });
+      }
+
+      function resetSourceSelectionForFullScan() {
+        document.querySelectorAll('input[name="scan-source"]').forEach((input) => {
+          input.disabled = false;
+          input.checked = true;
+        });
+      }
+
+      function updateToggleScanEnabledButton() {
+        const targetSelect = document.getElementById('scan-target-select');
+        const toggleButton = document.getElementById('toggle-scan-enabled-button');
+        const selectedRepository = repositoryByFullName(targetSelect.value);
+
+        if (!selectedRepository) {
+          toggleButton.disabled = true;
+          toggleButton.textContent = 'Asset umschalten';
+          return;
+        }
+
+        toggleButton.disabled = isActiveScanJob(currentScanJob);
+        toggleButton.textContent = selectedRepository.scan_enabled
+          ? 'Vom Scan ausschließen'
+          : 'Für Scan aktivieren';
       }
 
       function scheduleScanStatusPolling(delayMs = 4000) {
@@ -655,6 +814,27 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
             <div class="system-card-body">
               <div class="system-actions">
                 <button
+                  class="action-button primary-button"
+                  type="button"
+                  data-system-action="scan-system"
+                  data-system-id="${system.id}"
+                  data-system-name="${escapeHtml(system.display_name)}"
+                  data-system-full-name="${escapeHtml(system.full_name)}"
+                  data-system-source-type="${escapeHtml(system.source_type)}"
+                >
+                  Einzel-Scan
+                </button>
+                <button
+                  class="action-button secondary-button"
+                  type="button"
+                  data-system-action="toggle-scan-enabled"
+                  data-system-id="${system.id}"
+                  data-system-name="${escapeHtml(system.display_name)}"
+                  data-system-enabled="${system.scan_enabled ? 'true' : 'false'}"
+                >
+                  Vom Scan ausschließen
+                </button>
+                <button
                   class="action-button ghost-button"
                   type="button"
                   data-system-action="system-debug"
@@ -807,18 +987,21 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
       }
 
       async function loadDashboard() {
-        const [report, systems] = await Promise.all([
+        const [report, systems, repositories] = await Promise.all([
           fetchJson('/reports'),
-          fetchJson('/systems')
+          fetchJson('/systems'),
+          fetchJson('/repositories')
         ]);
 
         allSystems = systems;
+        allRepositories = repositories;
         document.getElementById('metric-repositories').textContent = report.repository_count;
         document.getElementById('metric-dependencies').textContent = report.dependency_count;
         document.getElementById('metric-vulnerabilities').textContent = report.vulnerability_count;
         document.getElementById('metric-critical-alerts').textContent = report.critical_alert_count;
 
         renderSystems();
+        renderScanControls();
 
         renderRows(
           'alert-list',
@@ -845,26 +1028,105 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         );
       }
 
-      async function triggerScan() {
+      function buildScanRequest({ fullName = null, sourceType = null } = {}) {
+        const targetSelect = document.getElementById('scan-target-select');
+        const selectedFullName = fullName ?? (targetSelect.value || null);
+        const selectedRepository = selectedFullName ? repositoryByFullName(selectedFullName) : null;
+        const selectedSourceType = sourceType || selectedRepository?.source_type || '';
+        const scanSources = selectedSourceType
+          ? [scanSourceForSystem(selectedSourceType)]
+          : selectedScanSources();
+
+        if (scanSources.length === 0) {
+          throw new Error('Wähle mindestens eine Scan-Quelle aus.');
+        }
+        if (selectedRepository && !selectedRepository.scan_enabled) {
+          throw new Error('Dieses Asset ist deaktiviert. Aktiviere es zuerst wieder für Scans.');
+        }
+
+        return {
+          repository_full_name: selectedFullName,
+          include_archived: document.getElementById('scan-include-archived-checkbox').checked,
+          force: document.getElementById('scan-force-checkbox').checked,
+          scan_sources: scanSources
+        };
+      }
+
+      async function triggerScan(options = {}) {
         const button = document.getElementById('scan-button');
         button.disabled = true;
         button.textContent = 'Scan wird angefragt...';
         try {
+          const requestBody = buildScanRequest(options);
           const payload = await fetchJson('/scan', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ include_archived: false, force: true })
+            body: JSON.stringify(requestBody)
           });
           dashboardRefreshAfterJobId = payload.job_id;
           await refreshScanStatus({ refreshDashboardOnCompletion: true });
         } catch (error) {
           button.disabled = false;
-          button.textContent = 'Vollscan starten';
-          showRequestError('Vollscan fehlgeschlagen', error);
+          button.textContent = 'Scan starten';
+          showRequestError('Scan fehlgeschlagen', error);
         }
       }
 
-      document.getElementById('scan-button').addEventListener('click', triggerScan);
+      async function cancelCurrentScan() {
+        if (!currentScanJob || !isActiveScanJob(currentScanJob)) {
+          return;
+        }
+        const button = document.getElementById('cancel-scan-button');
+        button.disabled = true;
+        button.textContent = 'Abbruch wird angefragt...';
+        try {
+          const job = await fetchJson(`/scan-jobs/${currentScanJob.id}/cancel`, {
+            method: 'POST'
+          });
+          renderScanStatus(job);
+          scheduleScanStatusPolling(2500);
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = 'Scan abbrechen';
+          showRequestError('Scan-Abbruch fehlgeschlagen', error);
+        }
+      }
+
+      async function setRepositoryScanEnabled(repositoryId, scanEnabled, button) {
+        const previousText = button.textContent;
+        button.disabled = true;
+        button.textContent = scanEnabled ? 'Aktiviere...' : 'Deaktiviere...';
+        try {
+          await fetchJson(`/repositories/${repositoryId}/scan-settings`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scan_enabled: scanEnabled })
+          });
+          await loadDashboard();
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = previousText;
+          showRequestError('Scan-Einstellung fehlgeschlagen', error);
+        }
+      }
+
+      async function toggleSelectedRepositoryScanEnabled(button) {
+        const selectedRepository = repositoryByFullName(document.getElementById('scan-target-select').value);
+        if (!selectedRepository) {
+          return;
+        }
+        await setRepositoryScanEnabled(selectedRepository.id, !selectedRepository.scan_enabled, button);
+      }
+
+      document.getElementById('scan-button').addEventListener('click', () => triggerScan());
+      document.getElementById('cancel-scan-button').addEventListener('click', cancelCurrentScan);
+      document.getElementById('toggle-scan-enabled-button').addEventListener('click', (event) => {
+        toggleSelectedRepositoryScanEnabled(event.currentTarget);
+      });
+      document.getElementById('scan-target-select').addEventListener('change', () => {
+        syncTargetSourceSelection();
+        updateToggleScanEnabledButton();
+      });
       document.getElementById('debug-export-button').addEventListener('click', (event) => {
         openPlatformDebugExport(event.currentTarget);
       });
@@ -892,6 +1154,16 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         const systemName = button.dataset.systemName || `System ${systemId}`;
         const action = button.dataset.systemAction;
 
+        if (action === 'scan-system') {
+          triggerScan({
+            fullName: button.dataset.systemFullName || null,
+            sourceType: button.dataset.systemSourceType || null
+          });
+        }
+        if (action === 'toggle-scan-enabled') {
+          const currentlyEnabled = button.dataset.systemEnabled === 'true';
+          setRepositoryScanEnabled(systemId, !currentlyEnabled, button);
+        }
         if (action === 'system-debug') {
           openSystemDebugExport(systemId, systemName, button);
         }

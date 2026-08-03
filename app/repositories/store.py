@@ -97,6 +97,23 @@ def upsert_repository(
     return repository
 
 
+def set_repository_scan_enabled(
+    session: Session,
+    *,
+    repository_id: int,
+    scan_enabled: bool,
+) -> Repository | None:
+    """Persist whether one repository-like asset participates in normal scans and reports."""
+
+    repository = session.get(Repository, repository_id)
+    if repository is None:
+        return None
+
+    repository.scan_enabled = scan_enabled
+    session.flush()
+    return repository
+
+
 def create_manual_scan_job(session: Session, request: ScanRequest) -> ManualScanJob:
     """Persist one queued manual scan request for later execution by a durable scan runner."""
 
@@ -104,6 +121,7 @@ def create_manual_scan_job(session: Session, request: ScanRequest) -> ManualScan
         repository_full_name=request.repository_full_name,
         include_archived=request.include_archived,
         force=request.force,
+        scan_sources_json=request.scan_sources,
         status=ManualScanJobStatus.QUEUED.value,
     )
     session.add(job)
@@ -220,6 +238,44 @@ def fail_running_manual_scan_jobs(session: Session, *, error_message: str) -> in
     return int(failure_result.rowcount or 0)
 
 
+def request_manual_scan_cancel(session: Session, *, job_id: int) -> ManualScanJob | None:
+    """
+    Mark a queued or running manual scan for operator-requested cancellation.
+
+    Why this exists:
+    Long scans may be waiting on external scanner binaries. A cancellation request must therefore be
+    durable and cooperative: queued jobs can stop immediately, while running jobs stop at the next
+    cancellation checkpoint in the worker.
+    """
+
+    job = get_manual_scan_job(session, job_id)
+    if job is None:
+        return None
+
+    if job.status == ManualScanJobStatus.QUEUED.value:
+        job.status = ManualScanJobStatus.CANCELED.value
+        job.cancel_requested = True
+        job.completed_at = utcnow()
+        job.error_message = None
+    elif job.status == ManualScanJobStatus.RUNNING.value:
+        job.cancel_requested = True
+    session.flush()
+    return job
+
+
+def is_manual_scan_cancel_requested(session: Session, *, job_id: int) -> bool:
+    """Return whether an operator has requested cancellation for one scan job."""
+
+    return bool(
+        session.scalar(
+            select(ManualScanJob.cancel_requested).where(
+                ManualScanJob.id == job_id,
+                ManualScanJob.cancel_requested.is_(True),
+            )
+        )
+    )
+
+
 def claim_manual_scan_job(session: Session, *, job_id: int | None = None) -> ManualScanJob | None:
     """
     Atomically transition one queued job into the running state or resume a running job.
@@ -279,6 +335,7 @@ def claim_manual_scan_job(session: Session, *, job_id: int | None = None) -> Man
             started_at=utcnow(),
             completed_at=None,
             error_message=None,
+            cancel_requested=False,
         )
     )
     if claim_result.rowcount != 1:
@@ -331,6 +388,7 @@ def mark_manual_scan_job_succeeded(
 
     job.status = ManualScanJobStatus.SUCCEEDED.value
     job.completed_at = utcnow()
+    job.cancel_requested = False
     job.repository_count = response.repository_count
     job.alert_count = response.alert_count
     job.failed_system_count = response.failed_system_count
@@ -354,6 +412,21 @@ def mark_manual_scan_job_failed(
     job.status = ManualScanJobStatus.FAILED.value
     job.completed_at = utcnow()
     job.error_message = error_message
+    session.flush()
+    return job
+
+
+def mark_manual_scan_job_canceled(session: Session, *, job_id: int) -> ManualScanJob | None:
+    """Persist the final operator-canceled state for a cooperative scan stop."""
+
+    job = get_manual_scan_job(session, job_id)
+    if job is None:
+        return None
+
+    job.status = ManualScanJobStatus.CANCELED.value
+    job.completed_at = utcnow()
+    job.cancel_requested = True
+    job.error_message = None
     session.flush()
     return job
 

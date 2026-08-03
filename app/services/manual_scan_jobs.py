@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
 from app.models.entities import ManualScanJob, ManualScanJobStatus, ManualScanProgressEvent
 from app.models.schemas import (
+    DEFAULT_SCAN_SOURCES,
     ManualScanJobOut,
     ManualScanProgressEventOut,
     ManualScanProgressOut,
@@ -29,12 +30,16 @@ from app.repositories.store import (
     get_active_manual_scan_job,
     get_latest_manual_scan_job,
     get_manual_scan_job,
+    is_manual_scan_cancel_requested,
     list_manual_scan_progress_events,
+    mark_manual_scan_job_canceled,
     mark_manual_scan_job_failed,
     mark_manual_scan_job_succeeded,
     record_manual_scan_progress,
+    request_manual_scan_cancel,
 )
 from app.services.orchestrator import ScanOrchestrator
+from app.services.scan_control import ScanCanceledError
 
 LOGGER = logging.getLogger(__name__)
 INTERRUPTED_SCAN_MESSAGE = (
@@ -91,6 +96,42 @@ def get_latest_manual_scan_job_out(session: Session) -> ManualScanJobOut | None:
     return serialize_manual_scan_job(job, events)
 
 
+def cancel_manual_scan_job(session: Session, job_id: int) -> ManualScanJobOut | None:
+    """Request cancellation for one queued or running manual scan and return its visible state."""
+
+    job = request_manual_scan_cancel(session, job_id=job_id)
+    if job is None:
+        return None
+
+    if job.status == ManualScanJobStatus.CANCELED.value:
+        record_manual_scan_progress(
+            session,
+            job_id=job.id,
+            phase="canceled",
+            message="Scan wurde vor dem Start abgebrochen.",
+            level="warning",
+            current=job.repository_count,
+            total=job.repository_count,
+            percent=100.0,
+        )
+    elif job.cancel_requested:
+        previous_events = list_manual_scan_progress_events(session, job_id=job.id, limit=1)
+        previous_event = previous_events[-1] if previous_events else None
+        record_manual_scan_progress(
+            session,
+            job_id=job.id,
+            phase="canceling",
+            message="Abbruch angefordert. Der Worker stoppt nach dem aktuellen sicheren Schritt.",
+            level="warning",
+            current=previous_event.current if previous_event else job.repository_count,
+            total=previous_event.total if previous_event else job.repository_count,
+            percent=previous_event.percent if previous_event else 0.0,
+        )
+
+    events = list_manual_scan_progress_events(session, job_id=job.id)
+    return serialize_manual_scan_job(job, events)
+
+
 def recover_interrupted_manual_scan_jobs() -> int:
     """
     Leave interrupted running jobs available for the queue worker to resume.
@@ -125,6 +166,7 @@ def process_manual_scan_job(job_id: int | None = None) -> ManualScanJobOut | Non
             repository_full_name=claimed_job.repository_full_name,
             include_archived=claimed_job.include_archived,
             force=claimed_job.force,
+            scan_sources=claimed_job.scan_sources_json or list(DEFAULT_SCAN_SOURCES),
         )
         claimed_job_id = claimed_job.id
         claimed_job_started_at = claimed_job.started_at
@@ -158,7 +200,35 @@ def process_manual_scan_job(job_id: int | None = None) -> ManualScanJobOut | Non
                 claimed_job_id,
                 update,
             ),
+            cancellation_check=lambda: _raise_if_manual_scan_canceled(claimed_job_id),
         )
+    except ScanCanceledError:
+        work_session.rollback()
+        LOGGER.info("Manual scan job was canceled by operator", extra={"job_id": claimed_job_id})
+        cancel_session = SessionLocal()
+        try:
+            canceled_job = mark_manual_scan_job_canceled(cancel_session, job_id=claimed_job_id)
+            previous_events = list_manual_scan_progress_events(
+                cancel_session,
+                job_id=claimed_job_id,
+                limit=1,
+            )
+            previous_event = previous_events[-1] if previous_events else None
+            record_manual_scan_progress(
+                cancel_session,
+                job_id=claimed_job_id,
+                phase="canceled",
+                message="Scan wurde abgebrochen. Bereits gespeicherte Teilergebnisse bleiben erhalten.",
+                level="warning",
+                current=previous_event.current if previous_event else 0,
+                total=previous_event.total if previous_event else 0,
+                percent=previous_event.percent if previous_event else 0.0,
+            )
+            cancel_session.commit()
+            events = list_manual_scan_progress_events(cancel_session, job_id=claimed_job_id)
+            return serialize_manual_scan_job(canceled_job, events) if canceled_job else None
+        finally:
+            cancel_session.close()
     except Exception as error:
         work_session.rollback()
         LOGGER.exception(
@@ -239,6 +309,8 @@ def serialize_manual_scan_job(
         repository_full_name=job.repository_full_name,
         include_archived=job.include_archived,
         force=job.force,
+        scan_sources=job.scan_sources_json or list(DEFAULT_SCAN_SOURCES),
+        cancel_requested=job.cancel_requested,
         requested_at=job.requested_at,
         started_at=job.started_at,
         completed_at=job.completed_at,
@@ -301,6 +373,8 @@ def _build_manual_scan_message(job: ManualScanJob, progress: ManualScanProgressO
         return progress.message
     if job.status == ManualScanJobStatus.FAILED.value:
         return job.error_message or f"Scan für {scope} ist fehlgeschlagen."
+    if job.status == ManualScanJobStatus.CANCELED.value:
+        return f"Scan für {scope} wurde abgebrochen."
     if job.failed_system_count:
         return (
             f"Scan für {scope} abgeschlossen mit Warnungen: {job.failed_system_count} Systeme "
@@ -336,6 +410,17 @@ def _persist_manual_scan_progress(job_id: int, update: ScanProgressUpdate) -> No
         )
     finally:
         progress_session.close()
+
+
+def _raise_if_manual_scan_canceled(job_id: int) -> None:
+    """Raise a typed cancellation when the durable job row requests it."""
+
+    cancel_session = SessionLocal()
+    try:
+        if is_manual_scan_cancel_requested(cancel_session, job_id=job_id):
+            raise ScanCanceledError(f"Manual scan job {job_id} was canceled by the operator.")
+    finally:
+        cancel_session.close()
 
 
 def _format_manual_scan_error(error: Exception) -> str:

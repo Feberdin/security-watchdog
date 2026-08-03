@@ -29,12 +29,15 @@ from app.models.schemas import (
     ManualScanJobOut,
     ReportOut,
     RepositoryOut,
+    RepositoryScanSettingsRequest,
     ScanAcceptedResponse,
     ScanRequest,
     SystemInventoryOut,
 )
+from app.repositories.store import set_repository_scan_enabled
 from app.services.deployment_security_gate import DeploymentSecurityGateService
 from app.services.manual_scan_jobs import (
+    cancel_manual_scan_job,
     enqueue_manual_scan,
     get_latest_manual_scan_job_out,
     get_manual_scan_job_out,
@@ -82,6 +85,7 @@ def trigger_scan(
                 "repository_full_name": scan_request.repository_full_name,
                 "include_archived": scan_request.include_archived,
                 "force": scan_request.force,
+                "scan_sources": scan_request.scan_sources,
             },
         )
         raise HTTPException(status_code=500, detail=f"Manual scan enqueue failed: {error}") from error
@@ -102,6 +106,25 @@ def get_scan_job(job_id: int, session: Session = Depends(get_db_session)) -> Man
     if job is None:
         raise HTTPException(status_code=404, detail=f"Manual scan job {job_id} was not found.")
     return job
+
+
+@router.post("/scan-jobs/{job_id}/cancel", response_model=ManualScanJobOut)
+def cancel_scan_job(job_id: int, session: Session = Depends(get_db_session)) -> ManualScanJobOut:
+    """Request cooperative cancellation for one queued or running manual scan job."""
+
+    try:
+        job = cancel_manual_scan_job(session, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"Manual scan job {job_id} was not found.")
+        session.commit()
+        return job
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception as error:
+        session.rollback()
+        LOGGER.exception("Manual scan cancellation failed", extra={"job_id": job_id})
+        raise HTTPException(status_code=500, detail=f"Manual scan cancellation failed: {error}") from error
 
 
 @router.get("/reports", response_model=ReportOut)
@@ -194,6 +217,26 @@ def get_repositories(session: Session = Depends(get_db_session)) -> list[Reposit
 
     repositories = session.scalars(select(Repository).order_by(desc(Repository.updated_at)).limit(500)).all()
     return [RepositoryOut.model_validate(repository) for repository in repositories]
+
+
+@router.patch("/repositories/{repository_id}/scan-settings", response_model=RepositoryOut)
+def update_repository_scan_settings(
+    repository_id: int,
+    settings_request: RepositoryScanSettingsRequest,
+    session: Session = Depends(get_db_session),
+) -> RepositoryOut:
+    """Enable or disable future scans for one repository-like asset."""
+
+    repository = set_repository_scan_enabled(
+        session,
+        repository_id=repository_id,
+        scan_enabled=settings_request.scan_enabled,
+    )
+    if repository is None:
+        session.rollback()
+        raise HTTPException(status_code=404, detail=f"Repository/system {repository_id} was not found.")
+    session.commit()
+    return RepositoryOut.model_validate(repository)
 
 
 @router.get("/systems", response_model=list[SystemInventoryOut])

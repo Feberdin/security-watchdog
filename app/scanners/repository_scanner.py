@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.utils import run_command, safe_slug
-from app.repositories.store import upsert_repository
+from app.repositories.store import get_repository_by_full_name, upsert_repository
 from app.services.github_client import GitHubClient
 
 LOGGER = logging.getLogger(__name__)
@@ -50,6 +50,13 @@ class RepositoryScanner:
                 repository_full_name=repository_full_name,
                 include_archived=include_archived,
             ):
+                continue
+            existing_repository = get_repository_by_full_name(session, repository_data["full_name"])
+            if existing_repository is not None and not existing_repository.scan_enabled:
+                LOGGER.debug(
+                    "Skipping disabled GitHub repository",
+                    extra={"repository": repository_data["full_name"]},
+                )
                 continue
 
             try:
@@ -111,10 +118,7 @@ class RepositoryScanner:
             timeout=120,
         ).lower()
         if len(commit_sha) != 40 or any(character not in "0123456789abcdef" for character in commit_sha):
-            raise RuntimeError(
-                "Git returned an invalid full commit SHA for scan provenance. "
-                f"path={local_path!s}."
-            )
+            raise RuntimeError(f"Git returned an invalid full commit SHA for scan provenance. path={local_path!s}.")
         return commit_sha
 
     def _sync_local_checkout(
@@ -173,9 +177,7 @@ class RepositoryScanner:
 
         if not self.settings.github_token or "https://" not in clone_url:
             return clone_url
-        return clone_url.replace(
-            "https://", f"https://x-access-token:{self.settings.github_token}@"
-        )
+        return clone_url.replace("https://", f"https://x-access-token:{self.settings.github_token}@")
 
     def _refresh_origin_remote(self, local_path: Path, authenticated_url: str) -> None:
         """Keep the cached checkout remote aligned with the current token before pull/fetch runs."""

@@ -58,6 +58,7 @@ class ManualScanJobStatus(StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    CANCELED = "canceled"
 
 
 class Repository(Base):
@@ -75,6 +76,7 @@ class Repository(Base):
     default_branch: Mapped[str] = mapped_column(String(255), default="")
     local_path: Mapped[str] = mapped_column(String(1024), default="")
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    scan_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     risk_score: Mapped[float] = mapped_column(Float, default=0.0)
     metadata_json: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
@@ -288,6 +290,8 @@ class ManualScanJob(Base):
     repository_full_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     include_archived: Mapped[bool] = mapped_column(Boolean, default=False)
     force: Mapped[bool] = mapped_column(Boolean, default=False)
+    scan_sources_json: Mapped[list[str]] = mapped_column("scan_sources", JSON, default=list)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(
         String(20),
         default=ManualScanJobStatus.QUEUED.value,

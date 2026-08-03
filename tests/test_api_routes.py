@@ -23,6 +23,7 @@ from app.api.routes import router as api_router
 from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.session import get_db_session
+from app.models.entities import Repository
 
 
 def build_session_factory() -> sessionmaker[Session]:
@@ -73,6 +74,7 @@ def test_post_scan_returns_accepted_and_leaves_job_queued_for_worker() -> None:
     assert latest_job["status"] == "queued"
     assert latest_job["repository_count"] == 0
     assert latest_job["alert_count"] == 0
+    assert latest_job["scan_sources"] == ["github", "unraid", "homeassistant"]
     assert latest_job["progress"]["phase"] == "queued"
     assert latest_job["progress"]["percent"] == 0
     assert latest_job["progress"]["events"][0]["message"].startswith("Scan wurde eingereiht")
@@ -185,3 +187,108 @@ def test_deployment_security_gate_is_unavailable_without_server_secret() -> None
 
     assert response.status_code == 503
     assert "not configured" in response.json()["detail"]
+
+
+def test_post_scan_accepts_targeted_scan_sources() -> None:
+    """Operators should be able to queue one source-specific scan instead of a full estate run."""
+
+    session_factory = build_session_factory()
+
+    def override_db_session() -> Generator[Session, None, None]:
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app = FastAPI()
+    app.include_router(api_router)
+    app.dependency_overrides[get_db_session] = override_db_session
+    client = TestClient(app)
+
+    response = client.post(
+        "/scan",
+        json={
+            "repository_full_name": "Feberdin/security-watchdog",
+            "include_archived": False,
+            "force": True,
+            "scan_sources": ["github"],
+        },
+    )
+    payload = response.json()
+    latest_job = client.get("/scan-jobs/latest").json()
+
+    assert response.status_code == 202
+    assert payload["status"] == "queued"
+    assert latest_job["repository_full_name"] == "Feberdin/security-watchdog"
+    assert latest_job["scan_sources"] == ["github"]
+
+
+def test_cancel_scan_endpoint_marks_queued_job_canceled() -> None:
+    """The API should expose a clear cancellation route for queued or running manual scans."""
+
+    session_factory = build_session_factory()
+
+    def override_db_session() -> Generator[Session, None, None]:
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app = FastAPI()
+    app.include_router(api_router)
+    app.dependency_overrides[get_db_session] = override_db_session
+    client = TestClient(app)
+
+    scan_response = client.post("/scan", json={"include_archived": False, "force": True})
+    job_id = scan_response.json()["job_id"]
+    cancel_response = client.post(f"/scan-jobs/{job_id}/cancel")
+    payload = cancel_response.json()
+
+    assert cancel_response.status_code == 200
+    assert payload["id"] == job_id
+    assert payload["status"] == "canceled"
+    assert payload["cancel_requested"] is True
+    assert payload["progress"]["phase"] == "canceled"
+
+
+def test_repository_scan_settings_can_disable_asset() -> None:
+    """Irrelevant repositories should be switchable out of future scans without deleting history."""
+
+    session_factory = build_session_factory()
+
+    def override_db_session() -> Generator[Session, None, None]:
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    with session_factory() as session:
+        repository = Repository(
+            source_type="github",
+            owner="Feberdin",
+            name="old-repo",
+            full_name="Feberdin/old-repo",
+            default_branch="main",
+            local_path="/tmp/old-repo",
+        )
+        session.add(repository)
+        session.commit()
+        repository_id = repository.id
+
+    app = FastAPI()
+    app.include_router(api_router)
+    app.dependency_overrides[get_db_session] = override_db_session
+    client = TestClient(app)
+
+    response = client.patch(
+        f"/repositories/{repository_id}/scan-settings",
+        json={"scan_enabled": False},
+    )
+    repositories = client.get("/repositories").json()
+
+    assert response.status_code == 200
+    assert response.json()["scan_enabled"] is False
+    assert repositories[0]["scan_enabled"] is False

@@ -141,11 +141,14 @@ def test_process_manual_scan_job_marks_job_succeeded(monkeypatch) -> None:
             job_id: int | None = None,
             resume_started_at=None,
             progress_callback=None,
+            cancellation_check=None,
         ) -> ScanResponse:
             assert request.force is True
+            assert request.scan_sources == ["github"]
             assert job_id == 1
             assert resume_started_at is not None
             assert progress_callback is not None
+            assert cancellation_check is not None
             progress_callback(
                 ScanProgressUpdate(
                     phase="vulnerabilities",
@@ -167,7 +170,12 @@ def test_process_manual_scan_job_marks_job_succeeded(monkeypatch) -> None:
     with session_factory() as session:
         job, created = manual_scan_jobs.enqueue_manual_scan(
             session,
-            ScanRequest(repository_full_name="Feberdin/security-watchdog", include_archived=False, force=True),
+            ScanRequest(
+                repository_full_name="Feberdin/security-watchdog",
+                include_archived=False,
+                force=True,
+                scan_sources=["github"],
+            ),
         )
         session.commit()
         job_id = job.id
@@ -210,6 +218,7 @@ def test_process_manual_scan_job_marks_job_failed(monkeypatch) -> None:
             job_id: int | None = None,
             resume_started_at=None,
             progress_callback=None,
+            cancellation_check=None,
         ) -> ScanResponse:
             assert job_id == 1
             assert resume_started_at is not None
@@ -260,10 +269,12 @@ def test_process_manual_scan_job_resumes_running_job_after_restart(monkeypatch) 
             job_id: int | None = None,
             resume_started_at=None,
             progress_callback=None,
+            cancellation_check=None,
         ) -> ScanResponse:
             captured_context["job_id"] = job_id
             captured_context["resume_started_at"] = resume_started_at
             assert progress_callback is not None
+            assert cancellation_check is not None
             assert request.repository_full_name is None
             return ScanResponse(
                 message="Scan completed",
@@ -296,3 +307,80 @@ def test_process_manual_scan_job_resumes_running_job_after_restart(monkeypatch) 
     assert captured_context["resume_started_at"] is not None
     assert stored_job is not None
     assert stored_job.status == ManualScanJobStatus.SUCCEEDED.value
+
+
+def test_cancel_manual_scan_job_marks_queued_job_canceled(monkeypatch) -> None:
+    """Queued scans should stop immediately when an operator cancels them before claim."""
+
+    session_factory = build_session_factory()
+    monkeypatch.setattr(manual_scan_jobs, "SessionLocal", session_factory)
+
+    with session_factory() as session:
+        job, created = manual_scan_jobs.enqueue_manual_scan(
+            session,
+            ScanRequest(repository_full_name=None, include_archived=False, force=False),
+        )
+        result = manual_scan_jobs.cancel_manual_scan_job(session, job.id)
+        session.commit()
+        job_id = job.id
+
+    with session_factory() as session:
+        stored_job = get_manual_scan_job(session, job_id)
+
+    assert created is True
+    assert result is not None
+    assert result.status == ManualScanJobStatus.CANCELED.value
+    assert result.cancel_requested is True
+    assert result.progress.phase == "canceled"
+    assert stored_job is not None
+    assert stored_job.status == ManualScanJobStatus.CANCELED.value
+    assert stored_job.completed_at is not None
+
+
+def test_process_manual_scan_job_marks_running_cancel_as_canceled(monkeypatch) -> None:
+    """Running scans should persist canceled instead of failed when the worker sees the cancel flag."""
+
+    session_factory = build_session_factory()
+    monkeypatch.setattr(manual_scan_jobs, "SessionLocal", session_factory)
+
+    class CancelingOrchestrator:
+        """Simulate an orchestrator that observes cancellation at a checkpoint."""
+
+        def run_manual_scan(
+            self,
+            session: Session,
+            request: ScanRequest,
+            *,
+            job_id: int | None = None,
+            resume_started_at=None,
+            progress_callback=None,
+            cancellation_check=None,
+        ) -> ScanResponse:
+            assert cancellation_check is not None
+            cancellation_check()
+            raise AssertionError("cancellation_check should raise before scan work continues")
+
+    monkeypatch.setattr(manual_scan_jobs, "ScanOrchestrator", CancelingOrchestrator)
+
+    with session_factory() as session:
+        job, created = manual_scan_jobs.enqueue_manual_scan(
+            session,
+            ScanRequest(repository_full_name=None, include_archived=False, force=False),
+        )
+        job.status = ManualScanJobStatus.RUNNING.value
+        job.started_at = datetime.now(UTC) - timedelta(minutes=5)
+        job.cancel_requested = True
+        session.commit()
+        job_id = job.id
+
+    result = manual_scan_jobs.process_manual_scan_job()
+
+    with session_factory() as session:
+        stored_job = get_manual_scan_job(session, job_id)
+
+    assert created is True
+    assert result is not None
+    assert result.status == ManualScanJobStatus.CANCELED.value
+    assert result.progress.phase == "canceled"
+    assert stored_job is not None
+    assert stored_job.status == ManualScanJobStatus.CANCELED.value

@@ -10,6 +10,8 @@ Debugging: If a dashboard scan looks stuck, start with these tests and then insp
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -59,8 +61,8 @@ def test_enqueue_manual_scan_reuses_active_job() -> None:
     assert second_job.status == ManualScanJobStatus.QUEUED.value
 
 
-def test_recover_interrupted_manual_scan_jobs_marks_running_job_failed(monkeypatch) -> None:
-    """A runner restart should expose an interrupted scan as failed and unblock the queue."""
+def test_recover_interrupted_manual_scan_jobs_keeps_running_job_resumable(monkeypatch) -> None:
+    """A runner restart should leave a running job available for resume instead of failing it."""
 
     session_factory = build_session_factory()
     monkeypatch.setattr(manual_scan_jobs, "SessionLocal", session_factory)
@@ -87,13 +89,13 @@ def test_recover_interrupted_manual_scan_jobs_marks_running_job_failed(monkeypat
             ScanRequest(repository_full_name=None, include_archived=False, force=True),
         )
 
-    assert recovered_count == 1
+    assert recovered_count == 0
     assert stored_job is not None
-    assert stored_job.status == ManualScanJobStatus.FAILED.value
-    assert stored_job.completed_at is not None
-    assert stored_job.error_message == manual_scan_jobs.INTERRUPTED_SCAN_MESSAGE
-    assert replacement_created is True
-    assert replacement_job.id != job_id
+    assert stored_job.status == ManualScanJobStatus.RUNNING.value
+    assert stored_job.completed_at is None
+    assert stored_job.error_message is None
+    assert replacement_created is False
+    assert replacement_job.id == job_id
 
 
 def test_recover_interrupted_manual_scan_jobs_leaves_queued_job_active(monkeypatch) -> None:
@@ -135,9 +137,14 @@ def test_process_manual_scan_job_marks_job_succeeded(monkeypatch) -> None:
             self,
             session: Session,
             request: ScanRequest,
+            *,
+            job_id: int | None = None,
+            resume_started_at=None,
             progress_callback=None,
         ) -> ScanResponse:
             assert request.force is True
+            assert job_id == 1
+            assert resume_started_at is not None
             assert progress_callback is not None
             progress_callback(
                 ScanProgressUpdate(
@@ -199,8 +206,14 @@ def test_process_manual_scan_job_marks_job_failed(monkeypatch) -> None:
             self,
             session: Session,
             request: ScanRequest,
+            *,
+            job_id: int | None = None,
+            resume_started_at=None,
             progress_callback=None,
         ) -> ScanResponse:
+            assert job_id == 1
+            assert resume_started_at is not None
+            assert progress_callback is not None
             raise RuntimeError("simulated queue failure")
 
     monkeypatch.setattr(manual_scan_jobs, "ScanOrchestrator", ExplodingOrchestrator)
@@ -227,3 +240,59 @@ def test_process_manual_scan_job_marks_job_failed(monkeypatch) -> None:
     assert stored_job is not None
     assert stored_job.status == ManualScanJobStatus.FAILED.value
     assert stored_job.completed_at is not None
+
+
+def test_process_manual_scan_job_resumes_running_job_after_restart(monkeypatch) -> None:
+    """A job left running by a worker restart should be picked up by the queue processor."""
+
+    session_factory = build_session_factory()
+    monkeypatch.setattr(manual_scan_jobs, "SessionLocal", session_factory)
+    captured_context: dict[str, object] = {}
+
+    class FakeOrchestrator:
+        """Capture resume context without running any external scanners."""
+
+        def run_manual_scan(
+            self,
+            session: Session,
+            request: ScanRequest,
+            *,
+            job_id: int | None = None,
+            resume_started_at=None,
+            progress_callback=None,
+        ) -> ScanResponse:
+            captured_context["job_id"] = job_id
+            captured_context["resume_started_at"] = resume_started_at
+            assert progress_callback is not None
+            assert request.repository_full_name is None
+            return ScanResponse(
+                message="Scan completed",
+                repository_count=6,
+                alert_count=2,
+                failed_system_count=0,
+            )
+
+    monkeypatch.setattr(manual_scan_jobs, "ScanOrchestrator", FakeOrchestrator)
+
+    with session_factory() as session:
+        job, created = manual_scan_jobs.enqueue_manual_scan(
+            session,
+            ScanRequest(repository_full_name=None, include_archived=False, force=False),
+        )
+        job.status = ManualScanJobStatus.RUNNING.value
+        job.started_at = datetime.now(UTC) - timedelta(minutes=5)
+        session.commit()
+        job_id = job.id
+
+    result = manual_scan_jobs.process_manual_scan_job()
+
+    with session_factory() as session:
+        stored_job = get_manual_scan_job(session, job_id)
+
+    assert created is True
+    assert result is not None
+    assert result.status == ManualScanJobStatus.SUCCEEDED.value
+    assert captured_context["job_id"] == job_id
+    assert captured_context["resume_started_at"] is not None
+    assert stored_job is not None
+    assert stored_job.status == ManualScanJobStatus.SUCCEEDED.value

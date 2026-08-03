@@ -17,9 +17,9 @@ from sqlalchemy.orm import Session
 
 import app.models.entities  # noqa: F401
 from app.db.base import Base
-from app.models.entities import ThreatArticle
-from app.models.schemas import ThreatArticleRecord
-from app.repositories.store import store_threat_article
+from app.models.entities import Dependency, Repository, ThreatArticle
+from app.models.schemas import DependencyRecord, ThreatArticleRecord
+from app.repositories.store import replace_repository_dependencies, store_threat_article
 
 
 def build_test_session() -> Session:
@@ -95,3 +95,49 @@ def test_store_threat_article_reuses_existing_row_for_identical_article() -> Non
     stored_rows = session.scalars(select(ThreatArticle)).all()
     assert len(stored_rows) == 1
     assert repeated_row.id == first_row.id
+
+
+def test_replace_repository_dependencies_deduplicates_scanner_records() -> None:
+    """Duplicate scanner records should not violate the dependency uniqueness constraint."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="demo",
+        full_name="Feberdin/demo",
+        local_path="/tmp/demo",
+    )
+    session.add(repository)
+    session.flush()
+
+    dependencies = [
+        DependencyRecord(
+            package_name="ubuntu",
+            version="24.04",
+            ecosystem="docker",
+            manifest_path="Dockerfile",
+            direct_dependency=False,
+            metadata={"source": "first"},
+        ),
+        DependencyRecord(
+            package_name="ubuntu",
+            version="24.04",
+            ecosystem="docker",
+            manifest_path="Dockerfile",
+            group_name="base",
+            direct_dependency=True,
+            metadata={"stage": "runtime"},
+        ),
+    ]
+
+    stored_dependencies = replace_repository_dependencies(session, repository, dependencies)
+    session.commit()
+
+    rows = session.scalars(select(Dependency)).all()
+    assert len(stored_dependencies) == 1
+    assert len(rows) == 1
+    assert rows[0].package_name == "ubuntu"
+    assert rows[0].direct_dependency is True
+    assert rows[0].group_name == "base"
+    assert rows[0].metadata_json == {"stage": "runtime", "source": "first"}

@@ -26,7 +26,6 @@ from app.models.schemas import (
 from app.repositories.store import (
     claim_manual_scan_job,
     create_manual_scan_job,
-    fail_running_manual_scan_jobs,
     get_active_manual_scan_job,
     get_latest_manual_scan_job,
     get_manual_scan_job,
@@ -39,8 +38,8 @@ from app.services.orchestrator import ScanOrchestrator
 
 LOGGER = logging.getLogger(__name__)
 INTERRUPTED_SCAN_MESSAGE = (
-    "Scan runner restarted before this scan completed. The interrupted run cannot be resumed; "
-    "start a new manual scan."
+    "Scan runner restarted before this scan completed. The replacement worker will resume from "
+    "the newest durable checkpoint."
 )
 
 
@@ -94,33 +93,16 @@ def get_latest_manual_scan_job_out(session: Session) -> ManualScanJobOut | None:
 
 def recover_interrupted_manual_scan_jobs() -> int:
     """
-    Mark jobs owned by a previous runner process as failed before accepting queue work.
+    Leave interrupted running jobs available for the queue worker to resume.
 
     Why this exists:
-    Scan orchestration state lives in memory while the durable job status lives in PostgreSQL. Once
-    a runner restarts, any row still marked `running` is orphaned and must not block future scans.
+    Scan orchestration state lives in memory while durable scan outcomes live in PostgreSQL. Once a
+    runner restarts, any row still marked `running` should stay visible and resumable; the next
+    queue poll reclaims it after the short duplicate-run grace period.
     """
 
-    recovery_session = SessionLocal()
-    try:
-        recovered_count = fail_running_manual_scan_jobs(
-            recovery_session,
-            error_message=INTERRUPTED_SCAN_MESSAGE,
-        )
-        recovery_session.commit()
-    except Exception:
-        recovery_session.rollback()
-        LOGGER.exception("Failed to recover interrupted manual scan jobs")
-        raise
-    finally:
-        recovery_session.close()
-
-    if recovered_count:
-        LOGGER.warning(
-            "Recovered interrupted manual scan jobs",
-            extra={"recovered_job_count": recovered_count},
-        )
-    return recovered_count
+    LOGGER.info("Manual scan startup recovery keeps running jobs resumable")
+    return 0
 
 
 def process_manual_scan_job(job_id: int | None = None) -> ManualScanJobOut | None:
@@ -145,6 +127,7 @@ def process_manual_scan_job(job_id: int | None = None) -> ManualScanJobOut | Non
             force=claimed_job.force,
         )
         claimed_job_id = claimed_job.id
+        claimed_job_started_at = claimed_job.started_at
         claim_session.commit()
     except Exception:
         claim_session.rollback()
@@ -169,6 +152,8 @@ def process_manual_scan_job(job_id: int | None = None) -> ManualScanJobOut | Non
         response = ScanOrchestrator().run_manual_scan(
             work_session,
             request,
+            job_id=claimed_job_id,
+            resume_started_at=claimed_job_started_at,
             progress_callback=lambda update: _persist_manual_scan_progress(
                 claimed_job_id,
                 update,

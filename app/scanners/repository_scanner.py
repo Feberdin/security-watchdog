@@ -45,9 +45,11 @@ class RepositoryScanner:
             return synced
 
         for repository_data in repositories:
-            if repository_full_name and repository_data["full_name"] != repository_full_name:
-                continue
-            if repository_data.get("archived") and not include_archived:
+            if not self._should_sync_repository(
+                repository_data,
+                repository_full_name=repository_full_name,
+                include_archived=include_archived,
+            ):
                 continue
 
             try:
@@ -197,3 +199,22 @@ class RepositoryScanner:
         """Only fetch full history when public repo history scanning is enabled."""
 
         return self.settings.secret_history_scan_enabled and not repository_data.get("private", False)
+
+    def _should_sync_repository(
+        self,
+        repository_data: dict,
+        *,
+        repository_full_name: str | None,
+        include_archived: bool,
+    ) -> bool:
+        """Apply operator repository selection rules before cloning or scanning."""
+
+        full_name = repository_data.get("full_name", "")
+        if repository_full_name and full_name != repository_full_name:
+            return False
+        if repository_data.get("archived") and not include_archived:
+            return False
+        if repository_data.get("fork") and not self.settings.github_include_forks:
+            LOGGER.debug("Skipping forked GitHub repository", extra={"repository": full_name})
+            return False
+        return True

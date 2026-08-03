@@ -68,6 +68,7 @@ Key environment variables:
 - `DEPLOYMENT_GATE_MAX_SCAN_AGE_HOURS`: Maximum age of successful exact-commit scan evidence; default `24`.
 - `DEPLOYMENT_GATE_MAX_BLOCKERS`: Maximum blocker details returned per response; counts always cover all findings.
 - `GITHUB_TOKEN`: GitHub token with access to the repositories you want to monitor.
+- `GITHUB_INCLUDE_FORKS`: Include forked GitHub repositories in repository scans and reports. Defaults to `false`, so forks such as large upstream mirrors stay out of the normal security queue.
 - `SECRET_HISTORY_SCAN_ENABLED`: When `true`, public GitHub repositories are fetched with full history and scanned for secrets in old commits as well as the current tree.
 - `SECRET_HISTORY_MAX_COMMITS_PER_REPO`: Optional safety limit for history scanning. `0` means scan the full reachable history.
 - `DATABASE_URL`: PostgreSQL connection string.
@@ -87,10 +88,9 @@ Key environment variables:
 - `GET /scan-jobs/{job_id}`: One manual scan job with timestamps, counts, error details, and a bounded operator log.
 
 Manual scans are stored in PostgreSQL before execution. The dedicated `worker`, or the API's
-embedded scheduler in single-container installations, claims queued work. On runner startup,
-unfinished `running` jobs from the previous process are marked as failed with a retry instruction;
-queued jobs remain available for processing.
-
+embedded scheduler in single-container installations, claims queued work. Running jobs persist
+progress counters after each asset and resume from the newest durable asset outcome after a worker
+restart or deployment.
 - `GET /reports`: Aggregated dashboard/report data.
 - `GET /reports/sarif`: Active alerts as SARIF 2.1.0 JSON. Add `?include_resolved=true` for audit exports.
 - `GET /alerts`: Latest alerts.

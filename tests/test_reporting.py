@@ -407,6 +407,81 @@ def test_build_high_risk_update_queue_prioritizes_risky_outdated_dependencies() 
     assert dependency_action.action == "replace_or_remove_compromised_package"
 
 
+def test_reporting_excludes_github_forks_by_default() -> None:
+    """Forked GitHub repositories should not drive reports or automation queues by default."""
+
+    session = build_test_session()
+    fork_repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="core",
+        full_name="Feberdin/core",
+        local_path="/tmp/core",
+        risk_score=95.0,
+        metadata_json={"fork": True, "parent": {"full_name": "home-assistant/core"}},
+    )
+    session.add(fork_repository)
+    session.flush()
+
+    dependency = Dependency(
+        repository_id=fork_repository.id,
+        manifest_path="requirements.txt",
+        package_name="requests",
+        version="2.25.0",
+        ecosystem="pypi",
+    )
+    session.add(dependency)
+    session.flush()
+
+    vulnerability = Vulnerability(
+        source="osv",
+        source_identifier="CVE-2026-0001",
+        package_name="requests",
+        ecosystem="pypi",
+        summary="Example vulnerability",
+        severity="critical",
+    )
+    session.add(vulnerability)
+    session.flush()
+
+    session.add_all(
+        [
+            DependencyVulnerability(
+                dependency_id=dependency.id,
+                vulnerability_id=vulnerability.id,
+                risk_score=95.0,
+                match_reason="Unit test match",
+            ),
+            Alert(
+                repository_id=fork_repository.id,
+                title="Potential secret in Feberdin/core",
+                description="Fork-only finding",
+                severity="critical",
+                risk_score=95.0,
+                fingerprint="fork-alert",
+                status="open",
+                source_type="secret_scanner",
+                metadata_json={"detector": "github_token", "content_source": "working_tree"},
+            ),
+        ]
+    )
+    session.commit()
+
+    service = ReportingService(version_catalog=FakeVersionCatalog())
+    service.settings.github_include_forks = False
+
+    report = service.build_report(session)
+    systems = service.build_system_inventory(session)
+    queue = service.build_high_risk_update_queue(session)
+
+    assert report.repository_count == 0
+    assert report.dependency_count == 0
+    assert report.vulnerability_count == 0
+    assert report.alert_count == 0
+    assert systems == []
+    assert queue.task_count == 0
+
+
 def test_build_high_risk_update_prompt_contains_safe_codex_rules() -> None:
     """The master prompt should include package targets plus guardrails for CI and deployments."""
 

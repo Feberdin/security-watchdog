@@ -41,7 +41,7 @@ class ContainerScanner:
 
         try:
             output = run_command(
-                [self.trivy_binary, "config", "--format", "json", str(dockerfile_path)],
+                [self.trivy_binary, "config", "--format", "json", dockerfile_path.name],
                 cwd=dockerfile_path.parent,
                 timeout=180,
             )

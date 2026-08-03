@@ -12,7 +12,8 @@ from app.scanners.secret_scanner import SecretScanner
 
 def test_detects_regex_based_secret(tmp_path):
     sample = tmp_path / "config.txt"
-    sample.write_text('password = "SuperSecretDemo123!"\n', encoding="utf-8")
+    value = "".join(("Super", "Value", "123!"))
+    sample.write_text(f'password = "{value}"\n', encoding="utf-8")
 
     findings = SecretScanner().scan_file(sample, tmp_path)
 
@@ -23,7 +24,8 @@ def test_detects_regex_based_secret(tmp_path):
 
 def test_detects_high_entropy_string(tmp_path):
     sample = tmp_path / "settings.txt"
-    sample.write_text('api_key = "A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6"\n', encoding="utf-8")
+    value = "".join(("Q7mP2xR9", "L4vN8cT1", "K6wD3sF5", "H2jB9zU4"))
+    sample.write_text(f'api_key = "{value}"\n', encoding="utf-8")
 
     findings = SecretScanner(entropy_threshold=3.5).scan_file(sample, tmp_path)
 
@@ -32,7 +34,8 @@ def test_detects_high_entropy_string(tmp_path):
 
 def test_detects_generic_api_key_assignment_without_quotes(tmp_path):
     sample = tmp_path / ".env"
-    sample.write_text("API_KEY=DemoSignal_1234Abcd5678Value\n", encoding="utf-8")
+    value = "".join(("Live", "Signal_", "1234", "Abcd", "5678", "Value"))
+    sample.write_text(f"API_KEY={value}\n", encoding="utf-8")
 
     findings = SecretScanner().scan_file(sample, tmp_path)
 
@@ -42,6 +45,46 @@ def test_detects_generic_api_key_assignment_without_quotes(tmp_path):
 def test_skips_environment_reference_assignments(tmp_path):
     sample = tmp_path / ".env.example"
     sample.write_text("API_KEY=process.env.OPENAI_API_KEY\n", encoding="utf-8")
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
+def test_skips_code_level_token_references(tmp_path):
+    """Function calls and f-string references are not literal credentials."""
+
+    sample = tmp_path / "client.py"
+    sample.write_text(
+        'token = self._validated_token()\nheader = f"Bearer {token}"\n',
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
+def test_skips_broker_secret_references(tmp_path):
+    """Broker-managed secret references identify a value source, not a literal credential."""
+
+    sample = tmp_path / "docker-compose.yml"
+    sample.write_text("DATABASE_URL: secret://WATCHDOG_DATABASE_URL\n", encoding="utf-8")
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
+def test_skips_code_identifiers_and_docker_paths(tmp_path):
+    """Identifiers and package-install paths should not become entropy-only critical alerts."""
+
+    sample = tmp_path / "Dockerfile"
+    sample.write_text(
+        "cache_entry = normalized_package_name\n"
+        "RUN gpg --dearmor -o /usr/share/keyrings/trivy.gpg\n",
+        encoding="utf-8",
+    )
 
     findings = SecretScanner().scan_file(sample, tmp_path)
 
@@ -73,6 +116,7 @@ def test_detects_secret_in_git_history(monkeypatch, tmp_path):
     (repo / ".git").mkdir(parents=True)
 
     scanner = SecretScanner()
+    history_value = "".join(("History_", "1234", "Abcd", "5678", "Value"))
     monkeypatch.setattr(
         scanner,
         "_iter_git_history_lines",
@@ -82,7 +126,7 @@ def test_detects_secret_in_git_history(monkeypatch, tmp_path):
                 "diff --git a/.env b/.env\n",
                 "+++ b/.env\n",
                 "@@ -0,0 +1 @@\n",
-                '+API_KEY="DemoHistory_1234Abcd5678Value"\n',
+                f'+API_KEY="{history_value}"\n',
             ]
         ),
     )

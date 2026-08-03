@@ -22,8 +22,6 @@ import app.models.entities  # noqa: F401
 from app.api.routes import router as api_router
 from app.db.base import Base
 from app.db.session import get_db_session
-from app.models.schemas import ScanRequest, ScanResponse
-from app.services import manual_scan_jobs
 
 
 def build_session_factory() -> sessionmaker[Session]:
@@ -39,24 +37,10 @@ def build_session_factory() -> sessionmaker[Session]:
     return sessionmaker(bind=engine, autocommit=False, autoflush=False, future=True)
 
 
-def test_post_scan_returns_accepted_and_exposes_latest_job(monkeypatch) -> None:
-    """The API should accept the request immediately and expose the resulting job state."""
+def test_post_scan_returns_accepted_and_leaves_job_queued_for_worker() -> None:
+    """The API should persist work without tying scan execution to the request process."""
 
     session_factory = build_session_factory()
-    monkeypatch.setattr(manual_scan_jobs, "SessionLocal", session_factory)
-
-    class FakeOrchestrator:
-        """Deterministic stand-in so the route test does not hit real scanners."""
-
-        def run_manual_scan(self, session: Session, request: ScanRequest) -> ScanResponse:
-            return ScanResponse(
-                message="Scan completed",
-                repository_count=6,
-                alert_count=11,
-                failed_system_count=0,
-            )
-
-    monkeypatch.setattr(manual_scan_jobs, "ScanOrchestrator", FakeOrchestrator)
 
     def override_db_session() -> Generator[Session, None, None]:
         session = session_factory()
@@ -77,6 +61,7 @@ def test_post_scan_returns_accepted_and_exposes_latest_job(monkeypatch) -> None:
     assert response.status_code == 202
     assert payload["job_id"] > 0
     assert payload["status"] == "queued"
+    assert payload["message"] == "Manual scan accepted and queued for worker processing."
     assert payload["status_url"].endswith(f"/scan-jobs/{payload['job_id']}")
 
     latest_response = client.get("/scan-jobs/latest")
@@ -84,9 +69,9 @@ def test_post_scan_returns_accepted_and_exposes_latest_job(monkeypatch) -> None:
 
     assert latest_response.status_code == 200
     assert latest_job["id"] == payload["job_id"]
-    assert latest_job["status"] == "succeeded"
-    assert latest_job["repository_count"] == 6
-    assert latest_job["alert_count"] == 11
+    assert latest_job["status"] == "queued"
+    assert latest_job["repository_count"] == 0
+    assert latest_job["alert_count"] == 0
 
 
 def test_daily_security_check_endpoint_returns_codex_runbook() -> None:

@@ -96,7 +96,7 @@ def upsert_repository(
 
 
 def create_manual_scan_job(session: Session, request: ScanRequest) -> ManualScanJob:
-    """Persist one queued manual scan request for later worker or background execution."""
+    """Persist one queued manual scan request for later execution by a durable scan runner."""
 
     job = ManualScanJob(
         repository_full_name=request.repository_full_name,
@@ -137,14 +137,37 @@ def get_active_manual_scan_job(session: Session) -> ManualScanJob | None:
     )
 
 
+def fail_running_manual_scan_jobs(session: Session, *, error_message: str) -> int:
+    """
+    Atomically fail jobs that belonged to a previous scan-runner process.
+
+    Why this exists:
+    A process can stop after claiming a job but before storing its result. The replacement runner
+    cannot resume the in-memory orchestration safely, so it records the interruption and frees the
+    queue for a deliberate retry.
+    """
+
+    failure_result = session.execute(
+        update(ManualScanJob)
+        .where(ManualScanJob.status == ManualScanJobStatus.RUNNING.value)
+        .values(
+            status=ManualScanJobStatus.FAILED.value,
+            completed_at=utcnow(),
+            error_message=error_message,
+        )
+    )
+    session.flush()
+    return int(failure_result.rowcount or 0)
+
+
 def claim_manual_scan_job(session: Session, *, job_id: int | None = None) -> ManualScanJob | None:
     """
     Atomically transition one queued job into the running state.
 
     Why this exists:
-    Both the API process and the dedicated worker may attempt to pick up the same queued scan. The
-    conditional update below ensures only one process wins the claim even if both notice the job at
-    roughly the same time.
+    A dedicated worker or embedded scheduler may overlap during startup. The conditional update
+    below ensures only one runner wins the claim even if both notice the job at roughly the same
+    time.
     """
 
     if job_id is None:

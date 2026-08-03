@@ -81,6 +81,12 @@ Key environment variables:
 - `POST /scan`: Queue an immediate full scan and return `202 Accepted` plus a status URL.
 - `GET /scan-jobs/latest`: Latest manual scan including queue/running/success/failure state.
 - `GET /scan-jobs/{job_id}`: One manual scan job with timestamps, counts, and error details.
+
+Manual scans are stored in PostgreSQL before execution. The dedicated `worker`, or the API's
+embedded scheduler in single-container installations, claims queued work. On runner startup,
+unfinished `running` jobs from the previous process are marked as failed with a retry instruction;
+queued jobs remain available for processing.
+
 - `GET /reports`: Aggregated dashboard/report data.
 - `GET /reports/sarif`: Active alerts as SARIF 2.1.0 JSON. Add `?include_resolved=true` for audit exports.
 - `GET /alerts`: Latest alerts.
@@ -139,6 +145,10 @@ For Home Assistant coverage:
 - `Remote Home Assistant scan fails with TLS errors`: if you use a self-signed certificate, set `HOMEASSISTANT_REMOTE_VERIFY_TLS=false` or install the CA certificate into the container.
 - `Container findings empty`: confirm `trivy` and `grype` are installed inside the image and the worker can reach image registries.
 - `AI extraction not running`: set `AI_ENABLED=true`, provide `OPENAI_API_KEY`, and inspect worker logs.
+- `Manual scan remains queued`: verify the `worker` is healthy, or enable
+  `RUN_EMBEDDED_SCHEDULER=true` for a supported single-container installation.
+- `Manual scan failed after a restart`: the previous runner was interrupted and cannot safely resume
+  its in-memory scan. Start a new manual scan after the worker is healthy.
 
 ## Logs and Debugging
 

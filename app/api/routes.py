@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
@@ -33,7 +33,6 @@ from app.services.manual_scan_jobs import (
     enqueue_manual_scan,
     get_latest_manual_scan_job_out,
     get_manual_scan_job_out,
-    process_manual_scan_job,
 )
 from app.services.reporting import ReportingService
 from app.services.sarif import SarifReportingService
@@ -53,17 +52,15 @@ def healthcheck() -> dict[str, str]:
 def trigger_scan(
     scan_request: ScanRequest,
     http_request: Request,
-    background_tasks: BackgroundTasks,
     session: Session = Depends(get_db_session),
 ) -> ScanAcceptedResponse:
-    """Queue a manual full scan without forcing the caller to wait for completion."""
+    """Durably queue a manual full scan for the worker or embedded scheduler."""
 
     try:
         scan_job, created_new_job = enqueue_manual_scan(session, scan_request)
         session.commit()
         if created_new_job:
-            background_tasks.add_task(process_manual_scan_job, scan_job.id)
-            message = "Manual scan accepted and queued for background processing."
+            message = "Manual scan accepted and queued for worker processing."
         else:
             message = "A manual scan is already queued or running; reusing the active job."
         return ScanAcceptedResponse(

@@ -11,16 +11,20 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
+from app.api.dependencies import require_deployment_gate_token
+from app.core.config import Settings, get_settings
 from app.db.session import get_db_session
 from app.models.entities import AIExtractedThreat, Alert, Dependency, Repository, ThreatArticle
 from app.models.schemas import (
     AlertOut,
     CodexPromptOut,
     DailySecurityAutomationOut,
+    DeploymentSecurityGateRequest,
+    DeploymentSecurityGateResponse,
     HighRiskUpdateQueueOut,
     ManualScanJobOut,
     ReportOut,
@@ -29,11 +33,11 @@ from app.models.schemas import (
     ScanRequest,
     SystemInventoryOut,
 )
+from app.services.deployment_security_gate import DeploymentSecurityGateService
 from app.services.manual_scan_jobs import (
     enqueue_manual_scan,
     get_latest_manual_scan_job_out,
     get_manual_scan_job_out,
-    process_manual_scan_job,
 )
 from app.services.reporting import ReportingService
 from app.services.sarif import SarifReportingService
@@ -53,17 +57,15 @@ def healthcheck() -> dict[str, str]:
 def trigger_scan(
     scan_request: ScanRequest,
     http_request: Request,
-    background_tasks: BackgroundTasks,
     session: Session = Depends(get_db_session),
 ) -> ScanAcceptedResponse:
-    """Queue a manual full scan without forcing the caller to wait for completion."""
+    """Durably queue a manual full scan for the worker or embedded scheduler."""
 
     try:
         scan_job, created_new_job = enqueue_manual_scan(session, scan_request)
         session.commit()
         if created_new_job:
-            background_tasks.add_task(process_manual_scan_job, scan_job.id)
-            message = "Manual scan accepted and queued for background processing."
+            message = "Manual scan accepted and queued for worker processing."
         else:
             message = "A manual scan is already queued or running; reusing the active job."
         return ScanAcceptedResponse(
@@ -237,6 +239,38 @@ def get_daily_security_automation_runbook(
         limit=limit,
         max_tasks_per_run=max_tasks_per_run,
     )
+
+
+@router.post(
+    "/automation/deployment-security-gate",
+    response_model=DeploymentSecurityGateResponse,
+)
+def evaluate_deployment_security_gate(
+    gate_request: DeploymentSecurityGateRequest,
+    _authorized: None = Depends(require_deployment_gate_token),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(get_db_session),
+) -> DeploymentSecurityGateResponse:
+    """Return a fail-closed security decision for one exact deployment commit."""
+
+    try:
+        return DeploymentSecurityGateService(settings).evaluate(session, gate_request)
+    except Exception as error:
+        LOGGER.exception(
+            "Deployment security gate evaluation failed",
+            extra={
+                "stack_name": gate_request.stack_name,
+                "repository_full_name": gate_request.repository_full_name,
+                "commit_sha": gate_request.commit_sha,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Deployment security gate could not evaluate the candidate. "
+                "Deployment must remain blocked; inspect the Security Watchdog API logs."
+            ),
+        ) from error
 
 
 @router.get("/diagnostics/export")

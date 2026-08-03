@@ -42,6 +42,9 @@ def startup() -> None:
     global embedded_scheduler
     initialize_database()
     if settings.run_embedded_scheduler and embedded_scheduler is None:
+        from app.services.manual_scan_jobs import recover_interrupted_manual_scan_jobs
+
+        recover_interrupted_manual_scan_jobs()
         embedded_scheduler = build_background_scheduler()
         embedded_scheduler.start()
 

@@ -22,6 +22,7 @@ from app.models.entities import (
     DependencyVulnerability,
     ManualScanJob,
     ManualScanJobStatus,
+    ManualScanProgressEvent,
     Repository,
     ScanResult,
     ThreatArticle,
@@ -97,7 +98,7 @@ def upsert_repository(
 
 
 def create_manual_scan_job(session: Session, request: ScanRequest) -> ManualScanJob:
-    """Persist one queued manual scan request for later worker or background execution."""
+    """Persist one queued manual scan request for later execution by a durable scan runner."""
 
     job = ManualScanJob(
         repository_full_name=request.repository_full_name,
@@ -108,6 +109,64 @@ def create_manual_scan_job(session: Session, request: ScanRequest) -> ManualScan
     session.add(job)
     session.flush()
     return job
+
+
+def record_manual_scan_progress(
+    session: Session,
+    *,
+    job_id: int,
+    phase: str,
+    message: str,
+    level: str,
+    current: int,
+    total: int,
+    percent: float,
+    retention_limit: int = 100,
+) -> ManualScanProgressEvent:
+    """Persist one progress line and keep only the newest bounded set for the job."""
+
+    event = ManualScanProgressEvent(
+        job_id=job_id,
+        phase=phase,
+        message=message,
+        level=level,
+        current=current,
+        total=total,
+        percent=percent,
+    )
+    session.add(event)
+    session.flush()
+
+    stale_event_ids = session.scalars(
+        select(ManualScanProgressEvent.id)
+        .where(ManualScanProgressEvent.job_id == job_id)
+        .order_by(desc(ManualScanProgressEvent.id))
+        .offset(retention_limit)
+    ).all()
+    if stale_event_ids:
+        session.execute(
+            delete(ManualScanProgressEvent).where(
+                ManualScanProgressEvent.id.in_(stale_event_ids)
+            )
+        )
+    return event
+
+
+def list_manual_scan_progress_events(
+    session: Session,
+    *,
+    job_id: int,
+    limit: int = 12,
+) -> list[ManualScanProgressEvent]:
+    """Return the newest progress events in chronological order for readable UI output."""
+
+    newest_first = session.scalars(
+        select(ManualScanProgressEvent)
+        .where(ManualScanProgressEvent.job_id == job_id)
+        .order_by(desc(ManualScanProgressEvent.id))
+        .limit(limit)
+    ).all()
+    return list(reversed(newest_first))
 
 
 def get_manual_scan_job(session: Session, job_id: int) -> ManualScanJob | None:
@@ -138,16 +197,39 @@ def get_active_manual_scan_job(session: Session) -> ManualScanJob | None:
     )
 
 
+def fail_running_manual_scan_jobs(session: Session, *, error_message: str) -> int:
+    """
+    Atomically fail jobs that belonged to a previous scan-runner process.
+
+    Why this exists:
+    A process can stop after claiming a job but before storing its result. The replacement runner
+    cannot resume the in-memory orchestration safely, so it records the interruption and frees the
+    queue for a deliberate retry.
+    """
+
+    failure_result = session.execute(
+        update(ManualScanJob)
+        .where(ManualScanJob.status == ManualScanJobStatus.RUNNING.value)
+        .values(
+            status=ManualScanJobStatus.FAILED.value,
+            completed_at=utcnow(),
+            error_message=error_message,
+        )
+    )
+    session.flush()
+    return int(failure_result.rowcount or 0)
+
+
 def claim_manual_scan_job(session: Session, *, job_id: int | None = None) -> ManualScanJob | None:
     """
     Atomically transition one queued job into the running state or resume a running job.
 
     Why this exists:
-    Both the API process and the dedicated worker may attempt to pick up the same queued scan. The
-    conditional update below ensures only one process wins the claim even if both notice the job at
-    roughly the same time. A deployment can stop the worker after it already marked a job as
-    running, so the queue worker also treats the oldest still-running job as resumable when there is
-    no queued job left.
+    A dedicated worker or embedded scheduler may overlap during startup. The conditional update
+    below ensures only one runner wins the queued-job claim even if both notice the job at roughly
+    the same time. A deployment can stop the worker after it already marked a job as running, so the
+    queue worker also treats an older still-running job as resumable when there is no queued job
+    left.
     """
 
     requested_job_id = job_id

@@ -91,6 +91,32 @@ class RepositoryScanner:
         owner, name = full_name.split("/", maxsplit=1)
         return self.settings.repo_storage_path / safe_slug(owner) / safe_slug(name)
 
+    def get_checkout_commit_sha(self, local_path: Path) -> str:
+        """Return the exact full commit SHA currently checked out for scan provenance."""
+
+        if not local_path.is_dir() or not (local_path / ".git").exists():
+            raise RuntimeError(
+                "Repository checkout is unavailable or is not a Git worktree. "
+                f"path={local_path!s}. Re-run repository synchronization."
+            )
+        commit_sha = run_command(
+            [
+                self.settings.git_binary,
+                "-C",
+                str(local_path),
+                "rev-parse",
+                "--verify",
+                "HEAD^{commit}",
+            ],
+            timeout=120,
+        ).lower()
+        if len(commit_sha) != 40 or any(character not in "0123456789abcdef" for character in commit_sha):
+            raise RuntimeError(
+                "Git returned an invalid full commit SHA for scan provenance. "
+                f"path={local_path!s}."
+            )
+        return commit_sha
+
     def _sync_local_checkout(
         self,
         clone_url: str,

@@ -2,7 +2,7 @@
 Purpose: Background worker entry point that runs APScheduler jobs inside Docker.
 Input/Output: Starts recurring jobs for repo scans, feed polling, and AI extraction.
 Important invariants: The worker should share the same logging and DB initialization as the API;
-all scan jobs run inside this long-lived process, not inside request handlers.
+all scan jobs run inside this long-lived process, and interrupted jobs are recovered before polling.
 Debugging: If scheduled work is missing, start by checking this process and the job registrations.
 """
 
@@ -12,6 +12,7 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import initialize_database
 from app.scheduler.jobs import build_scheduler
+from app.services.manual_scan_jobs import recover_interrupted_manual_scan_jobs
 
 
 def main() -> None:
@@ -20,6 +21,7 @@ def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
     initialize_database()
+    recover_interrupted_manual_scan_jobs()
     scheduler = build_scheduler()
     scheduler.start()
 

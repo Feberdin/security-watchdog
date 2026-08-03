@@ -4,7 +4,7 @@
 # Important invariants: Keep real values in `.env` only; this file may contain placeholders and
 # variable names, but never credentials.
 # Debugging: If local Compose fails with a missing-variable error, copy `.env.example` to `.env`
-# and set `POSTGRES_PASSWORD`, `DATABASE_URL`, and `GITHUB_TOKEN` as needed.
+# and set `POSTGRES_PASSWORD`, `DATABASE_URL`, `DEPLOYMENT_GATE_TOKEN`, and `GITHUB_TOKEN` as needed.
 
 services:
   postgres:
@@ -16,6 +16,7 @@ services:
       - .env
     environment:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env before starting locally.}
+      DEPLOYMENT_GATE_TOKEN: ${DEPLOYMENT_GATE_TOKEN:?Set DEPLOYMENT_GATE_TOKEN in .env before starting locally.}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
 
   worker:

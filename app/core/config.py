@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     api_port: int = 31337
     run_embedded_scheduler: bool = False
 
+    deployment_gate_token: str = ""
+    deployment_gate_max_scan_age_hours: int = Field(default=24, ge=1, le=720)
+    deployment_gate_max_blockers: int = Field(default=50, ge=1, le=200)
+
     database_url: str = "sqlite:///./data/security_watchdog.db"
     redis_url: str = "redis://redis:6379/0"
 
@@ -61,6 +65,7 @@ class Settings(BaseSettings):
     feed_schedule_hours: int = 6
     ai_schedule_days: int = 30
     manual_scan_poll_seconds: int = 15
+    vulnerability_cache_ttl_hours: int = Field(default=24, ge=1, le=168)
 
     osv_api_url: str = "https://api.osv.dev/v1/query"
     nvd_api_url: str = "https://services.nvd.nist.gov/rest/json/cves/2.0"

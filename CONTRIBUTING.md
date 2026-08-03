@@ -50,6 +50,8 @@ Run the same checks as GitHub Actions before pushing:
 - `GET /reports` should load without server errors.
 - `GET /reports/sarif` should return a SARIF document with `version` set to `2.1.0`.
 - A manual `POST /scan` should return `202 Accepted`, create a `manual_scan_jobs` row, and
-  eventually populate fresh `scan_results`.
+  eventually populate fresh `scan_results`. The request process must not execute the scan; verify
+  that the worker or embedded scheduler claims it and that runner startup fails interrupted
+  `running` rows without changing queued rows.
 - If you change Docker or Home Assistant integration behavior, validate mounted-path assumptions in `deployment.md`.
 - If you need to validate unpublished Docker changes, use `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build` so production-style Compose remains image-based and stable.

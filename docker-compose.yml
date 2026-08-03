@@ -21,8 +21,11 @@ x-watchdog-environment: &watchdog-environment
   RUN_EMBEDDED_SCHEDULER: ${RUN_EMBEDDED_SCHEDULER:-false}
   PUID: ${PUID:-99}
   PGID: ${PGID:-100}
+  DEPLOYMENT_GATE_MAX_SCAN_AGE_HOURS: ${DEPLOYMENT_GATE_MAX_SCAN_AGE_HOURS:-24}
+  DEPLOYMENT_GATE_MAX_BLOCKERS: ${DEPLOYMENT_GATE_MAX_BLOCKERS:-50}
   DATABASE_URL: secret://SECURITY_WATCHDOG_DATABASE_URL
   REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  VULNERABILITY_CACHE_TTL_HOURS: ${VULNERABILITY_CACHE_TTL_HOURS:-24}
   GITHUB_TOKEN: secret://SECURITY_WATCHDOG_GITHUB_TOKEN
   GITHUB_USERNAME: ${GITHUB_USERNAME:-}
   GITHUB_INCLUDE_PRIVATE: ${GITHUB_INCLUDE_PRIVATE:-true}
@@ -85,6 +88,7 @@ services:
     logging: *watchdog-logging
     environment:
       <<: *watchdog-environment
+      DEPLOYMENT_GATE_TOKEN: secret://SECURITY_WATCHDOG_DEPLOYMENT_GATE_TOKEN
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "31337"]
     ports:
       - "31337:31337"

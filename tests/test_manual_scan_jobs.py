@@ -19,8 +19,8 @@ from sqlalchemy.pool import StaticPool
 import app.models.entities  # noqa: F401
 from app.db.base import Base
 from app.models.entities import ManualScanJobStatus
-from app.models.schemas import ScanRequest, ScanResponse
-from app.repositories.store import get_manual_scan_job
+from app.models.schemas import ScanProgressUpdate, ScanRequest, ScanResponse
+from app.repositories.store import claim_manual_scan_job, get_manual_scan_job
 from app.services import manual_scan_jobs
 
 
@@ -61,6 +61,69 @@ def test_enqueue_manual_scan_reuses_active_job() -> None:
     assert second_job.status == ManualScanJobStatus.QUEUED.value
 
 
+def test_recover_interrupted_manual_scan_jobs_keeps_running_job_resumable(monkeypatch) -> None:
+    """A runner restart should leave a running job available for resume instead of failing it."""
+
+    session_factory = build_session_factory()
+    monkeypatch.setattr(manual_scan_jobs, "SessionLocal", session_factory)
+
+    with session_factory() as session:
+        job, _ = manual_scan_jobs.enqueue_manual_scan(
+            session,
+            ScanRequest(repository_full_name=None, include_archived=False, force=True),
+        )
+        session.commit()
+        job_id = job.id
+
+        claimed_job = claim_manual_scan_job(session, job_id=job_id)
+        session.commit()
+        assert claimed_job is not None
+        assert claimed_job.status == ManualScanJobStatus.RUNNING.value
+
+    recovered_count = manual_scan_jobs.recover_interrupted_manual_scan_jobs()
+
+    with session_factory() as session:
+        stored_job = get_manual_scan_job(session, job_id)
+        replacement_job, replacement_created = manual_scan_jobs.enqueue_manual_scan(
+            session,
+            ScanRequest(repository_full_name=None, include_archived=False, force=True),
+        )
+
+    assert recovered_count == 0
+    assert stored_job is not None
+    assert stored_job.status == ManualScanJobStatus.RUNNING.value
+    assert stored_job.completed_at is None
+    assert stored_job.error_message is None
+    assert replacement_created is False
+    assert replacement_job.id == job_id
+
+
+def test_recover_interrupted_manual_scan_jobs_leaves_queued_job_active(monkeypatch) -> None:
+    """Recovery must not fail a queued scan that no process has claimed yet."""
+
+    session_factory = build_session_factory()
+    monkeypatch.setattr(manual_scan_jobs, "SessionLocal", session_factory)
+
+    with session_factory() as session:
+        queued_job, _ = manual_scan_jobs.enqueue_manual_scan(
+            session,
+            ScanRequest(repository_full_name="Feberdin/security-watchdog", include_archived=False, force=False),
+        )
+        session.commit()
+        queued_job_id = queued_job.id
+
+    recovered_count = manual_scan_jobs.recover_interrupted_manual_scan_jobs()
+
+    with session_factory() as session:
+        stored_job = get_manual_scan_job(session, queued_job_id)
+
+    assert recovered_count == 0
+    assert stored_job is not None
+    assert stored_job.status == ManualScanJobStatus.QUEUED.value
+    assert stored_job.completed_at is None
+    assert stored_job.error_message is None
+
+
 def test_process_manual_scan_job_marks_job_succeeded(monkeypatch) -> None:
     """A claimed job should persist running and success metadata after orchestration finishes."""
 
@@ -77,10 +140,21 @@ def test_process_manual_scan_job_marks_job_succeeded(monkeypatch) -> None:
             *,
             job_id: int | None = None,
             resume_started_at=None,
+            progress_callback=None,
         ) -> ScanResponse:
             assert request.force is True
             assert job_id == 1
             assert resume_started_at is not None
+            assert progress_callback is not None
+            progress_callback(
+                ScanProgressUpdate(
+                    phase="vulnerabilities",
+                    message="Dependency 2/4 wird geprüft.",
+                    current=2,
+                    total=4,
+                    percent=50.0,
+                )
+            )
             return ScanResponse(
                 message="Scan completed with warnings",
                 repository_count=4,
@@ -109,6 +183,9 @@ def test_process_manual_scan_job_marks_job_succeeded(monkeypatch) -> None:
     assert result.repository_count == 4
     assert result.alert_count == 9
     assert result.failed_system_count == 1
+    assert result.progress.phase == "completed"
+    assert result.progress.percent == 100
+    assert any(event.percent == 50 for event in result.progress.events)
     assert stored_job is not None
     assert stored_job.status == ManualScanJobStatus.SUCCEEDED.value
     assert stored_job.started_at is not None
@@ -132,9 +209,11 @@ def test_process_manual_scan_job_marks_job_failed(monkeypatch) -> None:
             *,
             job_id: int | None = None,
             resume_started_at=None,
+            progress_callback=None,
         ) -> ScanResponse:
             assert job_id == 1
             assert resume_started_at is not None
+            assert progress_callback is not None
             raise RuntimeError("simulated queue failure")
 
     monkeypatch.setattr(manual_scan_jobs, "ScanOrchestrator", ExplodingOrchestrator)
@@ -156,6 +235,8 @@ def test_process_manual_scan_job_marks_job_failed(monkeypatch) -> None:
     assert result is not None
     assert result.status == ManualScanJobStatus.FAILED.value
     assert "RuntimeError: simulated queue failure" in (result.error_message or "")
+    assert result.progress.phase == "failed"
+    assert result.progress.events[-1].level == "error"
     assert stored_job is not None
     assert stored_job.status == ManualScanJobStatus.FAILED.value
     assert stored_job.completed_at is not None
@@ -178,9 +259,11 @@ def test_process_manual_scan_job_resumes_running_job_after_restart(monkeypatch) 
             *,
             job_id: int | None = None,
             resume_started_at=None,
+            progress_callback=None,
         ) -> ScanResponse:
             captured_context["job_id"] = job_id
             captured_context["resume_started_at"] = resume_started_at
+            assert progress_callback is not None
             assert request.repository_full_name is None
             return ScanResponse(
                 message="Scan completed",

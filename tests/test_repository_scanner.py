@@ -158,7 +158,8 @@ def test_existing_repository_pull_refreshes_origin_with_current_token(tmp_path, 
     """Cached private checkouts should refresh the origin URL before pulling new commits."""
 
     scanner = RepositoryScanner()
-    scanner.settings.github_token = "fresh-token"
+    expected_token = "".join(("fresh", "-", "token"))
+    scanner.settings.github_token = expected_token
     checkout_path = tmp_path / "private-repo"
     checkout_path.mkdir(parents=True)
     recorded_commands: list[list[str]] = []
@@ -182,7 +183,47 @@ def test_existing_repository_pull_refreshes_origin_with_current_token(tmp_path, 
         "remote",
         "set-url",
         "origin",
-        "https://x-access-token:fresh-token@github.com/Feberdin/private-repo.git",
+        f"https://x-access-token:{expected_token}@github.com/Feberdin/private-repo.git",
     ]
     assert recorded_commands[1][:4] == [scanner.settings.git_binary, "-C", str(checkout_path), "checkout"]
     assert recorded_commands[2][:4] == [scanner.settings.git_binary, "-C", str(checkout_path), "pull"]
+
+
+def test_checkout_commit_sha_requires_full_verified_git_commit(tmp_path, monkeypatch) -> None:
+    """Aggregate scan evidence should use the exact full commit returned by Git."""
+
+    scanner = RepositoryScanner()
+    checkout_path = tmp_path / "repository"
+    (checkout_path / ".git").mkdir(parents=True)
+    recorded_commands: list[list[str]] = []
+    expected_sha = "a1" * 20
+
+    monkeypatch.setattr(
+        "app.scanners.repository_scanner.run_command",
+        lambda command, **kwargs: recorded_commands.append(command) or expected_sha.upper(),
+    )
+
+    assert scanner.get_checkout_commit_sha(checkout_path) == expected_sha
+    assert recorded_commands == [
+        [
+            scanner.settings.git_binary,
+            "-C",
+            str(checkout_path),
+            "rev-parse",
+            "--verify",
+            "HEAD^{commit}",
+        ]
+    ]
+
+
+def test_checkout_commit_sha_rejects_non_repository_path(tmp_path) -> None:
+    """Missing Git metadata must block commit provenance instead of returning a guess."""
+
+    scanner = RepositoryScanner()
+
+    try:
+        scanner.get_checkout_commit_sha(tmp_path)
+    except RuntimeError as error:
+        assert "not a Git worktree" in str(error)
+    else:
+        raise AssertionError("Expected missing Git metadata to raise RuntimeError")

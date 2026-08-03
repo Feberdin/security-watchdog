@@ -11,6 +11,7 @@ orchestrator and this regression test first.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -18,7 +19,7 @@ from sqlalchemy.orm import Session
 import app.models.entities  # noqa: F401
 from app.db.base import Base
 from app.models.entities import ManualScanJob, ManualScanJobStatus, Repository, ScanResult
-from app.models.schemas import ScanRequest
+from app.models.schemas import ScanProgressUpdate, ScanRequest
 from app.services.orchestrator import ScanOrchestrator
 
 
@@ -59,17 +60,26 @@ def test_manual_scan_continues_when_one_repository_asset_fails() -> None:
     orchestrator.unraid_scanner.sync_assets = lambda *args, **kwargs: []
     orchestrator.homeassistant_scanner.sync_assets = lambda *args, **kwargs: []
     orchestrator._dispatch_open_alerts = lambda *args, **kwargs: None
+    orchestrator.repository_scanner.get_checkout_commit_sha = (
+        lambda *args, **kwargs: "a" * 40
+    )
 
-    def fake_repository_scan(_session: Session, repository: Repository) -> int:
+    def fake_repository_scan(
+        _session: Session,
+        repository: Repository,
+        _progress=None,
+    ) -> int:
         if repository.id == failing_repository.id:
             raise RuntimeError("simulated repository scan failure")
         return 2
 
     orchestrator._scan_repository_asset = fake_repository_scan
 
+    progress_updates: list[ScanProgressUpdate] = []
     response = orchestrator.run_manual_scan(
         session,
         ScanRequest(repository_full_name=None, include_archived=False, force=True),
+        progress_callback=progress_updates.append,
     )
 
     failure_results = session.scalars(
@@ -80,9 +90,19 @@ def test_manual_scan_continues_when_one_repository_asset_fails() -> None:
     assert response.repository_count == 2
     assert response.alert_count == 2
     assert response.failed_system_count == 1
-    assert len(failure_results) == 1
-    assert failure_results[0].repository_id == failing_repository.id
-    assert failure_results[0].status == "error"
+    assert len(failure_results) == 2
+    assert {result.repository_id: result.status for result in failure_results} == {
+        failing_repository.id: "error",
+        healthy_repository.id: "success",
+    }
+    healthy_result = next(
+        result for result in failure_results if result.repository_id == healthy_repository.id
+    )
+    assert healthy_result.details_json["commit_sha"] == "a" * 40
+    assert progress_updates[-1].phase == "finalizing"
+    assert progress_updates[-1].percent == 98
+    assert any(update.level == "warning" for update in progress_updates)
+    assert all(current.percent <= following.percent for current, following in pairwise(progress_updates))
 
 
 def test_manual_scan_resume_uses_existing_asset_outcomes_and_updates_checkpoint() -> None:
@@ -140,9 +160,10 @@ def test_manual_scan_resume_uses_existing_asset_outcomes_and_updates_checkpoint(
     orchestrator.unraid_scanner.sync_assets = lambda *args, **kwargs: []
     orchestrator.homeassistant_scanner.sync_assets = lambda *args, **kwargs: []
     orchestrator._dispatch_open_alerts = lambda *args, **kwargs: None
+    orchestrator.repository_scanner.get_checkout_commit_sha = lambda *args, **kwargs: "b" * 40
     scanned_repositories: list[str] = []
 
-    def fake_repository_scan(_session: Session, repository: Repository) -> int:
+    def fake_repository_scan(_session: Session, repository: Repository, _progress=None) -> int:
         scanned_repositories.append(repository.full_name)
         return 3
 
@@ -204,9 +225,10 @@ def test_manual_scan_resume_does_not_double_count_checkpointed_assets() -> None:
     orchestrator.unraid_scanner.sync_assets = lambda *args, **kwargs: []
     orchestrator.homeassistant_scanner.sync_assets = lambda *args, **kwargs: []
     orchestrator._dispatch_open_alerts = lambda *args, **kwargs: None
+    orchestrator.repository_scanner.get_checkout_commit_sha = lambda *args, **kwargs: "b" * 40
     scanned_repositories: list[str] = []
 
-    def fake_repository_scan(_session: Session, repository: Repository) -> int:
+    def fake_repository_scan(_session: Session, repository: Repository, _progress=None) -> int:
         scanned_repositories.append(repository.full_name)
         return 2
 

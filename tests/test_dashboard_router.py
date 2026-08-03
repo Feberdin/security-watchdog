@@ -27,3 +27,5 @@ def test_dashboard_root_renders_html() -> None:
     assert response.status_code == 200
     assert "security-watchdog" in response.text
     assert "High-Risk Updates" in response.text
+    assert 'id="scan-progress-bar"' in response.text
+    assert 'id="scan-progress-log"' in response.text

@@ -64,12 +64,16 @@ Key environment variables:
 - `PUID`, `PGID`: Optional container runtime user/group mapping. On Unraid, `99`/`100` usually matches `nobody:users`.
 - `POSTGRES_PASSWORD`: Local Docker password for PostgreSQL. In Broker GitOps deployments this must be provided as the Broker secret `SECURITY_WATCHDOG_POSTGRES_PASSWORD`.
 - `SECURITY_WATCHDOG_DATABASE_URL`: Broker secret containing the PostgreSQL connection string for the application.
+- `SECURITY_WATCHDOG_DEPLOYMENT_GATE_TOKEN`: Dedicated Broker secret for authenticating pre-deployment security checks. Do not reuse the Broker administration token.
+- `DEPLOYMENT_GATE_MAX_SCAN_AGE_HOURS`: Maximum age of successful exact-commit scan evidence; default `24`.
+- `DEPLOYMENT_GATE_MAX_BLOCKERS`: Maximum blocker details returned per response; counts always cover all findings.
 - `GITHUB_TOKEN`: GitHub token with access to the repositories you want to monitor.
 - `GITHUB_INCLUDE_FORKS`: Include forked GitHub repositories in repository scans and reports. Defaults to `false`, so forks such as large upstream mirrors stay out of the normal security queue.
 - `SECRET_HISTORY_SCAN_ENABLED`: When `true`, public GitHub repositories are fetched with full history and scanned for secrets in old commits as well as the current tree.
 - `SECRET_HISTORY_MAX_COMMITS_PER_REPO`: Optional safety limit for history scanning. `0` means scan the full reachable history.
 - `DATABASE_URL`: PostgreSQL connection string.
 - `REDIS_URL`: Redis instance for lightweight dedupe and job heartbeats.
+- `VULNERABILITY_CACHE_TTL_HOURS`: Reuse successful per-provider package/version responses; defaults to `24` hours.
 - `UNRAID_DOCKER_HOST`: Usually `unix:///var/run/docker.sock` when deployed on Unraid.
 - `HOMEASSISTANT_CONFIG_PATH`: Mounted Home Assistant config directory.
 - `HOMEASSISTANT_CORE_COMPONENTS_PATH`: Optional mounted path for built-in component manifests.
@@ -80,9 +84,13 @@ Key environment variables:
 ## API Overview
 
 - `POST /scan`: Queue an immediate full scan and return `202 Accepted` plus a status URL.
-- `GET /scan-jobs/latest`: Latest manual scan including queue/running/success/failure state.
-- `GET /scan-jobs/{job_id}`: One manual scan job with timestamps, counts, and error details.
-- Manual scan jobs persist counters after each asset and resume a still-running job after a worker restart or deployment.
+- `GET /scan-jobs/latest`: Latest manual scan including lifecycle state, percentage, phase, and recent progress events.
+- `GET /scan-jobs/{job_id}`: One manual scan job with timestamps, counts, error details, and a bounded operator log.
+
+Manual scans are stored in PostgreSQL before execution. The dedicated `worker`, or the API's
+embedded scheduler in single-container installations, claims queued work. Running jobs persist
+progress counters after each asset and resume from the newest durable asset outcome after a worker
+restart or deployment.
 - `GET /reports`: Aggregated dashboard/report data.
 - `GET /reports/sarif`: Active alerts as SARIF 2.1.0 JSON. Add `?include_resolved=true` for audit exports.
 - `GET /alerts`: Latest alerts.
@@ -93,6 +101,7 @@ Key environment variables:
 - `GET /automation/high-risk-updates`: Prioritized update queue for high-risk and outdated dependencies.
 - `GET /automation/high-risk-updates/codex-prompt`: Master prompt for a controlled Codex update run across queued repositories.
 - `GET /automation/daily-security-check`: Machine-readable runbook for the recurring Codex security task.
+- `POST /automation/deployment-security-gate`: Authenticated, fail-closed pre-deployment decision for one exact Git commit. See [Deployment Broker security gate](docs/deployment-broker-security-gate.md).
 - `GET /health`: Liveness check.
 - Default port: `31337` because it is a memorable security-themed port and was free on the current host during setup.
 
@@ -102,7 +111,7 @@ For Unraid Docker coverage:
 
 - Run the stack on Unraid or mount the Unraid Docker socket into the containers.
 - Deploy the GitOps stack through the Unraid Deployment Broker with `docker-compose.yml`; it contains `secret://...` references that the Broker resolves at runtime.
-- Required Broker secrets are `SECURITY_WATCHDOG_POSTGRES_PASSWORD`, `SECURITY_WATCHDOG_DATABASE_URL`, and `SECURITY_WATCHDOG_GITHUB_TOKEN`.
+- Required Broker secrets are `SECURITY_WATCHDOG_POSTGRES_PASSWORD`, `SECURITY_WATCHDOG_DATABASE_URL`, `SECURITY_WATCHDOG_GITHUB_TOKEN`, and `SECURITY_WATCHDOG_DEPLOYMENT_GATE_TOKEN`.
 - The Compose default network is pinned to `10.200.9.0/24` so the Broker can verify that Docker networking does not overlap LAN/VLAN ranges.
 - For local Docker usage outside the Broker, always add `docker-compose.local.yml` so `.env` values replace the Broker secret references.
 - Leave `UNRAID_DOCKER_ENABLED=true`.
@@ -141,6 +150,18 @@ For Home Assistant coverage:
 - `Remote Home Assistant scan fails with TLS errors`: if you use a self-signed certificate, set `HOMEASSISTANT_REMOTE_VERIFY_TLS=false` or install the CA certificate into the container.
 - `Container findings empty`: confirm `trivy` and `grype` are installed inside the image and the worker can reach image registries.
 - `AI extraction not running`: set `AI_ENABLED=true`, provide `OPENAI_API_KEY`, and inspect worker logs.
+- `Manual scan remains queued`: verify the `worker` is healthy, or enable
+  `RUN_EMBEDDED_SCHEDULER=true` for a supported single-container installation.
+- `Manual scan takes a long time`: open the dashboard progress log or query `/scan-jobs/latest`.
+  Full-estate runs query multiple advisory providers for exact dependency versions and can take
+  several minutes. Successful OSV, GitHub, and NVD package/version responses are cached in
+  PostgreSQL for 24 hours by default. Provider errors are not cached; NVD is paused briefly after a
+  `429` response while OSV and GitHub checks continue.
+- `Manual scan failed after a restart`: the previous runner was interrupted and cannot safely resume
+  its in-memory scan. Start a new manual scan after the worker is healthy.
+- `Deployment gate returns 401`: verify that the Broker sends the dedicated Bearer token configured through the secure secret flow.
+- `Deployment gate returns 503`: configure `SECURITY_WATCHDOG_DEPLOYMENT_GATE_TOKEN` or inspect API/database errors in the watchdog logs.
+- `Deployment gate returns indeterminate`: scan the exact requested full commit and ensure the aggregate scan is fresh and successful.
 
 ## Logs and Debugging
 
@@ -151,7 +172,9 @@ For Home Assistant coverage:
 - SARIF export: `curl -fsS http://localhost:31337/reports/sarif > security-watchdog.sarif`
 - Stable local image upgrade: `docker compose -f docker-compose.yml -f docker-compose.local.yml pull && docker compose -f docker-compose.yml -f docker-compose.local.yml up -d`
 - Local source rebuild: `docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.build.yml up -d --build`
-- Database state: inspect `repositories`, `dependencies`, `vulnerabilities`, `scan_results`, `threat_articles`, `ai_extracted_threats`, and `alerts`.
+- Database state: inspect `repositories`, `dependencies`, `vulnerabilities`, `scan_results`,
+  `manual_scan_jobs`, `manual_scan_progress_events`, `vulnerability_provider_cache`,
+  `threat_articles`, `ai_extracted_threats`, and `alerts`.
 - SBOM output: `data/sbom/<asset>/cyclonedx.json` and `data/sbom/<asset>/spdx.json`
 
 ## Security Notes
@@ -160,6 +183,7 @@ For Home Assistant coverage:
 - Prefer read-only mounts for Home Assistant paths.
 - Mounting the Docker socket grants powerful host access; restrict access to this stack accordingly.
 - Rotate any secret immediately if the secret scanner reports a real credential.
+- The deployment gate returns only allowlisted alert metadata and never returns secret excerpts or raw scanner payloads.
 
 ## Acknowledgements
 

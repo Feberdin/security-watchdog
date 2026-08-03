@@ -100,6 +100,25 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
             wurde.
           </p>
         </div>
+        <div id="scan-progress" class="scan-progress" hidden>
+          <div class="scan-progress-heading">
+            <span id="scan-progress-phase">Wartet auf Fortschrittsdaten</span>
+            <strong id="scan-progress-percent">0%</strong>
+          </div>
+          <div
+            id="scan-progress-bar"
+            class="scan-progress-track"
+            role="progressbar"
+            aria-label="Fortschritt des manuellen Scans"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="0"
+          >
+            <span id="scan-progress-fill" class="scan-progress-fill"></span>
+          </div>
+          <div class="scan-progress-log-heading">Letzte Schritte</div>
+          <ol id="scan-progress-log" class="scan-progress-log" aria-label="Scan-Protokoll"></ol>
+        </div>
         <div id="scan-status-live" class="visually-hidden" aria-live="polite"></div>
       </section>
 
@@ -318,7 +337,49 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         if (job.status === 'failed' && job.error_message) {
           details.push(`Fehler: ${job.error_message}`);
         }
+        if (job.progress && Number(job.progress.total || 0) > 0 && isActiveScanJob(job)) {
+          details.push(
+            `Fortschritt: ${job.progress.current}/${job.progress.total} Systeme · ${Math.round(job.progress.percent || 0)}%`
+          );
+        }
         return details.join(' | ');
+      }
+
+      function renderScanProgress(job) {
+        const container = document.getElementById('scan-progress');
+        const phase = document.getElementById('scan-progress-phase');
+        const percentLabel = document.getElementById('scan-progress-percent');
+        const bar = document.getElementById('scan-progress-bar');
+        const fill = document.getElementById('scan-progress-fill');
+        const log = document.getElementById('scan-progress-log');
+        const progress = job?.progress;
+
+        if (!job || !progress) {
+          container.hidden = true;
+          return;
+        }
+
+        const percent = Math.max(0, Math.min(100, Number(progress.percent || 0)));
+        const events = Array.isArray(progress.events) ? progress.events : [];
+        container.hidden = false;
+        phase.textContent = progress.message || progress.phase || 'Fortschritt wird ermittelt.';
+        percentLabel.textContent = `${Math.round(percent)}%`;
+        bar.setAttribute('aria-valuenow', String(Math.round(percent)));
+        fill.style.width = `${percent}%`;
+
+        if (events.length === 0) {
+          log.innerHTML = '<li class="scan-progress-event">Für diesen älteren Lauf sind keine Logzeilen gespeichert.</li>';
+          return;
+        }
+        log.innerHTML = [...events]
+          .reverse()
+          .map((event) => `
+            <li class="scan-progress-event scan-progress-event-${escapeHtml(event.level || 'info')}">
+              <time datetime="${escapeHtml(event.created_at || '')}">${escapeHtml(formatDateTime(event.created_at))}</time>
+              <span>${escapeHtml(event.message || event.phase || 'Scan-Schritt')}</span>
+            </li>
+          `)
+          .join('');
       }
 
       function renderScanStatus(job) {
@@ -337,6 +398,7 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
           : 'Noch kein manueller Vollscan registriert. Starte den ersten Lauf, um Warteschlange, Fortschritt und Ergebnis sichtbar zu machen.';
         details.textContent = buildScanStatusDetails(job);
         live.textContent = message.textContent;
+        renderScanProgress(job);
 
         if (job && job.status === 'queued') {
           button.disabled = true;

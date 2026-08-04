@@ -31,6 +31,7 @@ from app.repositories.store import (
     get_latest_manual_scan_job,
     get_manual_scan_job,
     get_matching_queued_manual_scan_job,
+    get_repository_by_full_name,
     get_running_manual_scan_job,
     is_manual_scan_cancel_requested,
     is_manual_scan_pause_requested,
@@ -48,6 +49,7 @@ from app.services.orchestrator import ScanOrchestrator
 from app.services.scan_control import ScanCanceledError, ScanPausedError
 
 LOGGER = logging.getLogger(__name__)
+TARGETED_SCAN_PRIORITY = 80
 INTERRUPTED_SCAN_MESSAGE = (
     "Scan runner restarted before this scan completed. The replacement worker will resume from "
     "the newest durable checkpoint."
@@ -64,6 +66,7 @@ def enqueue_manual_scan(session: Session, request: ScanRequest) -> tuple[ManualS
     understand.
     """
 
+    request = _normalize_request_for_queue(session, request)
     duplicate_job = get_matching_queued_manual_scan_job(session, request)
     if duplicate_job is not None:
         return duplicate_job, False
@@ -99,6 +102,43 @@ def enqueue_manual_scan(session: Session, request: ScanRequest) -> tuple[ManualS
         percent=0.0,
     )
     return job, True
+
+
+def _normalize_request_for_queue(session: Session, request: ScanRequest) -> ScanRequest:
+    """
+    Tighten targeted scans before they hit the durable queue.
+
+    Why this exists:
+    Operators expect an Einzel-Scan to interrupt a broad platform scan and to scan only the chosen
+    asset source. Older browser sessions or API clients can still send all sources for a target, so
+    the queue normalizes that intent using the persisted repository source type.
+    """
+
+    if not request.repository_full_name:
+        return request
+
+    updates: dict[str, object] = {
+        "pause_active": True,
+        "priority": max(request.priority, TARGETED_SCAN_PRIORITY),
+    }
+    repository = get_repository_by_full_name(session, request.repository_full_name)
+    source = _scan_source_for_repository_source_type(repository.source_type if repository else "")
+    if source is not None:
+        updates["scan_sources"] = [source]
+    return request.model_copy(update=updates)
+
+
+def _scan_source_for_repository_source_type(source_type: str) -> str | None:
+    """Map persisted asset source types back to the public scan source selector."""
+
+    normalized = source_type.strip().lower()
+    if normalized == "github":
+        return "github"
+    if normalized.startswith("unraid"):
+        return "unraid"
+    if normalized.startswith("homeassistant"):
+        return "homeassistant"
+    return None
 
 
 def pause_manual_scan_job(session: Session, job_id: int) -> ManualScanJobOut | None:

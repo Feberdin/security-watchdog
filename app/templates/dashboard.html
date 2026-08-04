@@ -1237,7 +1237,9 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
           repository_full_name: selectedFullName,
           include_archived: document.getElementById('scan-include-archived-checkbox').checked,
           force: document.getElementById('scan-force-checkbox').checked,
-          scan_sources: scanSources
+          scan_sources: scanSources,
+          priority: selectedFullName ? 80 : 0,
+          pause_active: Boolean(selectedFullName)
         };
       }
 

@@ -18,7 +18,7 @@ from sqlalchemy.pool import StaticPool
 
 import app.models.entities  # noqa: F401
 from app.db.base import Base
-from app.models.entities import ManualScanJobStatus
+from app.models.entities import ManualScanJobStatus, Repository
 from app.models.schemas import ScanProgressUpdate, ScanRequest, ScanResponse
 from app.repositories.store import claim_manual_scan_job, get_manual_scan_job
 from app.services import manual_scan_jobs
@@ -101,6 +101,52 @@ def test_enqueue_pre_deploy_scan_queues_behind_running_job_and_requests_pause() 
     assert stored_running_job.pause_requested is True
 
 
+def test_targeted_manual_scan_preempts_full_scan_and_normalizes_sources() -> None:
+    """An Einzel-Scan should pause a broad scan and avoid unrelated source inventories."""
+
+    session_factory = build_session_factory()
+    session = session_factory()
+    session.add(
+        Repository(
+            source_type="github",
+            owner="Feberdin",
+            name="Codex-to-Unraid",
+            full_name="Feberdin/Codex-to-Unraid",
+            local_path="/tmp/codex-to-unraid",
+        )
+    )
+    session.commit()
+
+    full_scan_job, _ = manual_scan_jobs.enqueue_manual_scan(
+        session,
+        ScanRequest(repository_full_name=None, include_archived=False, force=True),
+    )
+    session.commit()
+    running_job = claim_manual_scan_job(session, job_id=full_scan_job.id)
+    session.commit()
+
+    targeted_job, created = manual_scan_jobs.enqueue_manual_scan(
+        session,
+        ScanRequest(
+            repository_full_name="Feberdin/Codex-to-Unraid",
+            include_archived=False,
+            force=True,
+            scan_sources=["github", "unraid", "homeassistant"],
+        ),
+    )
+    session.commit()
+    stored_running_job = get_manual_scan_job(session, running_job.id if running_job else 0)
+
+    assert running_job is not None
+    assert created is True
+    assert targeted_job.id != full_scan_job.id
+    assert targeted_job.priority == 80
+    assert targeted_job.pause_requested is False
+    assert targeted_job.scan_sources_json == ["github"]
+    assert stored_running_job is not None
+    assert stored_running_job.pause_requested is True
+
+
 def test_claim_manual_scan_job_prefers_highest_priority_queued_job() -> None:
     """The queue worker should run urgent targeted jobs before older low-priority work."""
 
@@ -110,10 +156,9 @@ def test_claim_manual_scan_job_prefers_highest_priority_queued_job() -> None:
     low_priority_job, _ = manual_scan_jobs.enqueue_manual_scan(
         session,
         ScanRequest(
-            repository_full_name="Feberdin/old-low-priority",
+            repository_full_name=None,
             include_archived=False,
             force=True,
-            scan_sources=["github"],
             priority=0,
         ),
     )

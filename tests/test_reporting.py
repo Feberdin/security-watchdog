@@ -682,6 +682,160 @@ def test_build_high_risk_update_prompt_contains_safe_codex_rules() -> None:
     assert "If compatibility cannot be proven locally, do not force the update" in prompt
 
 
+def test_grouped_remediation_prompt_orders_groups_and_merges_owned_runtime_image() -> None:
+    """Full-scan prompts should group owned repos with matching owned Unraid images first."""
+
+    session = build_test_session()
+    commit_sha = "a" * 40
+    github_repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="security-watchdog",
+        full_name="Feberdin/security-watchdog",
+        local_path="/tmp/security-watchdog",
+        risk_score=82.5,
+        metadata_json={"fork": False},
+    )
+    owned_container = Repository(
+        source_type="unraid_docker",
+        owner="unraid",
+        name="security-watchdog",
+        full_name="unraid/security-watchdog",
+        local_path="",
+        risk_score=90.0,
+        metadata_json={
+            "image": "ghcr.io/feberdin/security-watchdog:latest",
+            "labels": {
+                "org.opencontainers.image.source": "https://github.com/Feberdin/security-watchdog",
+                "org.opencontainers.image.revision": commit_sha,
+            },
+        },
+    )
+    external_container = Repository(
+        source_type="unraid_docker",
+        owner="unraid",
+        name="watchtower",
+        full_name="unraid/watchtower",
+        local_path="",
+        risk_score=95.0,
+        metadata_json={"image": "containrrr/watchtower:latest"},
+    )
+    homeassistant_asset = Repository(
+        source_type="homeassistant",
+        owner="homeassistant",
+        name="hacs",
+        full_name="homeassistant/hacs",
+        local_path="",
+        risk_score=85.0,
+        metadata_json={"domain": "hacs"},
+    )
+    session.add_all([github_repository, owned_container, external_container, homeassistant_asset])
+    session.flush()
+    session.add(
+        ScanResult(
+            repository_id=github_repository.id,
+            scanner_name="repository_asset_scan",
+            status="success",
+            findings_count=1,
+            details_json={"commit_sha": commit_sha},
+            completed_at=datetime(2026, 8, 4, 9, 30, tzinfo=UTC),
+        )
+    )
+    dependency = Dependency(
+        repository_id=github_repository.id,
+        manifest_path="requirements.txt",
+        package_name="requests",
+        version="2.25.0",
+        ecosystem="pypi",
+    )
+    session.add(dependency)
+    session.flush()
+    vulnerability = Vulnerability(
+        source="osv",
+        source_identifier="CVE-2026-0001",
+        package_name="requests",
+        ecosystem="pypi",
+        summary="Example vulnerability",
+        severity="high",
+    )
+    session.add(vulnerability)
+    session.flush()
+    session.add(
+        DependencyVulnerability(
+            dependency_id=dependency.id,
+            vulnerability_id=vulnerability.id,
+            risk_score=82.5,
+            match_reason="Unit test match",
+        )
+    )
+    session.add_all(
+        [
+            Alert(
+                repository_id=owned_container.id,
+                title="Unraid container vulnerability in security-watchdog",
+                description="Runtime image package vulnerability.",
+                severity="critical",
+                risk_score=90.0,
+                fingerprint="owned-container-critical",
+                status="open",
+                source_type="unraid_container",
+                metadata_json={
+                    "vulnerability_id": "CVE-2026-1111",
+                    "package_name": "openssl",
+                    "target": "ghcr.io/feberdin/security-watchdog:latest",
+                },
+            ),
+            Alert(
+                repository_id=external_container.id,
+                title="Unraid container vulnerability in watchtower",
+                description="External runtime image vulnerability.",
+                severity="critical",
+                risk_score=95.0,
+                fingerprint="external-container-critical",
+                status="open",
+                source_type="unraid_container",
+                metadata_json={
+                    "vulnerability_id": "CVE-2026-2222",
+                    "package_name": "docker",
+                    "target": "containrrr/watchtower:latest",
+                },
+            ),
+            Alert(
+                repository_id=homeassistant_asset.id,
+                title="Home Assistant secret finding",
+                description="High-confidence Home Assistant token pattern.",
+                severity="high",
+                risk_score=85.0,
+                fingerprint="homeassistant-token",
+                status="open",
+                source_type="homeassistant_secret",
+                metadata_json={
+                    "detector": "github_token",
+                    "content_source": "working_tree",
+                    "file_path": ".storage/core.config_entries",
+                },
+            ),
+        ]
+    )
+    session.commit()
+
+    prompt = ReportingService(version_catalog=ExplodingVersionCatalog()).build_grouped_remediation_prompt(
+        session
+    )
+
+    own_index = prompt.index("## Eigene GitHub-Repos und eigene Unraid-Container")
+    external_index = prompt.index("## Fremde oder nicht zugeordnete Unraid-Container")
+    homeassistant_index = prompt.index("## Home Assistant")
+    assert own_index < external_index < homeassistant_index
+    assert "## Eigene GitHub-Repos und eigene Unraid-Container derselben Source: Feberdin/security-watchdog" in prompt
+    assert "System: Feberdin/security-watchdog" in prompt
+    assert "System: unraid/security-watchdog" in prompt
+    assert "GitHub scan commit and Unraid image revision match" in prompt
+    assert "Create one branch and PR in `Feberdin/security-watchdog`" in prompt
+    assert "System: unraid/watchtower" in prompt
+    assert "System: homeassistant/hacs" in prompt
+
+
 def test_high_risk_update_queue_marks_constraints_for_review() -> None:
     """Constraint drift should tell Codex to inspect compatibility before changing ranges."""
 

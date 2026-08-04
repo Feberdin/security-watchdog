@@ -111,6 +111,30 @@ def test_daily_security_check_endpoint_returns_codex_runbook() -> None:
     assert "daily Security Watchdog maintenance task" in payload["codex_prompt"]
 
 
+def test_grouped_remediation_prompt_endpoint_returns_codex_prompt() -> None:
+    """The dashboard should be able to fetch the grouped full-scan remediation prompt."""
+
+    session_factory = build_session_factory()
+
+    def override_db_session() -> Generator[Session, None, None]:
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app = FastAPI()
+    app.include_router(api_router)
+    app.dependency_overrides[get_db_session] = override_db_session
+
+    response = TestClient(app).get("/automation/grouped-remediation/codex-prompt?limit=5")
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["title"] == "Codex Grouped Security Watchdog Remediation"
+    assert "grouped Security Watchdog remediation queue is currently empty" in payload["prompt"]
+
+
 def test_systems_endpoint_skips_latest_version_lookup_by_default(monkeypatch) -> None:
     """Dashboard inventory must return from persisted data instead of blocking on registries."""
 

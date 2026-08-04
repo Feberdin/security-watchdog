@@ -10,7 +10,7 @@ Debugging: If a dashboard card looks wrong, compare the raw query result with th
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -47,6 +47,27 @@ SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "none": 0}
 QUEUE_PRIORITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1}
 DEFAULT_VERSION_CATALOG = VersionCatalogService()
 DAILY_AUTOMATION_API_VERSION = "2026-07-30"
+
+
+@dataclass(frozen=True)
+class _GroupedRemediationPromptItem:
+    """Internal prompt row that keeps ORM-only evidence next to the public task DTO."""
+
+    repository: Repository
+    system: SystemInventoryOut
+    task: HighRiskSystemUpdateOut
+
+
+@dataclass
+class _GroupedRemediationPromptGroup:
+    """Internal bucket used to format one source-aware Codex remediation section."""
+
+    category_rank: int
+    category_title: str
+    group_key: str
+    display_title: str
+    source_repository: str | None
+    items: list[_GroupedRemediationPromptItem]
 
 
 class ReportingService:
@@ -594,6 +615,78 @@ class ReportingService:
             "broker approval policy allows it.\n"
         )
 
+    def build_grouped_remediation_prompt(
+        self,
+        session: Session,
+        *,
+        limit: int = 200,
+    ) -> str:
+        """
+        Generate a source-grouped Codex prompt for a full post-scan remediation run.
+
+        Why this exists:
+        The flat high-risk queue is useful for a daily trickle of updates, but a full manual scan
+        should produce one operator-ready prompt that keeps owned GitHub repos and their owned
+        Unraid runtime images together. The prompt is built from persisted scan evidence only, so it
+        stays fast after a large scan and does not perform live latest-version registry lookups.
+        """
+
+        items = self._build_grouped_remediation_prompt_items(session)
+        if not items:
+            return (
+                "You are Codex working in the Feberdin GitHub environment.\n\n"
+                "The grouped Security Watchdog remediation queue is currently empty. Do not make repository "
+                "changes. Run a fresh full scan first, then fetch this prompt again if new findings appear.\n"
+            )
+
+        grouped_items = self._group_remediation_prompt_items(items[:limit])
+        group_blocks = [self._format_grouped_remediation_prompt_group(group) for group in grouped_items]
+        omitted_count = max(len(items) - limit, 0)
+        omitted_block = (
+            f"\n\nNote: {omitted_count} lower-priority system(s) were omitted by the endpoint limit. "
+            "Increase the `limit` query parameter only after the highest groups are handled.\n"
+            if omitted_count
+            else ""
+        )
+        return (
+            "You are Codex acting as a senior DevSecOps engineer and secure software maintainer in the "
+            "Feberdin GitHub environment.\n\n"
+            "Goal:\n"
+            "Process the grouped Security Watchdog findings from the latest full scan. Work in this exact group "
+            "order: owned GitHub repositories plus their owned Unraid containers, external or unmapped Unraid "
+            "containers, Home Assistant assets, then any remaining sources. Within every group, start with the "
+            "highest severity and risk score.\n\n"
+            "Global operating rules:\n"
+            "- Work one source repository at a time. Keep one reviewable branch and pull request per owned source "
+            "repository.\n"
+            "- For owned GitHub repos and owned Unraid containers with the same source repository, handle them "
+            "together only when the scan commit and image revision evidence match. If they differ, fix the source "
+            "repo first and explicitly note which image deployment or rescan is needed afterward.\n"
+            "- Do not create branches or pull requests for forks, external repositories, external container images, "
+            "or Home Assistant assets without a managed source repository.\n"
+            "- For advisory-only targets, produce upstream issue text, image update guidance, replacement/pinning "
+            "guidance, or a scan-exclusion recommendation instead of code changes.\n"
+            f"{self._format_guardrails_for_prompt(self._build_update_guardrails())}"
+            "- Run local tests, type checks, linters, builds, and repository-specific security checks before pushing.\n"
+            "- After each push, wait for CI for the exact pushed commit and fix CI failures before moving to the "
+            "next repository.\n"
+            "- Never commit secrets, private debug exports, .env files with real values, credentials, tokens, or logs "
+            "that contain secret material.\n"
+            "- For Docker or Unraid deployments, use only the `unraid_deploy` MCP broker flow with plan and approval. "
+            "Do not use SSH, direct Docker CLI, raw HTTP deployment calls, or root shells.\n\n"
+            f"Prompt generated at: {datetime.now(UTC).isoformat()}\n"
+            f"System count in prompt: {min(len(items), limit)}\n"
+            f"{omitted_block}\n"
+            "Grouped remediation queue:\n"
+            f"{'\n\n'.join(group_blocks)}\n\n"
+            "End state expected:\n"
+            "- Every owned repository that changed has branch, commit, PR link, local check results, and exact-commit "
+            "CI result.\n"
+            "- Every external or unmapped target has a clear advisory, upstream issue draft, replacement guidance, "
+            "or scan-exclusion recommendation.\n"
+            "- Remaining risk is listed with owner, blocker, evidence, and next manual decision.\n"
+        )
+
     def _build_update_guardrails(self) -> list[str]:
         """Return the safety rules that prevent blind version-number-only updates."""
 
@@ -617,6 +710,352 @@ class ReportingService:
         """Format guardrails as prompt bullets without duplicating wording in multiple call sites."""
 
         return "".join(f"- {guardrail}\n" for guardrail in guardrails)
+
+    def _build_grouped_remediation_prompt_items(
+        self,
+        session: Session,
+    ) -> list[_GroupedRemediationPromptItem]:
+        """Build prompt items without live registry lookups, then sort them by user-visible priority."""
+
+        items: list[_GroupedRemediationPromptItem] = []
+        for repository in self._load_repositories_with_inventory(session):
+            system = self._build_system_entry(repository, resolve_latest_versions=False)
+            task = self._build_high_risk_update_task(system)
+            if task is None:
+                continue
+            items.append(
+                _GroupedRemediationPromptItem(
+                    repository=repository,
+                    system=system,
+                    task=task,
+                )
+            )
+        return sorted(
+            items,
+            key=lambda item: (
+                -self._group_category_rank(item),
+                QUEUE_PRIORITY_ORDER.get(item.task.priority, 0),
+                item.task.risk_score,
+                item.system.open_alert_count,
+                item.task.full_name.lower(),
+            ),
+            reverse=True,
+        )
+
+    def _group_remediation_prompt_items(
+        self,
+        items: list[_GroupedRemediationPromptItem],
+    ) -> list[_GroupedRemediationPromptGroup]:
+        """Group prompt rows by operator ownership and source repository."""
+
+        groups_by_key: dict[tuple[int, str], _GroupedRemediationPromptGroup] = {}
+        for item in items:
+            category_rank, category_title, group_key, display_title, source_repository = (
+                self._classify_grouped_prompt_item(item)
+            )
+            key = (category_rank, group_key)
+            group = groups_by_key.get(key)
+            if group is None:
+                group = _GroupedRemediationPromptGroup(
+                    category_rank=category_rank,
+                    category_title=category_title,
+                    group_key=group_key,
+                    display_title=display_title,
+                    source_repository=source_repository,
+                    items=[],
+                )
+                groups_by_key[key] = group
+            group.items.append(item)
+
+        groups = list(groups_by_key.values())
+        for group in groups:
+            group.items.sort(key=self._grouped_item_sort_key, reverse=True)
+        groups.sort(key=self._group_sort_key)
+        return groups
+
+    def _classify_grouped_prompt_item(
+        self,
+        item: _GroupedRemediationPromptItem,
+    ) -> tuple[int, str, str, str, str | None]:
+        """Return the user-requested remediation group for one task."""
+
+        task = item.task
+        source_type = task.source_type
+        source_repository = task.remediation.source_repository
+        if source_type.startswith("homeassistant"):
+            group_key = source_repository or task.full_name
+            return (
+                2,
+                "Home Assistant",
+                group_key,
+                group_key,
+                source_repository,
+            )
+        if self._is_owned_source_remediation_task(task):
+            group_key = source_repository or task.full_name
+            return (
+                0,
+                "Eigene GitHub-Repos und eigene Unraid-Container derselben Source",
+                group_key,
+                group_key,
+                source_repository,
+            )
+        if source_type.startswith("unraid"):
+            target = task.remediation.target or task.full_name
+            return (
+                1,
+                "Fremde oder nicht zugeordnete Unraid-Container",
+                task.full_name,
+                target,
+                source_repository,
+            )
+        return (
+            3,
+            "Sonstige Quellen",
+            source_repository or task.full_name,
+            source_repository or task.full_name,
+            source_repository,
+        )
+
+    def _is_owned_source_remediation_task(self, task: HighRiskSystemUpdateOut) -> bool:
+        """Return true when a task can be safely routed to an owned source repository."""
+
+        source_repository = task.remediation.source_repository
+        if not source_repository or not task.remediation.pull_request_allowed:
+            return False
+        if task.source_type == "github" and task.remediation.ownership == "owned":
+            return True
+        return task.source_type.startswith("unraid") and task.remediation.ownership == "owned_image"
+
+    def _group_category_rank(self, item: _GroupedRemediationPromptItem) -> int:
+        """Expose the category rank without rebuilding grouped dictionaries."""
+
+        category_rank, _title, _group_key, _display_title, _source_repository = (
+            self._classify_grouped_prompt_item(item)
+        )
+        return category_rank
+
+    def _grouped_item_sort_key(
+        self,
+        item: _GroupedRemediationPromptItem,
+    ) -> tuple[int, float, int, str]:
+        """Sort tasks inside a group by severity, risk, alert count, and stable name."""
+
+        return (
+            QUEUE_PRIORITY_ORDER.get(item.task.priority, 0),
+            item.task.risk_score,
+            item.system.open_alert_count,
+            item.task.full_name.lower(),
+        )
+
+    def _group_sort_key(self, group: _GroupedRemediationPromptGroup) -> tuple[int, int, float, int, str]:
+        """Sort groups by requested category first, then strongest security signal."""
+
+        strongest_priority = max(
+            QUEUE_PRIORITY_ORDER.get(item.task.priority, 0)
+            for item in group.items
+        )
+        strongest_risk = max(item.task.risk_score for item in group.items)
+        open_alerts = sum(item.system.open_alert_count for item in group.items)
+        return (
+            group.category_rank,
+            -strongest_priority,
+            -strongest_risk,
+            -open_alerts,
+            group.display_title.lower(),
+        )
+
+    def _format_grouped_remediation_prompt_group(
+        self,
+        group: _GroupedRemediationPromptGroup,
+    ) -> str:
+        """Format one grouped remediation section for a paste-ready Codex prompt."""
+
+        strongest_priority = max(
+            group.items,
+            key=lambda item: (
+                QUEUE_PRIORITY_ORDER.get(item.task.priority, 0),
+                item.task.risk_score,
+            ),
+        ).task.priority
+        lines = [
+            f"## {group.category_title}: {group.display_title}",
+            f"- Group priority: {strongest_priority}",
+            f"- Highest risk score: {max(item.task.risk_score for item in group.items):.1f}",
+            f"- Open actionable alerts: {sum(item.system.open_alert_count for item in group.items)}",
+            f"- Source repository: {group.source_repository or 'not mapped'}",
+            f"- Source stand: {self._format_group_revision_evidence(group.items)}",
+            "- Required action:",
+            self._format_group_required_action(group),
+            "- Systems in this group:",
+        ]
+        for item in group.items:
+            lines.extend(self._format_grouped_remediation_prompt_item(item))
+        return "\n".join(lines)
+
+    def _format_group_required_action(
+        self,
+        group: _GroupedRemediationPromptGroup,
+    ) -> str:
+        """Return one compact instruction that matches the group's safest remediation channel."""
+
+        if group.category_rank == 0 and group.source_repository:
+            return (
+                f"  Create one branch and PR in `{group.source_repository}`. Fix source code, Dockerfile, "
+                "lockfiles, workflows, and tests there; do not patch the running Unraid container."
+            )
+        if group.category_rank == 1:
+            return (
+                "  Do not change code automatically. Prepare an advisory, upstream issue draft, image update, "
+                "replacement, pinning, or scan-exclusion recommendation."
+            )
+        if group.category_rank == 2:
+            if group.source_repository:
+                return (
+                    f"  Treat this as Home Assistant work mapped to `{group.source_repository}`. Run Hassfest "
+                    "or the repository's documented checks before proposing a PR."
+                )
+            return (
+                "  Treat this as Home Assistant advisory-only work unless a managed source repository is mapped."
+            )
+        return "  Follow each system's remediation policy and stop before unsafe ownership assumptions."
+
+    def _format_grouped_remediation_prompt_item(
+        self,
+        item: _GroupedRemediationPromptItem,
+    ) -> list[str]:
+        """Format one system inside a grouped prompt without dumping the entire dashboard payload."""
+
+        task = item.task
+        system = item.system
+        lines = [
+            f"  - System: {task.full_name}",
+            f"    Display name: {task.display_name}",
+            f"    Source type: {task.source_type}",
+            f"    Repository/System id: {task.repository_id}",
+            f"    Priority: {task.priority}",
+            f"    Risk score: {task.risk_score}",
+            f"    Last scanned at: {system.last_scanned_at or 'unknown'}",
+            f"    Reason: {task.reason}",
+            "    Remediation policy:",
+            f"      Ownership: {task.remediation.ownership}",
+            f"      Mode: {task.remediation.mode}",
+            f"      Target: {task.remediation.target or 'n/a'}",
+            f"      Source repository: {task.remediation.source_repository or 'unknown'}",
+            f"      Pull request allowed: {'yes' if task.remediation.pull_request_allowed else 'no'}",
+            f"      Issue recommended: {'yes' if task.remediation.issue_recommended else 'no'}",
+            f"      Summary: {task.remediation.summary}",
+        ]
+        if task.dependencies:
+            lines.append("    Dependency actions:")
+            for dependency in task.dependencies[:10]:
+                lines.extend(
+                    [
+                        f"      - Package: {dependency.package_name}",
+                        f"        Ecosystem: {dependency.ecosystem}",
+                        f"        Manifest: {dependency.manifest_path}",
+                        f"        Current version: {dependency.current_version}",
+                        f"        Target version: {dependency.target_version or 'unknown'}",
+                        f"        Latest status: {dependency.latest_version_status}",
+                        f"        Risk severity: {dependency.risk_severity}",
+                        f"        Risk score: {dependency.risk_score}",
+                        f"        Vulnerabilities: {', '.join(dependency.vulnerability_ids) or 'none listed'}",
+                        f"        Previously compromised: {'yes' if dependency.was_compromised else 'no'}",
+                        f"        Action: {dependency.action}",
+                    ]
+                )
+        if task.runtime_findings:
+            lines.append("    Runtime, image, or secret findings:")
+            for finding in task.runtime_findings[:10]:
+                lines.extend(
+                    [
+                        f"      - Finding: {finding.title}",
+                        f"        Source type: {finding.source_type}",
+                        f"        Severity: {finding.severity}",
+                        f"        Risk score: {finding.risk_score}",
+                        f"        Package: {finding.package_name or 'n/a'}",
+                        f"        Installed version: {finding.installed_version or 'n/a'}",
+                        f"        Fix version: {finding.fix_version or 'unknown'}",
+                        f"        Target: {finding.target or 'n/a'}",
+                    ]
+                )
+        return lines
+
+    def _format_group_revision_evidence(
+        self,
+        items: list[_GroupedRemediationPromptItem],
+    ) -> str:
+        """
+        Summarize Git scan commits and image revisions so same-source grouping stays explicit.
+
+        Example:
+        A GitHub repo scanned at commit `abc...` and an owned Unraid image labeled with the same
+        OCI revision can be remediated as one source unit; differing values mean the agent should
+        keep the image deployment/rescan step separate from the source fix.
+        """
+
+        github_commits = sorted(
+            {
+                commit
+                for item in items
+                if item.task.source_type == "github"
+                for commit in [self._latest_successful_repository_scan_commit(item.repository)]
+                if commit
+            }
+        )
+        image_revisions = sorted(
+            {
+                revision
+                for item in items
+                if item.task.source_type.startswith("unraid")
+                for revision in [self._container_image_revision(item.repository)]
+                if revision
+            }
+        )
+        if github_commits and image_revisions and set(github_commits) == set(image_revisions):
+            return (
+                "GitHub scan commit and Unraid image revision match "
+                f"({', '.join(commit[:12] for commit in github_commits)})."
+            )
+        details = []
+        if github_commits:
+            details.append(f"GitHub scan commit(s): {', '.join(commit[:12] for commit in github_commits)}")
+        if image_revisions:
+            details.append(f"Unraid image revision(s): {', '.join(revision[:12] for revision in image_revisions)}")
+        if not details:
+            return "No commit or image revision evidence stored; verify source mapping before grouped changes."
+        details.append("Treat differing revisions as separate deploy/rescan evidence.")
+        return "; ".join(details)
+
+    def _latest_successful_repository_scan_commit(self, repository: Repository) -> str | None:
+        """Return the newest full commit SHA recorded for a successful GitHub asset scan."""
+
+        for result in sorted(
+            repository.scan_results,
+            key=lambda item: self._normalize_datetime(item.completed_at) or datetime.min.replace(tzinfo=UTC),
+            reverse=True,
+        ):
+            if result.scanner_name != "repository_asset_scan" or result.status != "success":
+                continue
+            commit_sha = str((result.details_json or {}).get("commit_sha") or "").strip().lower()
+            if len(commit_sha) == 40 and all(character in "0123456789abcdef" for character in commit_sha):
+                return commit_sha
+        return None
+
+    def _container_image_revision(self, repository: Repository) -> str | None:
+        """Return the best OCI revision-like value stored for an Unraid image asset."""
+
+        metadata = repository.metadata_json or {}
+        for key in ("image_revision", "revision", "container_image_revision"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip().lower()
+        labels = metadata.get("labels")
+        if isinstance(labels, dict):
+            value = labels.get("org.opencontainers.image.revision")
+            if isinstance(value, str) and value.strip():
+                return value.strip().lower()
+        return None
 
     def _format_remediation_policy_block(self, remediation: RemediationPlanOut) -> str:
         """Format the backend remediation decision as an explicit Codex policy block."""

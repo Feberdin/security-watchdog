@@ -341,6 +341,19 @@ def get_high_risk_update_prompt(
     )
 
 
+@router.get("/automation/grouped-remediation/codex-prompt", response_model=CodexPromptOut)
+def get_grouped_remediation_prompt(
+    limit: int = Query(default=200, ge=1, le=500),
+    session: Session = Depends(get_db_session),
+) -> CodexPromptOut:
+    """Generate the full-scan remediation prompt grouped by ownership and runtime source."""
+
+    return CodexPromptOut(
+        title="Codex Grouped Security Watchdog Remediation",
+        prompt=ReportingService().build_grouped_remediation_prompt(session, limit=limit),
+    )
+
+
 @router.get("/automation/daily-security-check", response_model=DailySecurityAutomationOut)
 def get_daily_security_automation_runbook(
     limit: int = Query(default=25, ge=1, le=100),

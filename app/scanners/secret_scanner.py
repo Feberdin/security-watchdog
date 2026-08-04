@@ -25,7 +25,6 @@ SKIPPED_DIRECTORIES = {
     ".git",
     ".mypy_cache",
     ".tmp_venv",
-    ".venv",
     ".next",
     ".pytest_cache",
     ".ruff_cache",

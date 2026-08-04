@@ -306,10 +306,16 @@ def update_repository_scan_settings_bulk(
 
 
 @router.get("/systems", response_model=list[SystemInventoryOut])
-def get_systems(session: Session = Depends(get_db_session)) -> list[SystemInventoryOut]:
+def get_systems(
+    resolve_latest_versions: bool = Query(default=False),
+    session: Session = Depends(get_db_session),
+) -> list[SystemInventoryOut]:
     """Return all scanned systems with dependency details for the dashboard accordion view."""
 
-    return ReportingService().build_system_inventory(session)
+    return ReportingService().build_system_inventory(
+        session,
+        resolve_latest_versions=resolve_latest_versions,
+    )
 
 
 @router.get("/automation/high-risk-updates", response_model=HighRiskUpdateQueueOut)

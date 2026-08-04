@@ -253,7 +253,7 @@ def get_running_manual_scan_job(session: Session) -> ManualScanJob | None:
 def get_matching_queued_manual_scan_job(session: Session, request: ScanRequest) -> ManualScanJob | None:
     """Return an equivalent queued job so repeated clicks do not flood the queue."""
 
-    return session.scalar(
+    candidates = session.scalars(
         select(ManualScanJob)
         .where(
             ManualScanJob.status == ManualScanJobStatus.QUEUED.value,
@@ -262,7 +262,6 @@ def get_matching_queued_manual_scan_job(session: Session, request: ScanRequest) 
             else ManualScanJob.repository_full_name == request.repository_full_name,
             ManualScanJob.include_archived == request.include_archived,
             ManualScanJob.force == request.force,
-            ManualScanJob.scan_sources_json == request.scan_sources,
             ManualScanJob.purpose == request.purpose,
             ManualScanJob.target_commit_sha.is_(None)
             if request.target_commit_sha is None
@@ -270,8 +269,12 @@ def get_matching_queued_manual_scan_job(session: Session, request: ScanRequest) 
             ManualScanJob.refresh_image_cache == request.refresh_image_cache,
         )
         .order_by(desc(ManualScanJob.priority), ManualScanJob.requested_at.asc(), ManualScanJob.id.asc())
-        .limit(1)
-    )
+        .limit(25)
+    ).all()
+    for job in candidates:
+        if list(job.scan_sources_json or []) == list(request.scan_sources):
+            return job
+    return None
 
 
 def fail_running_manual_scan_jobs(session: Session, *, error_message: str) -> int:

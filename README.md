@@ -20,6 +20,7 @@ How to debug: Start with `LOG_LEVEL=DEBUG`, inspect `/health`, `/reports`, worke
 - Exports active alerts as SARIF 2.1.0 JSON for GitHub Code Scanning-compatible tooling.
 - Exposes REST endpoints and a browser dashboard.
 - Lets operators start full, source-specific, single-asset, and pre-deploy scans; pause, resume, or cancel manual scans; and disable irrelevant assets individually or in batches without deleting historical findings.
+- Classifies remediation ownership so Codex prompts only suggest Issue/PR work for owned repos or owned images with a mapped source repo; forks, external images, and unknown sources stay advisory-only or exclusion candidates.
 - Sends alerts to Slack, email, and GitHub issues.
 
 ## Quickstart
@@ -70,6 +71,8 @@ Key environment variables:
 - `DEPLOYMENT_GATE_MAX_BLOCKERS`: Maximum blocker details returned per response; counts always cover all findings.
 - `GITHUB_TOKEN`: GitHub token with access to the repositories you want to monitor.
 - `GITHUB_INCLUDE_FORKS`: Include forked GitHub repositories in repository scans and reports. Defaults to `false`, so forks such as large upstream mirrors stay out of the normal security queue.
+- `MANAGED_GITHUB_OWNERS`: Comma-separated GitHub owners where Codex may propose managed Issue/PR remediation. Defaults to `Feberdin`.
+- `MANAGED_CONTAINER_NAMESPACES`: Comma-separated container namespaces treated as owned images, for example `feberdin` for `ghcr.io/feberdin/...`. Owned images still need an OCI source label or manual mapping before PRs are allowed.
 - `SECRET_HISTORY_SCAN_ENABLED`: When `true`, public GitHub repositories are fetched with full history and scanned for secrets in old commits as well as the current tree.
 - `SECRET_HISTORY_MAX_COMMITS_PER_REPO`: Optional safety limit for history scanning. `0` means scan the full reachable history.
 - `DATABASE_URL`: PostgreSQL connection string.
@@ -103,8 +106,8 @@ restart or deployment. Queued work is claimed by descending `priority`, then req
 - `GET /repositories`: Repository-like assets, including Unraid and Home Assistant.
 - `PATCH /repositories/{repository_id}/scan-settings`: Set `scan_enabled` to include or exclude one asset from future scans and normal reports without deleting its history.
 - `PATCH /repositories/scan-settings/bulk`: Set `scan_enabled` for up to 500 selected assets in one operator action.
-- `GET /systems`: System-centric inventory for the dashboard with expandable dependency details and latest-version hints.
-- `GET /automation/high-risk-updates`: Prioritized update queue for high-risk and outdated dependencies.
+- `GET /systems`: System-centric inventory for the dashboard with expandable dependency details, latest-version hints, and a backend remediation policy per system.
+- `GET /automation/high-risk-updates`: Prioritized update queue for high-risk and outdated dependencies. Each task includes the same remediation policy so Codex can distinguish managed fixes from advisory-only work.
 - `GET /automation/high-risk-updates/codex-prompt`: Master prompt for a controlled Codex update run across queued repositories.
 - `GET /automation/daily-security-check`: Machine-readable runbook for the recurring Codex security task.
 - `GET /automation/deployment-security-gate/status`: Dashboard-safe gate status for one exact commit; no Broker token required.
@@ -171,6 +174,7 @@ For Home Assistant coverage:
 - `Manual scan resumed after a restart`: this is expected. Running jobs stay resumable and continue from committed asset outcomes after the worker restarts.
 - `Irrelevant repo keeps appearing`: disable it from the dashboard target selector or call `PATCH /repositories/{id}/scan-settings` with `{"scan_enabled": false}`. Disabled assets stay visible in `/repositories` so they can be re-enabled later.
 - `Many irrelevant repos keep appearing`: select them in the System Inventory and use `Auswahl ausschließen`, or call `PATCH /repositories/scan-settings/bulk` with the selected repository IDs.
+- `Codex prompt is advisory-only`: the system is external, a fork, or an owned image without a mapped source repository. Add an OCI label such as `org.opencontainers.image.source=https://github.com/Feberdin/<repo>` to owned images, or disable irrelevant forks from scanning.
 - `Deployment gate returns 401`: verify that the Broker sends the dedicated Bearer token configured through the secure secret flow.
 - `Deployment gate returns 503`: configure `SECURITY_WATCHDOG_DEPLOYMENT_GATE_TOKEN` or inspect API/database errors in the watchdog logs.
 - `Deployment gate returns indeterminate`: scan the exact requested full commit and ensure the aggregate scan is fresh and successful.

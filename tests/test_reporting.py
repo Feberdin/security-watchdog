@@ -344,6 +344,168 @@ def test_build_codex_remediation_prompt_contains_findings() -> None:
     assert "Feberdin/security-watchdog" in prompt
     assert "requests" in prompt
     assert "Previously compromised: yes" in prompt
+    assert "Pull request allowed: yes" in prompt
+    assert "Propose code changes only in `Feberdin/security-watchdog`" in prompt
+
+
+def test_system_inventory_marks_owned_github_repository_as_managed_fix() -> None:
+    """Owned non-fork GitHub repositories may receive Codex issue and PR prompts."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="watchlog",
+        full_name="Feberdin/watchlog",
+        local_path="/tmp/watchlog",
+        risk_score=75.0,
+        metadata_json={"fork": False},
+    )
+    session.add(repository)
+    session.commit()
+
+    systems = ReportingService(version_catalog=FakeVersionCatalog()).build_system_inventory(session)
+
+    remediation = systems[0].remediation
+    assert remediation.ownership == "owned"
+    assert remediation.mode == "managed_fix"
+    assert remediation.source_repository == "Feberdin/watchlog"
+    assert remediation.issue_recommended is True
+    assert remediation.pull_request_allowed is True
+
+
+def test_system_inventory_recommends_excluding_managed_forks() -> None:
+    """Managed-namespace forks should not produce automatic PR tasks by default."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="core",
+        full_name="Feberdin/core",
+        local_path="/tmp/core",
+        risk_score=95.0,
+        metadata_json={
+            "fork": True,
+            "parent": {"full_name": "home-assistant/core"},
+        },
+    )
+    session.add(repository)
+    session.commit()
+
+    prompt = ReportingService(version_catalog=FakeVersionCatalog()).build_codex_remediation_prompt(
+        session,
+        repository.id,
+    )
+
+    assert "Ownership: fork" in prompt
+    assert "Mode: exclude_recommended" in prompt
+    assert "Source repository: home-assistant/core" in prompt
+    assert "Pull request allowed: no" in prompt
+    assert "Scan exclusion recommended: yes" in prompt
+
+
+def test_unraid_owned_image_requires_source_mapping_before_pr() -> None:
+    """Owned image namespaces still need a source repository before Codex may propose code changes."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="unraid_docker",
+        owner="unraid",
+        name="Arr-Duplicates",
+        full_name="unraid/Arr-Duplicates",
+        local_path="",
+        risk_score=90.0,
+        metadata_json={"image": "ghcr.io/feberdin/arr-duplicates:latest"},
+    )
+    session.add(repository)
+    session.commit()
+
+    systems = ReportingService(version_catalog=FakeVersionCatalog()).build_system_inventory(session)
+
+    remediation = systems[0].remediation
+    assert remediation.ownership == "owned_image"
+    assert remediation.mode == "source_mapping_required"
+    assert remediation.target == "ghcr.io/feberdin/arr-duplicates:latest"
+    assert remediation.source_repository is None
+    assert remediation.pull_request_allowed is False
+
+
+def test_unraid_owned_image_with_oci_source_allows_source_repo_pr() -> None:
+    """OCI source labels let the Watchdog route image findings back to the owned source repo."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="unraid_docker",
+        owner="unraid",
+        name="security-watchdog",
+        full_name="unraid/security-watchdog",
+        local_path="",
+        risk_score=90.0,
+        metadata_json={
+            "image": "ghcr.io/feberdin/security-watchdog:latest",
+            "labels": {
+                "org.opencontainers.image.source": "https://github.com/Feberdin/security-watchdog",
+            },
+        },
+    )
+    session.add(repository)
+    session.commit()
+
+    systems = ReportingService(version_catalog=FakeVersionCatalog()).build_system_inventory(session)
+
+    remediation = systems[0].remediation
+    assert remediation.ownership == "owned_image"
+    assert remediation.mode == "managed_fix"
+    assert remediation.source_repository == "Feberdin/security-watchdog"
+    assert remediation.pull_request_allowed is True
+
+
+def test_codex_remediation_prompt_keeps_external_images_advisory_only() -> None:
+    """External runtime images should produce advisory instructions instead of PR instructions."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="unraid_docker",
+        owner="unraid",
+        name="watchtower",
+        full_name="unraid/watchtower",
+        local_path="",
+        risk_score=90.0,
+        metadata_json={"image": "containrrr/watchtower:latest"},
+    )
+    session.add(repository)
+    session.flush()
+    session.add(
+        Alert(
+            repository_id=repository.id,
+            title="Unraid container vulnerability in watchtower",
+            description="Moby authorization bypass vulnerability",
+            severity="critical",
+            risk_score=90.0,
+            fingerprint="external-image-remediation",
+            status="open",
+            source_type="unraid_container",
+            metadata_json={
+                "vulnerability_id": "CVE-2026-34040",
+                "package_name": "github.com/docker/docker",
+                "installed_version": "v24.0.7+incompatible",
+                "fix_version": "29.3.1",
+                "target": "containrrr/watchtower:latest",
+            },
+        )
+    )
+    session.commit()
+
+    prompt = ReportingService(version_catalog=FakeVersionCatalog()).build_codex_remediation_prompt(
+        session,
+        repository.id,
+    )
+
+    assert "Ownership: external" in prompt
+    assert "Pull request allowed: no" in prompt
+    assert "Do not create branches or pull requests for this target." in prompt
+    assert "CVE-2026-34040" in prompt
 
 
 def test_build_high_risk_update_queue_prioritizes_risky_outdated_dependencies() -> None:

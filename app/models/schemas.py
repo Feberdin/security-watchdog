@@ -177,6 +177,22 @@ class RuntimeFindingOut(BaseModel):
     last_seen_at: datetime | None = None
 
 
+class RemediationPlanOut(BaseModel):
+    """Policy decision that tells Codex whether it may propose code changes for a system."""
+
+    ownership: str = "unknown"
+    mode: str = "advisory_only"
+    target: str = ""
+    source_repository: str | None = None
+    issue_recommended: bool = False
+    pull_request_allowed: bool = False
+    scan_exclusion_recommended: bool = False
+    summary: str = "Unbekannter Ursprung: nur Advisory, keine automatische Änderung."
+    guidance: list[str] = Field(default_factory=list)
+    allowed_actions: list[str] = Field(default_factory=list)
+    blocked_actions: list[str] = Field(default_factory=list)
+
+
 class SystemInventoryOut(BaseModel):
     """One scanned system or asset plus its expandable dependency inventory."""
 
@@ -195,6 +211,7 @@ class SystemInventoryOut(BaseModel):
     summary: str = ""
     dependencies: list[DependencyInsightOut] = Field(default_factory=list)
     runtime_findings: list[RuntimeFindingOut] = Field(default_factory=list)
+    remediation: RemediationPlanOut = Field(default_factory=RemediationPlanOut)
 
 
 class HighRiskDependencyUpdateOut(BaseModel):
@@ -225,6 +242,7 @@ class HighRiskSystemUpdateOut(BaseModel):
     risk_score: float
     priority: str
     reason: str
+    remediation: RemediationPlanOut = Field(default_factory=RemediationPlanOut)
     dependencies: list[HighRiskDependencyUpdateOut] = Field(default_factory=list)
     runtime_findings: list[RuntimeFindingOut] = Field(default_factory=list)
 

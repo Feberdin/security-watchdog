@@ -22,7 +22,7 @@ from app.models.schemas import DeploymentSecurityGateRequest
 from app.services.deployment_security_gate import DeploymentSecurityGateService
 
 COMMIT_SHA = "a1" * 20
-TEST_GATE_TOKEN = "test-only-token"
+TEST_GATE_TOKEN = "dummy-token"
 
 
 def build_test_session() -> Session:

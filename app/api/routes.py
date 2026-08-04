@@ -54,6 +54,33 @@ router = APIRouter()
 LOGGER = logging.getLogger(__name__)
 
 
+def _normalize_broker_scan_status(status: str) -> str:
+    """Map internal/manual statuses to the strict Broker scan status contract.
+
+    Why exists: Broker schema validation accepts only queued/running/succeeded/failed. Older
+    repository scan states `paused` and `canceled` are translated into safe terminal/active
+    equivalents so the same endpoint can remain stable for dashboards while satisfying Broker
+    parsing constraints.
+    """
+
+    if status == "paused":
+        return "running"
+    if status == "canceled":
+        return "failed"
+    return status
+
+
+def _normalize_scan_job_output(job: ManualScanJobOut | None) -> ManualScanJobOut | None:
+    """Return scan job snapshot with Broker-compatible status semantics."""
+
+    if job is None:
+        return None
+    normalized_status = _normalize_broker_scan_status(job.status)
+    if normalized_status == job.status:
+        return job
+    return job.model_copy(update={"status": normalized_status})
+
+
 @router.get("/health")
 def healthcheck() -> dict[str, str]:
     """Simple liveness endpoint for Docker health checks and reverse proxies."""
@@ -76,10 +103,11 @@ def trigger_scan(
             message = "Manual scan accepted and queued for worker processing."
         else:
             message = "A manual scan is already queued or running; reusing the active job."
+        normalized_status = _normalize_broker_scan_status(scan_job.status)
         return ScanAcceptedResponse(
             message=message,
             job_id=scan_job.id,
-            status=scan_job.status,
+            status=normalized_status,
             status_url=str(http_request.url_for("get_scan_job", job_id=scan_job.id)),
         )
     except Exception as error:
@@ -110,7 +138,7 @@ def get_scan_job(job_id: int, session: Session = Depends(get_db_session)) -> Man
     job = get_manual_scan_job_out(session, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Manual scan job {job_id} was not found.")
-    return job
+    return _normalize_scan_job_output(job)
 
 
 @router.post("/scan-jobs/{job_id}/cancel", response_model=ManualScanJobOut)
@@ -455,7 +483,7 @@ def queue_pre_deploy_scan(
         return ScanAcceptedResponse(
             message=message,
             job_id=scan_job.id,
-            status=scan_job.status,
+            status=_normalize_broker_scan_status(scan_job.status),
             status_url=str(http_request.url_for("get_scan_job", job_id=scan_job.id)),
         )
     except Exception as error:

@@ -65,6 +65,31 @@ def test_skips_code_level_token_references(tmp_path):
     assert findings == []
 
 
+def test_skips_typed_dataclass_assignments(tmp_path):
+    """Pydantic/attrs-style typed defaults are config metadata, not committed secrets."""
+
+    sample = tmp_path / "model.py"
+    sample.write_text(
+        "smtp_password: str = \"\"\nAPI_KEY: str = \"\"\n",
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
+def test_skips_angle_bracket_placeholders(tmp_path):
+    """Markdown/docs placeholder secrets in angle brackets should not be treated as literals."""
+
+    sample = tmp_path / "README.md"
+    sample.write_text("SECURITY_WATCHDOG_GATE_TOKEN=<secure token>\n", encoding="utf-8")
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
 def test_skips_broker_secret_references(tmp_path):
     """Broker-managed secret references identify a value source, not a literal credential."""
 

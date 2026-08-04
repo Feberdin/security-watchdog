@@ -486,7 +486,13 @@ class SecretScanner:
         if match is None:
             return None
         name = match.group("name").strip().strip("'\"")
-        value = self._clean_assignment_value(match.group("value"))
+        raw_value = match.group("value")
+        normalized_value = raw_value.strip()
+
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_.]*\s*=", normalized_value):
+            normalized_value = normalized_value.split("=", 1)[1].strip()
+
+        value = self._clean_assignment_value(normalized_value)
         if not name or not value:
             return None
         return ParsedAssignment(name=name, value=value)
@@ -520,6 +526,9 @@ class SecretScanner:
 
         normalized_name = self._normalize_variable_name(assignment.name)
         value = assignment.value
+        if self._looks_like_code_expression(value):
+            return None
+
         if self._is_secret_name_field(normalized_name):
             if self._looks_safe_secret_name_reference_value(value):
                 return None
@@ -677,6 +686,19 @@ class SecretScanner:
             for part in parts
         )
 
+    def _looks_like_code_expression(self, value: str) -> bool:
+        """Return true when a parsed value is a code expression, not a hard-coded secret."""
+
+        normalized_value = value.strip().strip("'\"")
+        if not normalized_value:
+            return False
+
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_.]*\s*=\s+.+", normalized_value):
+            return True
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_.]*\s*\(", normalized_value):
+            return True
+        return False
+
     def _is_secret_reference_name_token(self, value: str) -> bool:
         """Return true when a plain string is shaped like a Broker secret name, not a secret value."""
 
@@ -693,6 +715,8 @@ class SecretScanner:
         if self._looks_placeholder_secret(normalized_value):
             return False
         if self._looks_safe_secret_name_reference_value(normalized_value):
+            return False
+        if self._looks_like_code_expression(normalized_value):
             return False
         if lowered_value in SAFE_LITERAL_VALUES:
             return False
@@ -848,6 +872,8 @@ class SecretScanner:
         if any(token in normalized_value for token in PLACEHOLDER_SECRET_TOKENS):
             return True
         if "{" in normalized_value and "}" in normalized_value:
+            return True
+        if normalized_value.startswith("<") and normalized_value.endswith(">"):
             return True
         if re.fullmatch(r"(?:self|this)\.[A-Za-z_][A-Za-z0-9_.]*\([^)]*\)", normalized_value):
             return True

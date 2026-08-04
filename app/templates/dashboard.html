@@ -1143,23 +1143,11 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         }
       }
 
-      async function loadDashboard() {
-        const [report, systems, repositories] = await Promise.all([
-          fetchJson('/reports'),
-          fetchJson('/systems'),
-          fetchJson('/repositories')
-        ]);
-
-        allSystems = systems;
-        allRepositories = repositories;
-        syncSelectedSystemIdsWithLoadedSystems();
+      function renderReport(report) {
         document.getElementById('metric-repositories').textContent = report.repository_count;
         document.getElementById('metric-dependencies').textContent = report.dependency_count;
         document.getElementById('metric-vulnerabilities').textContent = report.vulnerability_count;
         document.getElementById('metric-critical-alerts').textContent = report.critical_alert_count;
-
-        renderSystems();
-        renderScanControls();
 
         renderRows(
           'alert-list',
@@ -1184,6 +1172,49 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
             </div>
           `
         );
+      }
+
+      async function loadReport() {
+        try {
+          renderReport(await fetchJson('/reports'));
+        } catch (error) {
+          console.error(error);
+          showDashboardToast(`Reportdaten konnten nicht geladen werden: ${error.message}`, 'high');
+        }
+      }
+
+      async function loadRepositories() {
+        try {
+          allRepositories = await fetchJson('/repositories');
+          renderScanControls();
+        } catch (error) {
+          console.error(error);
+          showDashboardToast(`Repository-Liste konnte nicht geladen werden: ${error.message}`, 'high');
+        }
+      }
+
+      async function loadSystems() {
+        const target = document.getElementById('system-list');
+        if (!allSystems.length) {
+          target.innerHTML = '<p class="empty-state">Systemdaten werden geladen...</p>';
+        }
+        try {
+          allSystems = await fetchJson('/systems');
+          syncSelectedSystemIdsWithLoadedSystems();
+          renderSystems();
+        } catch (error) {
+          console.error(error);
+          target.innerHTML = '<p class="empty-state">Systemdaten konnten nicht geladen werden.</p>';
+          showDashboardToast(`Systemdaten konnten nicht geladen werden: ${error.message}`, 'high');
+        }
+      }
+
+      async function loadDashboard() {
+        await Promise.allSettled([
+          loadReport(),
+          loadSystems(),
+          loadRepositories()
+        ]);
       }
 
       function buildScanRequest({ fullName = null, sourceType = null } = {}) {

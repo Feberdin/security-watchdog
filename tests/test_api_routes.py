@@ -18,12 +18,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import app.api.routes as api_routes
 import app.models.entities  # noqa: F401
 from app.api.routes import router as api_router
 from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.session import get_db_session
-from app.models.entities import Repository
+from app.models.entities import Dependency, Repository
+from app.services.reporting import ReportingService
 
 
 def build_session_factory() -> sessionmaker[Session]:
@@ -107,6 +109,65 @@ def test_daily_security_check_endpoint_returns_codex_runbook() -> None:
     assert payload["source_endpoints"]["runbook"] == "/automation/daily-security-check"
     assert "Do not update solely because a target version is higher" in payload["guardrails"][0]
     assert "daily Security Watchdog maintenance task" in payload["codex_prompt"]
+
+
+def test_systems_endpoint_skips_latest_version_lookup_by_default(monkeypatch) -> None:
+    """Dashboard inventory must return from persisted data instead of blocking on registries."""
+
+    class ExplodingVersionCatalog:
+        """Fail if the route accidentally performs live latest-version lookups."""
+
+        def resolve_latest_version(self, ecosystem: str, package_name: str) -> None:
+            raise AssertionError(f"Unexpected registry lookup for {ecosystem}:{package_name}")
+
+    class FastDashboardReportingService(ReportingService):
+        """Inject the exploding catalog while keeping normal reporting behavior."""
+
+        def __init__(self) -> None:
+            super().__init__(version_catalog=ExplodingVersionCatalog())
+
+    session_factory = build_session_factory()
+    with session_factory() as session:
+        repository = Repository(
+            source_type="github",
+            owner="Feberdin",
+            name="security-watchdog",
+            full_name="Feberdin/security-watchdog",
+            local_path="/tmp/security-watchdog",
+            risk_score=10.0,
+        )
+        session.add(repository)
+        session.flush()
+        session.add(
+            Dependency(
+                repository_id=repository.id,
+                manifest_path="pyproject.toml",
+                package_name="fastapi",
+                version="0.115.0",
+                ecosystem="pypi",
+            )
+        )
+        session.commit()
+
+    def override_db_session() -> Generator[Session, None, None]:
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    monkeypatch.setattr(api_routes, "ReportingService", FastDashboardReportingService)
+
+    app = FastAPI()
+    app.include_router(api_router)
+    app.dependency_overrides[get_db_session] = override_db_session
+    response = TestClient(app).get("/systems")
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload[0]["full_name"] == "Feberdin/security-watchdog"
+    assert payload[0]["dependencies"][0]["latest_version"] is None
+    assert payload[0]["dependencies"][0]["latest_version_status"] == "skipped"
 
 
 def test_deployment_security_gate_requires_bearer_token_and_fails_closed() -> None:

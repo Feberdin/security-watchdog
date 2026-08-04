@@ -9,6 +9,7 @@ Debugging: If an endpoint behaves differently from the worker job, compare the s
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -18,7 +19,15 @@ from sqlalchemy.orm import Session
 from app.api.dependencies import require_deployment_gate_token
 from app.core.config import Settings, get_settings
 from app.db.session import get_db_session
-from app.models.entities import AIExtractedThreat, Alert, Dependency, Repository, ThreatArticle
+from app.models.entities import (
+    AIExtractedThreat,
+    Alert,
+    Dependency,
+    ManualScanJob,
+    ManualScanJobStatus,
+    Repository,
+    ThreatArticle,
+)
 from app.models.schemas import (
     AlertOut,
     CodexPromptOut,
@@ -28,6 +37,8 @@ from app.models.schemas import (
     DeploymentSecurityGateResponse,
     HighRiskUpdateQueueOut,
     ManualScanJobOut,
+    ManualScanQueueOverviewOut,
+    ManualScanQueuePositionOut,
     PreDeployScanRequest,
     ReportOut,
     RepositoryBulkScanSettingsRequest,
@@ -101,6 +112,44 @@ def get_latest_scan_job(session: Session = Depends(get_db_session)) -> ManualSca
     """Return the newest manual scan job so the dashboard can restore visible progress state."""
 
     return get_latest_manual_scan_job_out(session)
+
+
+@router.get("/scan-jobs/queue-overview", response_model=ManualScanQueueOverviewOut)
+def get_scan_queue_overview(
+    limit: int = Query(default=25, ge=1, le=200),
+    session: Session = Depends(get_db_session),
+) -> ManualScanQueueOverviewOut:
+    """Return the currently running manual scan and queued jobs sorted by priority."""
+
+    running_job = session.scalar(
+        select(ManualScanJob)
+        .where(ManualScanJob.status == ManualScanJobStatus.RUNNING.value)
+        .order_by(ManualScanJob.started_at.asc(), ManualScanJob.id.asc())
+        .limit(1)
+    )
+
+    queued_jobs = session.scalars(
+        select(ManualScanJob)
+        .where(ManualScanJob.status == ManualScanJobStatus.QUEUED.value)
+        .order_by(
+            ManualScanJob.priority.desc(),
+            ManualScanJob.requested_at.asc(),
+            ManualScanJob.id.asc(),
+        )
+        .limit(limit)
+    ).all()
+
+    running_job_out = get_manual_scan_job_out(session, running_job.id) if running_job else None
+    queued_out = [get_manual_scan_job_out(session, job.id) for job in queued_jobs if job is not None]
+    return ManualScanQueueOverviewOut(
+        generated_at=datetime.now(UTC),
+        current=running_job_out,
+        queue=[
+            ManualScanQueuePositionOut(position=index + 1, job=job)
+            for index, job in enumerate(queued_out)
+        ],
+        next_job=queued_out[0] if queued_out else None,
+    )
 
 
 @router.get("/scan-jobs/{job_id}", response_model=ManualScanJobOut)

@@ -52,6 +52,10 @@ INTERRUPTED_SCAN_MESSAGE = (
     "Scan runner restarted before this scan completed. The replacement worker will resume from "
     "the newest durable checkpoint."
 )
+AUTO_PRIORITY_FULL_SCAN = 0
+AUTO_PRIORITY_REPOSITORY_SCAN = 60
+AUTO_PRIORITY_GITHUB_ONLY = 25
+AUTO_PRIORITY_PRE_DEPLOY = 100
 
 
 def enqueue_manual_scan(session: Session, request: ScanRequest) -> tuple[ManualScanJob, bool]:
@@ -64,15 +68,24 @@ def enqueue_manual_scan(session: Session, request: ScanRequest) -> tuple[ManualS
     understand.
     """
 
+    request = request.model_copy(update={"priority": _resolve_auto_priority(request)})
+
     duplicate_job = get_matching_queued_manual_scan_job(session, request)
     if duplicate_job is not None:
         return duplicate_job, False
 
     active_job = get_active_manual_scan_job(session)
-    if active_job is not None and not _should_queue_behind_active_scan(active_job, request):
+    should_queue_behind_active = (
+        active_job is not None and _should_queue_behind_active_scan(active_job, request)
+    )
+
+    if active_job is not None and not should_queue_behind_active:
         return active_job, False
 
-    if request.pause_active:
+    active_priority = active_job.priority if active_job is not None else 0
+    auto_pause_when_queued = should_queue_behind_active and request.priority > active_priority
+
+    if should_queue_behind_active and (request.pause_active or auto_pause_when_queued):
         running_job = get_running_manual_scan_job(session)
         if running_job is not None:
             request_manual_scan_pause(session, job_id=running_job.id)
@@ -228,6 +241,24 @@ def _should_queue_behind_active_scan(active_job: ManualScanJob, request: ScanReq
     if request.repository_full_name and request.repository_full_name != active_job.repository_full_name:
         return True
     return request.priority > active_job.priority
+
+
+def _resolve_auto_priority(request: ScanRequest) -> int:
+    """Determine a deterministic default priority when clients do not set one explicitly."""
+
+    if request.priority:
+        return request.priority
+
+    if request.purpose == "pre_deploy":
+        return AUTO_PRIORITY_PRE_DEPLOY
+
+    if request.repository_full_name is not None:
+        return AUTO_PRIORITY_REPOSITORY_SCAN
+
+    if request.scan_sources == ["github"]:
+        return AUTO_PRIORITY_GITHUB_ONLY
+
+    return AUTO_PRIORITY_FULL_SCAN
 
 
 def _build_queued_message(job: ManualScanJob) -> str:

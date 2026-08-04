@@ -80,6 +80,56 @@ def test_post_scan_returns_accepted_and_leaves_job_queued_for_worker() -> None:
     assert latest_job["progress"]["events"][0]["message"].startswith("Scan wurde eingereiht")
 
 
+def test_scan_queue_overview_orders_by_priority_and_exposes_next_job() -> None:
+    """The dashboard can query current/queued work with explicit priority order."""
+
+    session_factory = build_session_factory()
+
+    def override_db_session() -> Generator[Session, None, None]:
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app = FastAPI()
+    app.include_router(api_router)
+    app.dependency_overrides[get_db_session] = override_db_session
+    client = TestClient(app)
+
+    client.post("/scan", json={"include_archived": False, "force": True})
+    client.post(
+        "/scan",
+        json={
+            "repository_full_name": "Feberdin/security-watchdog",
+            "include_archived": False,
+            "force": True,
+            "scan_sources": ["github", "unraid", "homeassistant"],
+        },
+    )
+    client.post(
+        "/automation/pre-deploy-scan",
+        json={
+            "stack_name": "security-watchdog",
+            "repository_full_name": "Feberdin/security-watchdog",
+            "commit_sha": "d" * 40,
+            "compose_file": "docker-compose.yml",
+        },
+    )
+
+    overview = client.get("/scan-jobs/queue-overview?limit=3").json()
+
+    assert overview["current"] is None
+    assert len(overview["queue"]) == 3
+    assert overview["queue"][0]["position"] == 1
+    assert overview["queue"][1]["position"] == 2
+    assert overview["queue"][2]["position"] == 3
+    assert overview["queue"][0]["job"]["priority"] == 100
+    assert overview["queue"][1]["job"]["priority"] == 60
+    assert overview["queue"][2]["job"]["priority"] == 0
+    assert overview["next_job"]["id"] == overview["queue"][0]["job"]["id"]
+
+
 def test_daily_security_check_endpoint_returns_codex_runbook() -> None:
     """Codex automation should be able to fetch one JSON runbook without scraping dashboard HTML."""
 

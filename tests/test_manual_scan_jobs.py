@@ -101,6 +101,41 @@ def test_enqueue_pre_deploy_scan_queues_behind_running_job_and_requests_pause() 
     assert stored_running_job.pause_requested is True
 
 
+def test_enqueue_targeted_scan_is_auto_prioritized_over_running_full_scan() -> None:
+    """A smaller targeted scan should preempt a full scan only when it has higher effective priority."""
+
+    session_factory = build_session_factory()
+    session = session_factory()
+
+    full_scan_job, _ = manual_scan_jobs.enqueue_manual_scan(
+        session,
+        ScanRequest(repository_full_name=None, include_archived=False, force=True),
+    )
+    session.commit()
+    running_job = claim_manual_scan_job(session, job_id=full_scan_job.id)
+    session.commit()
+
+    targeted_job, created = manual_scan_jobs.enqueue_manual_scan(
+        session,
+        ScanRequest(
+            repository_full_name="Feberdin/security-watchdog",
+            include_archived=False,
+            force=True,
+            scan_sources=["github"],
+        ),
+    )
+    session.commit()
+    stored_running_job = get_manual_scan_job(session, running_job.id if running_job else 0)
+
+    assert running_job is not None
+    assert created is True
+    assert targeted_job.id != full_scan_job.id
+    assert targeted_job.priority > (running_job.priority if running_job else -1)
+    assert targeted_job.status == ManualScanJobStatus.QUEUED.value
+    assert stored_running_job is not None
+    assert stored_running_job.pause_requested is True
+
+
 def test_claim_manual_scan_job_prefers_highest_priority_queued_job() -> None:
     """The queue worker should run urgent targeted jobs before older low-priority work."""
 

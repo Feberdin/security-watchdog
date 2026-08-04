@@ -1,7 +1,7 @@
 <!--
 Purpose: Main synthwave dashboard for systems, dependencies, debugging exports, and remediation.
 Input/Output: Loaded by the browser and hydrated from `/reports`, `/systems`, `/diagnostics/export`,
-`/automation/high-risk-updates/codex-prompt`, `/scan-jobs/latest`, and per-system Codex helper
+`/automation/high-risk-updates/codex-prompt`, `/scan-jobs/latest`, `/scan-jobs/queue-overview`, and per-system Codex helper
 endpoints.
 Important invariants: Operators should be able to scan the whole platform quickly, then drill into
 one system and export structured data or a remediation prompt without leaving the page.
@@ -188,8 +188,17 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
           >
             <span id="scan-progress-fill" class="scan-progress-fill"></span>
           </div>
-          <div class="scan-progress-log-heading">Letzte Schritte</div>
+            <div class="scan-progress-log-heading">Letzte Schritte</div>
           <ol id="scan-progress-log" class="scan-progress-log" aria-label="Scan-Protokoll"></ol>
+        </div>
+        <div id="scan-queue-panel" class="scan-queue-panel" aria-live="polite">
+          <div class="scan-queue-heading">
+            <p class="eyebrow">Scan-Queue</p>
+            <p class="section-copy">Aktuell / Folgeaufträge in Prioritäts-Reihenfolge</p>
+          </div>
+          <div id="scan-queue-current" class="scan-queue-current"></div>
+          <ol id="scan-queue-list" class="scan-queue-list" aria-label="Geplante Scan-Queue"></ol>
+          <p id="scan-queue-empty" class="scan-empty-state empty-state">Keine weiteren Aufträge in der Queue.</p>
         </div>
         <div id="scan-status-live" class="visually-hidden" aria-live="polite"></div>
       </section>
@@ -202,8 +211,9 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
             <p class="section-copy">
               Jedes System zeigt seine Dependencies, deine Version, die aktuell aufgelöste
               Zielversion, Veröffentlichungsdatum, letzten Prüfzeitpunkt und ein Symbol für bereits
-              kompromittierte Pakete. Laufzeit-Findings aus Containern oder Secret-Scans erscheinen
-              zusätzlich in einer eigenen Detailtabelle.
+              kompromittierte Pakete. GitHub-Repos, Unraid-Container und Broker-Backups werden zu
+              einem System zusammengefasst, wenn ihre Source- oder Image-Metadaten übereinstimmen.
+              Laufzeit-Findings erscheinen zusätzlich in einer eigenen Detailtabelle.
             </p>
           </div>
           <div class="inventory-actions">
@@ -285,6 +295,7 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
       let allSystems = [];
       let allRepositories = [];
       let currentScanJob = null;
+      let currentScanQueueOverview = null;
       let scanStatusPollHandle = null;
       let dashboardRefreshAfterJobId = null;
       let lastNotifiedScanJobId = null;
@@ -416,6 +427,16 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         return job.repository_full_name;
       }
 
+      function formatScanPurpose(job) {
+        if (!job || !job.purpose || job.purpose === 'manual') {
+          return 'Manuell';
+        }
+        if (job.purpose === 'pre_deploy') {
+          return 'Pre-Deploy';
+        }
+        return String(job.purpose);
+      }
+
       function scanStatusSeverity(job) {
         if (!job) {
           return 'low';
@@ -535,6 +556,64 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
             </li>
           `)
           .join('');
+      }
+
+      function formatQueueEntry(job) {
+        const scope = describeScanScope(job);
+        const purpose = formatScanPurpose(job);
+        const priority = Number(job.priority || 0);
+        const timestamp = job.requested_at ? formatDateTime(job.requested_at) : 'unbekannt';
+        return `${timestamp} · ${escapeHtml(purpose)} · ${escapeHtml(scope)} · Priorität ${priority} · ${escapeHtml(
+          scanStatusLabel(job)
+        )}`;
+      }
+
+      function renderScanQueueOverview(overview) {
+        const panel = document.getElementById('scan-queue-panel');
+        const current = document.getElementById('scan-queue-current');
+        const queue = document.getElementById('scan-queue-list');
+        const emptyState = document.getElementById('scan-queue-empty');
+
+        if (!overview) {
+          panel.hidden = true;
+          return;
+        }
+
+        panel.hidden = false;
+        const currentJob = overview.current;
+        if (currentJob) {
+          current.innerHTML = `
+            <div class="scan-queue-entry scan-queue-entry-current">
+              <span class="scan-queue-title">Aktuell:</span>
+              <span class="scan-queue-entry-text">${formatQueueEntry(currentJob)}</span>
+            </div>
+          `;
+        } else {
+          current.innerHTML = '<div class="scan-queue-entry">Aktuell: kein laufender Scan</div>';
+        }
+
+        const entries = Array.isArray(overview.queue) ? overview.queue : [];
+        if (!entries.length) {
+          queue.innerHTML = '';
+          emptyState.hidden = false;
+          return;
+        }
+
+        queue.innerHTML = entries
+          .map((item) => {
+            if (!item?.job) {
+              return '';
+            }
+            return `
+              <li class="scan-queue-entry">
+                <span class="scan-queue-position">${escapeHtml(item.position)}.</span>
+                <span class="scan-queue-entry-text">${formatQueueEntry(item.job)}</span>
+              </li>
+            `;
+          })
+          .filter(Boolean)
+          .join('');
+        emptyState.hidden = Boolean(queue.innerHTML);
       }
 
       function renderScanStatus(job) {
@@ -668,8 +747,11 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
       }
 
       function selectedRepositoryIds() {
-        return Array.from(selectedSystemIds)
-          .map((repositoryId) => Number(repositoryId))
+        const repositoryIds = [];
+        for (const systemId of selectedSystemIds) {
+          repositoryIds.push(...repositoryIdsForSystem(Number(systemId)));
+        }
+        return Array.from(new Set(repositoryIds))
           .filter((repositoryId) => Number.isInteger(repositoryId) && repositoryId > 0);
       }
 
@@ -699,6 +781,83 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
           : 'Auswahl aktivieren';
       }
 
+      function linkedAssetsForSystem(system) {
+        const linkedAssets = Array.isArray(system.linked_assets) ? system.linked_assets : [];
+        if (linkedAssets.length > 0) {
+          return linkedAssets;
+        }
+        return [
+          {
+            id: system.id,
+            full_name: system.full_name,
+            display_name: system.display_name,
+            source_type: system.source_type,
+            scan_enabled: system.scan_enabled,
+            risk_score: system.risk_score,
+            open_alert_count: system.open_alert_count,
+            last_scanned_at: system.last_scanned_at,
+            summary: system.summary
+          }
+        ];
+      }
+
+      function repositoryIdsForSystem(systemId) {
+        const system = allSystems.find((item) => Number(item.id) === Number(systemId));
+        if (!system) {
+          return Number.isInteger(Number(systemId)) ? [Number(systemId)] : [];
+        }
+        return linkedAssetsForSystem(system)
+          .map((asset) => Number(asset.id))
+          .filter((repositoryId) => Number.isInteger(repositoryId) && repositoryId > 0);
+      }
+
+      function sourceTypesForSystem(system) {
+        const sourceTypes = Array.isArray(system.source_types) && system.source_types.length
+          ? system.source_types
+          : [system.source_type];
+        return Array.from(new Set(sourceTypes.filter(Boolean)));
+      }
+
+      function buildSourcePills(system) {
+        return sourceTypesForSystem(system)
+          .map((sourceType) => `<span class="source-pill">${escapeHtml(sourceType)}</span>`)
+          .join('');
+      }
+
+      function buildLinkedAssets(system) {
+        const linkedAssets = linkedAssetsForSystem(system);
+        if (linkedAssets.length <= 1) {
+          return '';
+        }
+        return `
+          <section class="linked-assets" aria-label="Verknüpfte Roh-Assets">
+            <div class="linked-assets-heading">
+              <span>Verknüpfte Roh-Assets</span>
+              <span>${linkedAssets.length} Einträge werden als ein System bewertet</span>
+            </div>
+            <div class="linked-asset-grid">
+              ${linkedAssets.map((asset) => `
+                <div class="linked-asset-row">
+                  <div>
+                    <div class="linked-asset-title">${escapeHtml(asset.display_name || asset.full_name)}</div>
+                    <div class="dependency-subline">${escapeHtml(asset.full_name)}</div>
+                  </div>
+                  <span class="source-pill source-pill-compact">${escapeHtml(asset.source_type)}</span>
+                  <div class="linked-asset-metrics">
+                    <span>Risk ${formatRiskScore(asset.risk_score)}</span>
+                    <span>${escapeHtml(asset.open_alert_count || 0)} Alerts</span>
+                    <span class="asset-state-pill ${asset.scan_enabled ? 'asset-state-on' : 'asset-state-off'}">
+                      ${asset.scan_enabled ? 'Scan aktiv' : 'Scan aus'}
+                    </span>
+                    <span>${escapeHtml(formatDateTime(asset.last_scanned_at, 'Noch kein Scan'))}</span>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          </section>
+        `;
+      }
+
       function showDashboardToast(message, severity = 'low') {
         const toast = document.getElementById('dashboard-toast');
         const toastMessage = document.getElementById('dashboard-toast-message');
@@ -723,7 +882,23 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
       }
 
       async function refreshScanStatus({ refreshDashboardOnCompletion = false } = {}) {
-        const job = await fetchJson('/scan-jobs/latest');
+        const [latestResult, queueResult] = await Promise.allSettled([
+          fetchJson('/scan-jobs/latest'),
+          fetchJson('/scan-jobs/queue-overview?limit=20'),
+        ]);
+
+        if (latestResult.status === 'rejected') {
+          throw latestResult.reason;
+        }
+        const job = latestResult.value;
+        if (queueResult.status === 'fulfilled') {
+          currentScanQueueOverview = queueResult.value;
+          renderScanQueueOverview(queueResult.value);
+        } else {
+          currentScanQueueOverview = null;
+          renderScanQueueOverview(null);
+        }
+
         renderScanStatus(job);
 
         if (isActiveScanJob(job)) {
@@ -877,6 +1052,15 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         const matchingDependencies = query
           ? system.dependencies.filter((dependency) => dependencyMatchesQuery(dependency, query))
           : system.dependencies;
+        const linkedAssets = linkedAssetsForSystem(system);
+        const linkedAssetSearchText = linkedAssets
+          .map((asset) => [
+            asset.display_name,
+            asset.full_name,
+            asset.source_type,
+            asset.summary
+          ].join(' '))
+          .join(' ');
 
         const systemMatchesQuery =
           !query ||
@@ -884,7 +1068,9 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
             system.display_name,
             system.full_name,
             system.source_type,
-            system.summary
+            sourceTypesForSystem(system).join(' '),
+            system.summary,
+            linkedAssetSearchText
           ]
             .join(' ')
             .toLowerCase()
@@ -932,7 +1118,7 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
                     ${selectedSystemIds.has(Number(system.id)) ? 'checked' : ''}
                   />
                   <h3>${escapeHtml(system.display_name)}</h3>
-                  <span class="source-pill">${escapeHtml(system.source_type)}</span>
+                  <span class="source-pill-list">${buildSourcePills(system)}</span>
                 </div>
                 <div class="system-path">${escapeHtml(system.full_name)}</div>
                 <div class="system-meta">
@@ -976,7 +1162,7 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
                   data-system-full-name="${escapeHtml(system.full_name)}"
                   data-system-source-type="${escapeHtml(system.source_type)}"
                 >
-                  Einzel-Scan
+                  ${linkedAssets.length > 1 ? 'Primär-Scan' : 'Einzel-Scan'}
                 </button>
                 <button
                   class="action-button secondary-button"
@@ -999,6 +1185,7 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
                 </button>
                 ${remediationButton}
               </div>
+              ${buildLinkedAssets(system)}
               <div class="dependency-table">
                 <div class="dependency-table-header">
                   <span>Dependency</span>
@@ -1153,7 +1340,7 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         allSystems = systems;
         allRepositories = repositories;
         syncSelectedSystemIdsWithLoadedSystems();
-        document.getElementById('metric-repositories').textContent = report.repository_count;
+        document.getElementById('metric-repositories').textContent = systems.length;
         document.getElementById('metric-dependencies').textContent = report.dependency_count;
         document.getElementById('metric-vulnerabilities').textContent = report.vulnerability_count;
         document.getElementById('metric-critical-alerts').textContent = report.critical_alert_count;

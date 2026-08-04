@@ -193,6 +193,20 @@ class RemediationPlanOut(BaseModel):
     blocked_actions: list[str] = Field(default_factory=list)
 
 
+class SystemLinkedAssetOut(BaseModel):
+    """One raw scanned asset that is displayed as part of a grouped system."""
+
+    id: int
+    full_name: str
+    display_name: str
+    source_type: str
+    scan_enabled: bool = True
+    risk_score: float = 0.0
+    open_alert_count: int = 0
+    last_scanned_at: datetime | None = None
+    summary: str = ""
+
+
 class SystemInventoryOut(BaseModel):
     """One scanned system or asset plus its expandable dependency inventory."""
 
@@ -202,6 +216,7 @@ class SystemInventoryOut(BaseModel):
     full_name: str
     display_name: str
     source_type: str
+    source_types: list[str] = Field(default_factory=list)
     scan_enabled: bool = True
     risk_score: float
     dependency_count: int
@@ -211,6 +226,7 @@ class SystemInventoryOut(BaseModel):
     summary: str = ""
     dependencies: list[DependencyInsightOut] = Field(default_factory=list)
     runtime_findings: list[RuntimeFindingOut] = Field(default_factory=list)
+    linked_assets: list[SystemLinkedAssetOut] = Field(default_factory=list)
     remediation: RemediationPlanOut = Field(default_factory=RemediationPlanOut)
 
 
@@ -540,6 +556,22 @@ class ManualScanJobOut(BaseModel):
     failed_system_count: int = 0
     error_message: str | None = None
     progress: ManualScanProgressOut
+
+
+class ManualScanQueuePositionOut(BaseModel):
+    """One ordered entry in the manual scan queue."""
+
+    position: int
+    job: ManualScanJobOut
+
+
+class ManualScanQueueOverviewOut(BaseModel):
+    """Current/queued manual scan worklist, sorted by priority."""
+
+    generated_at: datetime
+    current: ManualScanJobOut | None = None
+    queue: list[ManualScanQueuePositionOut] = Field(default_factory=list)
+    next_job: ManualScanJobOut | None = None
 
 
 class ReportOut(BaseModel):

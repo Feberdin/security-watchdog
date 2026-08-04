@@ -99,6 +99,8 @@ Manual scans are stored in PostgreSQL before execution. The dedicated `worker`, 
 embedded scheduler in single-container installations, claims queued work. Running jobs persist
 progress counters after each asset and resume from the newest durable asset outcome after a worker
 restart or deployment. Queued work is claimed by descending `priority`, then request time.
+Recurring repository scans are also inserted into the same queue with `purpose=scheduled`, so a
+deploy restart cannot start a hidden, non-cancellable full scan beside an operator-triggered run.
 - `GET /reports`: Aggregated dashboard/report data.
 - `GET /reports/sarif`: Active alerts as SARIF 2.1.0 JSON. Add `?include_resolved=true` for audit exports.
 - `GET /alerts`: Latest alerts.

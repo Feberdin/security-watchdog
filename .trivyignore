@@ -1,0 +1,13 @@
+# Purpose: Document the one Trivy Dockerfile finding intentionally accepted by this image.
+# Input/Output: `trivy config Dockerfile` reads this file from the repository root and suppresses
+# the listed finding IDs; it has no runtime effect.
+# Important invariants: Keep this file limited to the Unraid bootstrap exception. Do not add
+# package CVEs, secret findings, or unrelated Dockerfile issues here.
+# Debugging: If the deployment gate still reports DS-0002, run the same commit-bound pre-deploy
+# scan and verify Trivy is executed with the Dockerfile directory as its working directory.
+
+# The image starts as root only long enough for docker/entrypoint.sh to align PUID/PGID,
+# prepare /app/data ownership, and join the mounted Docker socket group on Unraid. The entrypoint
+# then uses `exec gosu "${WATCHDOG_USER}" "$@"` so the API/worker process runs unprivileged.
+DS-0002
+AVD-DS-0002

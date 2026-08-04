@@ -51,6 +51,26 @@ def test_skips_environment_reference_assignments(tmp_path):
     assert findings == []
 
 
+def test_skips_common_template_placeholders(tmp_path):
+    """Repository templates often keep values as placeholders without actual secrets."""
+
+    sample = tmp_path / ".env.example"
+    sample.write_text(
+        "\n".join(
+            [
+                "DEPLOYMENT_GATE_TOKEN=replace-with-a-long-random-token",
+                "GITHUB_TOKEN=replace-me",
+                "TEST_GATE_TOKEN=test-only-token",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
 def test_skips_code_level_token_references(tmp_path):
     """Function calls and f-string references are not literal credentials."""
 

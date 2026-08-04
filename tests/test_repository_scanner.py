@@ -56,6 +56,7 @@ def test_sync_repositories_skips_only_the_repo_that_failed_checkout() -> None:
         default_branch: str,
         *,
         fetch_full_history: bool,
+        target_commit_sha: str | None = None,
     ) -> None:
         if "broken-repo" in clone_url:
             raise RuntimeError("simulated checkout failure")
@@ -152,6 +153,129 @@ def test_public_repository_clone_uses_full_history(tmp_path, monkeypatch) -> Non
     assert recorded_commands
     assert recorded_commands[0][:4] == [scanner.settings.git_binary, "clone", "--branch", "main"]
     assert "--depth" not in recorded_commands[0]
+
+
+def test_sync_repositories_targets_a_specific_request_for_pre_deploy_commit(tmp_path) -> None:
+    """Pre-deploy scans can request a non-default branch commit for one repository."""
+
+    scanner = RepositoryScanner()
+    scanner.settings.repo_storage_path = tmp_path
+    scanner.github_client.list_repositories = lambda: [
+        {
+            "id": 1,
+            "name": "security-watchdog",
+            "full_name": "Feberdin/security-watchdog",
+            "clone_url": "https://github.com/Feberdin/security-watchdog.git",
+            "default_branch": "main",
+            "archived": False,
+            "owner": {"login": "Feberdin"},
+        },
+        {
+            "id": 2,
+            "name": "other",
+            "full_name": "Feberdin/other",
+            "clone_url": "https://github.com/Feberdin/other.git",
+            "default_branch": "main",
+            "archived": False,
+            "owner": {"login": "Feberdin"},
+        },
+    ]
+
+    requested_commit_sha = "a1" * 20
+    requested_calls: list[tuple[str, str | None]] = []
+
+    def fake_sync_local_checkout(
+        clone_url: str,
+        local_path,
+        default_branch: str,
+        *,
+        fetch_full_history: bool,
+        target_commit_sha: str | None = None,
+    ) -> None:
+        requested_calls.append((clone_url, target_commit_sha))
+
+    scanner._sync_local_checkout = fake_sync_local_checkout
+
+    repositories = scanner.sync_repositories(
+        build_test_session(),
+        repository_full_name="Feberdin/security-watchdog",
+        target_commit_sha=requested_commit_sha,
+    )
+
+    assert len(requested_calls) == 1
+    assert requested_calls[0] == (
+        "https://github.com/Feberdin/security-watchdog.git",
+        requested_commit_sha,
+    )
+    assert repositories[0].full_name == "Feberdin/security-watchdog"
+
+
+def test_align_checkout_to_target_commit_prefers_direct_fetch(tmp_path, monkeypatch) -> None:
+    """Direct commit fetch is used first and detached checkout is verified against HEAD."""
+
+    scanner = RepositoryScanner()
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    target_commit_sha = "a1" * 20
+    commands: list[list[str]] = []
+
+    def fake_run_command(command: list[str], **kwargs) -> str:
+        commands.append(command)
+        if command[1:3] == ["-C", str(repo_path)] and command[3] == "rev-parse":
+            if command[-1] == target_commit_sha:
+                raise RuntimeError("missing")
+            if command[-1] == "HEAD^{commit}":
+                return target_commit_sha
+        return ""
+
+    monkeypatch.setattr("app.scanners.repository_scanner.run_command", fake_run_command)
+
+    scanner._align_checkout_to_target_commit(repo_path, target_commit_sha)
+
+    assert any(command[-1] == target_commit_sha and command[3] == "fetch" for command in commands)
+    assert any(command[3:6] == ["checkout", "--detach", target_commit_sha] for command in commands)
+    assert not any(
+        "+refs/heads/*:refs/remotes/origin/*" in " ".join(command) for command in commands
+    )
+
+
+def test_align_checkout_to_target_commit_falls_back_to_all_heads_when_direct_fetch_fails(tmp_path, monkeypatch) -> None:
+    """Fallback branch-refspec fetch runs when a direct commit fetch is unavailable."""
+
+    scanner = RepositoryScanner()
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    target_commit_sha = "a1" * 20
+    commands: list[list[str]] = []
+    fetch_attempts = {"count": 0}
+
+    def fake_run_command(command: list[str], **kwargs) -> str:
+        commands.append(command)
+        if command[1:3] == ["-C", str(repo_path)] and command[3] == "rev-parse":
+            if command[-1] == target_commit_sha:
+                raise RuntimeError("missing")
+            if command[-1] == "HEAD^{commit}":
+                return target_commit_sha
+        if command[1:3] == ["-C", str(repo_path)] and command[3] == "fetch" and command[4] == "--depth=1":
+            if command[-1] == target_commit_sha:
+                fetch_attempts["count"] += 1
+                if fetch_attempts["count"] == 1:
+                    raise RuntimeError("not found")
+            return ""
+        return ""
+
+    monkeypatch.setattr("app.scanners.repository_scanner.run_command", fake_run_command)
+
+    scanner._align_checkout_to_target_commit(repo_path, target_commit_sha)
+
+    assert any(
+        command[-1] == target_commit_sha
+        for command in commands
+        if "+refs/heads/*:refs/remotes/origin/*" not in command
+    )
+    assert any(
+        "+refs/heads/*:refs/remotes/origin/*" in " ".join(command) for command in commands
+    )
 
 
 def test_existing_repository_pull_refreshes_origin_with_current_token(tmp_path, monkeypatch) -> None:

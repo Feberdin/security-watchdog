@@ -102,6 +102,46 @@ def test_manual_scan_continues_when_one_repository_asset_fails() -> None:
     assert all(current.percent <= following.percent for current, following in pairwise(progress_updates))
 
 
+def test_manual_scan_targets_specific_commit_during_inventory_sync() -> None:
+    """Pre-deploy scans should pass the target commit to repository sync."""
+
+    session = build_test_session()
+    orchestrator = ScanOrchestrator()
+    requested_commit_sha = "a" * 40
+    sync_kwargs: dict[str, object] = {}
+
+    def fake_sync_repositories(
+        *args,
+        **kwargs,
+    ) -> list:
+        sync_kwargs["repository_full_name"] = kwargs.get("repository_full_name")
+        sync_kwargs["include_archived"] = kwargs.get("include_archived")
+        sync_kwargs["target_commit_sha"] = kwargs.get("target_commit_sha")
+        return []
+
+    orchestrator.repository_scanner.sync_repositories = fake_sync_repositories
+    orchestrator.unraid_scanner.sync_assets = lambda *args, **kwargs: []
+    orchestrator.homeassistant_scanner.sync_assets = lambda *args, **kwargs: []
+    orchestrator._dispatch_open_alerts = lambda *args, **kwargs: None
+
+    response = orchestrator.run_manual_scan(
+        session,
+        ScanRequest(
+            repository_full_name="Feberdin/security-watchdog",
+            include_archived=False,
+            force=True,
+            scan_sources=["github"],
+            target_commit_sha=requested_commit_sha,
+            purpose="pre_deploy",
+        ),
+    )
+
+    assert sync_kwargs["repository_full_name"] == "Feberdin/security-watchdog"
+    assert sync_kwargs["include_archived"] is False
+    assert sync_kwargs["target_commit_sha"] == requested_commit_sha
+    assert response.repository_count == 0
+
+
 def test_manual_scan_resume_uses_existing_asset_outcomes_and_updates_checkpoint() -> None:
     """A resumed scan should skip durable successes/failures and continue with pending assets."""
 

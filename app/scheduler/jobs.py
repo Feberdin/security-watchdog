@@ -19,7 +19,7 @@ from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models.schemas import ScanRequest
 from app.services.cache import RedisStateStore
-from app.services.manual_scan_jobs import process_manual_scan_job
+from app.services.manual_scan_jobs import enqueue_manual_scan, process_manual_scan_job
 from app.services.orchestrator import ScanOrchestrator
 
 LOGGER = logging.getLogger(__name__)
@@ -35,15 +35,27 @@ def register_jobs(scheduler: BaseScheduler) -> BaseScheduler:
     def repo_scan_job() -> None:
         try:
             with SessionLocal() as session:
-                orchestrator.run_manual_scan(
+                job, created_new_job = enqueue_manual_scan(
                     session,
-                    ScanRequest(repository_full_name=None, include_archived=False, force=False),
+                    ScanRequest(
+                        repository_full_name=None,
+                        include_archived=False,
+                        force=False,
+                        purpose="scheduled",
+                    ),
                 )
                 session.commit()
+                LOGGER.info(
+                    "Scheduled repository scan queued",
+                    extra={
+                        "job_id": job.id,
+                        "created_new_job": created_new_job,
+                        "status": job.status,
+                    },
+                )
         except Exception:
-            LOGGER.exception("Scheduled repository scan failed")
+            LOGGER.exception("Scheduled repository scan enqueue failed")
             raise
-        state_store.set_job_heartbeat("repo_scan")
 
     def threat_feed_job() -> None:
         try:
@@ -73,6 +85,8 @@ def register_jobs(scheduler: BaseScheduler) -> BaseScheduler:
                     "Processed queued manual scan job",
                     extra={"job_id": queued_job.id, "status": queued_job.status},
                 )
+                if queued_job.purpose == "scheduled" and queued_job.status == "succeeded":
+                    state_store.set_job_heartbeat("repo_scan")
         except Exception:
             LOGGER.exception("Queued manual scan processing failed")
             raise

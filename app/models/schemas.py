@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ScanSource = Literal["github", "unraid", "homeassistant"]
 DEFAULT_SCAN_SOURCES: tuple[ScanSource, ...] = ("github", "unraid", "homeassistant")
-ScanPurpose = Literal["manual", "pre_deploy"]
+ScanPurpose = Literal["manual", "pre_deploy", "scheduled"]
 
 
 class RepositoryOut(BaseModel):

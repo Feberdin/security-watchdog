@@ -89,6 +89,19 @@ Key environment variables:
 - `AI_ENABLED`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`: AI extraction controls.
 - `SLACK_WEBHOOK_URL`, `EMAIL_*`, `GITHUB_ALERT_REPOSITORY`: Alert destinations.
 
+### Broker Secret Classification
+
+The repository secret scanner treats Broker-managed references as secret names, not leaked values.
+Compose and stack values such as `secret://NAME`, `*_secret_ref`, `*_secret_refs`,
+`database_url_secret_name`, and `password_secret_name` are expected to point at values that the
+Unraid Deployment Broker injects at runtime. Known Broker configuration variables such as
+`BROKER_CONFIG`, `BROKER_DATA_DIR`, `BROKER_LOG_LEVEL`, `BROKER_STACKS_HOST_DIR`, `RUST_LOG`,
+`CSI_SOURCE`, `MODELS_DIR`, and `SENSING_ALLOWED_HOSTS` are treated as normal runtime settings.
+Literal values assigned to credential-bearing names such as `BROKER_MCP_TOKEN`,
+`BROKER_SECRET_KEY`, `UNRAID_API_KEY`, `UNIFI_PASSWORD`, `SECURITY_WATCHDOG_GATE_TOKEN`,
+`BITWARDEN_CLIENT_SECRET`, `SMTP_PASSWORD`, or dynamic names like `APP_DATABASE_URL` still produce
+critical secret findings and must be moved into Broker-managed secrets.
+
 ## API Overview
 
 - `POST /scan`: Queue an immediate scan and return `202 Accepted` plus a status URL. Optional JSON fields: `repository_full_name` for one asset, `scan_sources` with `github`, `unraid`, and/or `homeassistant`, `force`, `include_archived`, `priority`, `pause_active`, `purpose`, `target_commit_sha`, and `refresh_image_cache`.

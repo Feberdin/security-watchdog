@@ -76,6 +76,109 @@ def test_skips_broker_secret_references(tmp_path):
     assert findings == []
 
 
+def test_skips_broker_secret_name_reference_fields(tmp_path):
+    """Broker secret-ref fields contain secret names that the Broker resolves later."""
+
+    sample = tmp_path / "broker-config.toml"
+    sample.write_text(
+        '\n'.join(
+            [
+                'broker_mcp_token_secret_ref = "BROKER_MCP_TOKEN"',
+                'password_secret_name = "APP_POSTGRES_PASSWORD"',
+                'database_url_secret_name = "APP_DATABASE_URL"',
+                'BITWARDEN_SERVER_URL_FALLBACK_SECRET_REFS="BITWARDEN_SERVER_URL,NTFY_TOKEN"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
+def test_skips_known_broker_non_secret_runtime_variables(tmp_path):
+    """Broker paths, log settings, hosts, and runtime modes are configuration, not credentials."""
+
+    sample = tmp_path / ".env"
+    sample.write_text(
+        '\n'.join(
+            [
+                "BROKER_CONFIG=/etc/unraid-deploy-broker/config.toml",
+                "BROKER_DATA_DIR=/var/lib/unraid-deploy-broker",
+                "BROKER_LOG_LEVEL=debug",
+                "BROKER_STACKS_HOST_DIR=/mnt/user/appdata/stacks",
+                "RUST_LOG=info",
+                "CSI_SOURCE=broker",
+                "MODELS_DIR=/models",
+                "SENSING_ALLOWED_HOSTS=https://broker.local,http://192.168.57.10",
+                "BROKER_HTTP_PORT=18443",
+                "BROKER_REQUEST_TIMEOUT_SECONDS=30",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
+def test_detects_hardcoded_known_broker_secret_values(tmp_path):
+    """Known Broker secret variables are findings when they carry literal values."""
+
+    sample = tmp_path / ".env"
+    sample.write_text(
+        '\n'.join(
+                [
+                    "BROKER_MCP_TOKEN=MYTOKENVALUE123",
+                    "BITWARDEN_SERVER_URL=https://vault.internal.lan",
+                    "NTFY_TOPIC=prod-alerts",
+                ]
+            ),
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert len(findings) == 3
+    assert {finding.detector for finding in findings} == {"broker_secret_assignment"}
+
+
+def test_skips_known_broker_secret_reference_assignments(tmp_path):
+    """Known Broker secret variables may point at Broker refs or same-name placeholders."""
+
+    sample = tmp_path / "docker-compose.yml"
+    sample.write_text(
+        '\n'.join(
+            [
+                "BROKER_SECRET_KEY: secret://BROKER_SECRET_KEY",
+                "SECURITY_WATCHDOG_GATE_TOKEN=BROKER_MCP_TOKEN",
+                "UNRAID_DEPLOY_BROKER_TOKEN=${UNRAID_DEPLOY_BROKER_TOKEN}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
+def test_detects_dynamic_database_url_secret_assignments(tmp_path):
+    """Stack-specific database URLs are treated as secrets when committed as concrete values."""
+
+    sample = tmp_path / ".env"
+    sample.write_text(
+        "APP_DATABASE_URL=postgresql://watchdog:HardPassword123@postgres/security_watchdog\n",
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert any(finding.detector == "generic_token_assignment" for finding in findings)
+
+
 def test_skips_code_identifiers_and_docker_paths(tmp_path):
     """Identifiers and package-install paths should not become entropy-only critical alerts."""
 

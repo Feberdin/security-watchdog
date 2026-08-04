@@ -12,14 +12,19 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 
 import app.models.entities  # noqa: F401
 from app.db.base import Base
 from app.models.entities import Dependency, Repository, ThreatArticle
-from app.models.schemas import DependencyRecord, ThreatArticleRecord
-from app.repositories.store import replace_repository_dependencies, store_threat_article
+from app.models.schemas import DependencyRecord, ScanRequest, ThreatArticleRecord
+from app.repositories.store import (
+    create_manual_scan_job,
+    get_matching_queued_manual_scan_job,
+    replace_repository_dependencies,
+    store_threat_article,
+)
 
 
 def build_test_session() -> Session:
@@ -141,3 +146,28 @@ def test_replace_repository_dependencies_deduplicates_scanner_records() -> None:
     assert rows[0].direct_dependency is True
     assert rows[0].group_name == "base"
     assert rows[0].metadata_json == {"stage": "runtime", "source": "first"}
+
+
+def test_matching_queued_manual_scan_job_avoids_database_json_equality() -> None:
+    """PostgreSQL JSON columns do not support plain equality, so source matching happens in Python."""
+
+    session = build_test_session()
+    request = ScanRequest(
+        repository_full_name="Feberdin/security-watchdog",
+        include_archived=False,
+        force=True,
+        scan_sources=["github"],
+    )
+    job = create_manual_scan_job(session, request)
+    session.commit()
+    statements: list[str] = []
+
+    @event.listens_for(session.get_bind(), "before_cursor_execute")
+    def capture_sql(conn, cursor, statement, parameters, context, executemany) -> None:
+        statements.append(statement)
+
+    matching_job = get_matching_queued_manual_scan_job(session, request)
+
+    assert matching_job is not None
+    assert matching_job.id == job.id
+    assert not any("scan_sources =" in statement for statement in statements)

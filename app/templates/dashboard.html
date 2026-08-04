@@ -136,9 +136,40 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
             <button id="cancel-scan-button" class="action-button danger-button" type="button" hidden>
               Scan abbrechen
             </button>
+            <button id="pause-scan-button" class="action-button secondary-button" type="button" hidden>
+              Scan pausieren
+            </button>
+            <button id="resume-scan-button" class="action-button secondary-button" type="button" hidden>
+              Scan fortsetzen
+            </button>
             <button id="toggle-scan-enabled-button" class="action-button secondary-button" type="button" disabled>
               Asset umschalten
             </button>
+          </div>
+        </div>
+        <div class="predeploy-controls">
+          <label class="scan-control-field">
+            <span class="search-label">Deploy-Commit</span>
+            <input
+              id="predeploy-commit-input"
+              class="synth-input"
+              type="text"
+              inputmode="latin"
+              maxlength="40"
+              placeholder="40 Zeichen SHA"
+            />
+          </label>
+          <div class="scan-control-actions">
+            <button id="gate-status-button" class="action-button secondary-button" type="button">
+              Gate prüfen
+            </button>
+            <button id="predeploy-scan-button" class="action-button primary-button" type="button">
+              Pre-Deploy-Scan
+            </button>
+          </div>
+          <div id="gate-status-panel" class="gate-status-panel" hidden>
+            <span id="gate-status-pill" class="severity-pill severity-none">Gate</span>
+            <span id="gate-status-message">Kein Gate-Status geladen.</span>
           </div>
         </div>
         <div id="scan-progress" class="scan-progress" hidden>
@@ -175,15 +206,25 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
               zusätzlich in einer eigenen Detailtabelle.
             </p>
           </div>
-          <label class="search-field">
-            <span class="search-label">Filtern</span>
-            <input
-              id="system-search"
-              class="synth-input"
-              type="search"
-              placeholder="System, Paket, Manifest, CVE oder Version durchsuchen"
-            />
-          </label>
+          <div class="inventory-actions">
+            <label class="search-field">
+              <span class="search-label">Filtern</span>
+              <input
+                id="system-search"
+                class="synth-input"
+                type="search"
+                placeholder="System, Paket, Manifest, CVE oder Version durchsuchen"
+              />
+            </label>
+            <div class="bulk-controls">
+              <button id="bulk-disable-button" class="action-button secondary-button" type="button">
+                Auswahl ausschließen
+              </button>
+              <button id="bulk-enable-button" class="action-button secondary-button" type="button">
+                Auswahl aktivieren
+              </button>
+            </div>
+          </div>
         </div>
         <div id="system-list" class="system-list"></div>
       </section>
@@ -210,6 +251,10 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         </article>
       </section>
     </main>
+
+    <div id="dashboard-toast" class="dashboard-toast severity-border-low" hidden role="status" aria-live="polite">
+      <span id="dashboard-toast-message">Status aktualisiert.</span>
+    </div>
 
     <div id="output-modal" class="modal hidden" aria-hidden="true">
       <div class="modal-backdrop" data-close-modal="true"></div>
@@ -242,6 +287,8 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
       let currentScanJob = null;
       let scanStatusPollHandle = null;
       let dashboardRefreshAfterJobId = null;
+      let lastNotifiedScanJobId = null;
+      const selectedSystemIds = new Set();
 
       async function fetchJson(path, options) {
         const response = await fetch(path, options);
@@ -340,7 +387,7 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
       }
 
       function isTerminalScanJob(job) {
-        return Boolean(job && ['succeeded', 'failed', 'canceled'].includes(job.status));
+        return Boolean(job && ['succeeded', 'failed', 'canceled', 'paused'].includes(job.status));
       }
 
       function describeScanScope(job) {
@@ -358,6 +405,9 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
           return 'critical';
         }
         if (job.status === 'canceled') {
+          return 'high';
+        }
+        if (job.status === 'paused') {
           return 'high';
         }
         if (job.status === 'running' || job.status === 'queued') {
@@ -385,6 +435,9 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         if (job.status === 'canceled') {
           return 'abgebrochen';
         }
+        if (job.status === 'paused') {
+          return 'pausiert';
+        }
         if (Number(job.failed_system_count || 0) > 0) {
           return 'warnungen';
         }
@@ -405,6 +458,12 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         }
         if (job.completed_at) {
           details.push(`Abgeschlossen: ${formatDateTime(job.completed_at)}`);
+        }
+        if (job.purpose === 'pre_deploy' && job.target_commit_sha) {
+          details.push(`Pre-Deploy: ${job.target_commit_sha.slice(0, 12)}`);
+        }
+        if (Number(job.priority || 0) > 0) {
+          details.push(`Priorität: ${job.priority}`);
         }
         if (job.status === 'succeeded') {
           details.push(
@@ -468,6 +527,8 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         const live = document.getElementById('scan-status-live');
         const button = document.getElementById('scan-button');
         const cancelButton = document.getElementById('cancel-scan-button');
+        const pauseButton = document.getElementById('pause-scan-button');
+        const resumeButton = document.getElementById('resume-scan-button');
         const toggleButton = document.getElementById('toggle-scan-enabled-button');
         const activeJob = isActiveScanJob(job);
 
@@ -483,7 +544,13 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         cancelButton.hidden = !activeJob;
         cancelButton.disabled = Boolean(job?.cancel_requested);
         cancelButton.textContent = job?.cancel_requested ? 'Abbruch angefordert...' : 'Scan abbrechen';
+        pauseButton.hidden = !activeJob;
+        pauseButton.disabled = Boolean(job?.pause_requested);
+        pauseButton.textContent = job?.pause_requested ? 'Pause angefordert...' : 'Scan pausieren';
+        resumeButton.hidden = job?.status !== 'paused';
+        resumeButton.disabled = false;
         toggleButton.disabled = activeJob || !document.getElementById('scan-target-select').value;
+        updateBulkButtons();
 
         if (job && job.status === 'queued') {
           button.disabled = true;
@@ -491,6 +558,9 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         } else if (job && job.status === 'running') {
           button.disabled = true;
           button.textContent = 'Scan läuft...';
+        } else if (job && job.status === 'paused') {
+          button.disabled = false;
+          button.textContent = 'Neuen Scan starten';
         } else {
           button.disabled = false;
           button.textContent = 'Scan starten';
@@ -541,7 +611,7 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
       function syncTargetSourceSelection() {
         const targetSelect = document.getElementById('scan-target-select');
         const selectedOption = targetSelect.selectedOptions[0];
-          const selectedSourceType = selectedOption?.dataset.sourceType || '';
+        const selectedSourceType = selectedOption?.dataset.sourceType || '';
 
         document.querySelectorAll('input[name="scan-source"]').forEach((input) => {
           if (!selectedSourceType) {
@@ -578,6 +648,54 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
           : 'Für Scan aktivieren';
       }
 
+      function selectedRepositoryIds() {
+        return Array.from(selectedSystemIds)
+          .map((repositoryId) => Number(repositoryId))
+          .filter((repositoryId) => Number.isInteger(repositoryId) && repositoryId > 0);
+      }
+
+      function syncSelectedSystemIdsWithLoadedSystems() {
+        const loadedIds = new Set(allSystems.map((system) => Number(system.id)));
+        for (const repositoryId of [...selectedSystemIds]) {
+          if (!loadedIds.has(Number(repositoryId))) {
+            selectedSystemIds.delete(repositoryId);
+          }
+        }
+      }
+
+      function updateBulkButtons() {
+        const selectedCount = selectedRepositoryIds().length;
+        const hasSelection = selectedCount > 0;
+        const activeJob = isActiveScanJob(currentScanJob);
+        const disableButton = document.getElementById('bulk-disable-button');
+        const enableButton = document.getElementById('bulk-enable-button');
+
+        disableButton.disabled = !hasSelection || activeJob;
+        enableButton.disabled = !hasSelection || activeJob;
+        disableButton.textContent = hasSelection
+          ? `Auswahl ausschließen (${selectedCount})`
+          : 'Auswahl ausschließen';
+        enableButton.textContent = hasSelection
+          ? `Auswahl aktivieren (${selectedCount})`
+          : 'Auswahl aktivieren';
+      }
+
+      function showDashboardToast(message, severity = 'low') {
+        const toast = document.getElementById('dashboard-toast');
+        const toastMessage = document.getElementById('dashboard-toast-message');
+        const normalizedSeverity = ['critical', 'high', 'medium', 'low', 'none'].includes(severity)
+          ? severity
+          : 'low';
+
+        toast.className = `dashboard-toast severity-border-${normalizedSeverity}`;
+        toastMessage.textContent = message;
+        toast.hidden = false;
+        window.clearTimeout(showDashboardToast.hideTimer);
+        showDashboardToast.hideTimer = window.setTimeout(() => {
+          toast.hidden = true;
+        }, 8000);
+      }
+
       function scheduleScanStatusPolling(delayMs = 4000) {
         stopScanStatusPolling();
         scanStatusPollHandle = setTimeout(() => {
@@ -603,6 +721,10 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
           dashboardRefreshAfterJobId === job.id
         ) {
           dashboardRefreshAfterJobId = null;
+          if (lastNotifiedScanJobId !== job.id) {
+            lastNotifiedScanJobId = job.id;
+            showDashboardToast(`Scan ${scanStatusLabel(job)}: ${job.message}`, scanStatusSeverity(job));
+          }
           await loadDashboard();
         }
       }
@@ -780,6 +902,14 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
             <summary class="system-summary">
               <div class="system-summary-main">
                 <div class="system-title-row">
+                  <input
+                    class="system-select-checkbox"
+                    type="checkbox"
+                    data-system-select-id="${system.id}"
+                    data-system-select-name="${escapeHtml(system.full_name)}"
+                    aria-label="${escapeHtml(system.display_name)} auswählen"
+                    ${selectedSystemIds.has(Number(system.id)) ? 'checked' : ''}
+                  />
                   <h3>${escapeHtml(system.display_name)}</h3>
                   <span class="source-pill">${escapeHtml(system.source_type)}</span>
                 </div>
@@ -832,7 +962,7 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
                   data-system-name="${escapeHtml(system.display_name)}"
                   data-system-enabled="${system.scan_enabled ? 'true' : 'false'}"
                 >
-                  Vom Scan ausschließen
+                  ${system.scan_enabled ? 'Vom Scan ausschließen' : 'Für Scan aktivieren'}
                 </button>
                 <button
                   class="action-button ghost-button"
@@ -883,9 +1013,11 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
 
         if (!cards.length) {
           target.innerHTML = '<p class="empty-state">Keine Systeme passend zum aktuellen Filter.</p>';
+          updateBulkButtons();
           return;
         }
         target.innerHTML = cards.join('');
+        updateBulkButtons();
       }
 
       function showModal(title, output) {
@@ -995,6 +1127,7 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
 
         allSystems = systems;
         allRepositories = repositories;
+        syncSelectedSystemIdsWithLoadedSystems();
         document.getElementById('metric-repositories').textContent = report.repository_count;
         document.getElementById('metric-dependencies').textContent = report.dependency_count;
         document.getElementById('metric-vulnerabilities').textContent = report.vulnerability_count;
@@ -1052,6 +1185,120 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         };
       }
 
+      function validateFullCommitSha(value) {
+        const normalized = String(value || '').trim().toLowerCase();
+        if (!/^[0-9a-f]{40}$/.test(normalized)) {
+          throw new Error('Gib einen vollständigen 40-Zeichen-Commit-SHA ein.');
+        }
+        return normalized;
+      }
+
+      function preDeployRepositoryFullName() {
+        const selectedFullName = document.getElementById('scan-target-select').value || '';
+        if (selectedFullName) {
+          return selectedFullName;
+        }
+        if (repositoryByFullName('Feberdin/security-watchdog')) {
+          return 'Feberdin/security-watchdog';
+        }
+        const firstGithubRepository = allRepositories.find((repository) => repository.source_type === 'github');
+        if (firstGithubRepository) {
+          return firstGithubRepository.full_name;
+        }
+        throw new Error('Kein GitHub-Repository für den Pre-Deploy-Scan gefunden.');
+      }
+
+      function gateSeverity(gateDecision) {
+        if (gateDecision === 'allow') {
+          return 'low';
+        }
+        if (gateDecision === 'deny') {
+          return 'critical';
+        }
+        return 'medium';
+      }
+
+      function renderGateStatus(payload) {
+        const panel = document.getElementById('gate-status-panel');
+        const pill = document.getElementById('gate-status-pill');
+        const message = document.getElementById('gate-status-message');
+        const decision = payload?.gate?.decision || 'indeterminate';
+        const reasonCodes = payload?.gate?.reason_codes || [];
+        const evidence = payload?.gate?.evidence;
+        const evidenceText = evidence?.scanned_commit_sha
+          ? `Scan: ${evidence.scanned_commit_sha.slice(0, 12)}`
+          : 'Scan: kein passender Nachweis';
+        const actionMap = {
+          deploy: 'Deploy-Gate erlaubt.',
+          queue_pre_deploy_scan: 'Gezielten Pre-Deploy-Scan starten.',
+          queue_fresh_scan: 'Frischen Scan starten.',
+          review_blockers: 'Blocker prüfen.'
+        };
+
+        panel.hidden = false;
+        pill.className = `severity-pill severity-${gateSeverity(decision)}`;
+        pill.textContent = decision;
+        message.textContent = `${actionMap[payload?.recommended_action] || 'Status prüfen.'} ${evidenceText}. Gründe: ${
+          reasonCodes.length ? reasonCodes.join(', ') : 'keine'
+        }`;
+
+        if (!payload?.gate?.deploy_allowed) {
+          showDashboardToast(message.textContent, gateSeverity(decision));
+        }
+      }
+
+      async function loadGateStatus(button) {
+        const previousText = button.textContent;
+        button.disabled = true;
+        button.textContent = 'Gate wird geprüft...';
+        try {
+          const commitSha = validateFullCommitSha(document.getElementById('predeploy-commit-input').value);
+          const repositoryFullName = preDeployRepositoryFullName();
+          const params = new URLSearchParams({
+            stack_name: 'security-watchdog',
+            repository_full_name: repositoryFullName,
+            commit_sha: commitSha,
+            compose_file: 'docker-compose.yml'
+          });
+          const payload = await fetchJson(`/automation/deployment-security-gate/status?${params.toString()}`);
+          renderGateStatus(payload);
+        } catch (error) {
+          showRequestError('Deploy-Gate-Prüfung fehlgeschlagen', error);
+        } finally {
+          button.disabled = false;
+          button.textContent = previousText;
+        }
+      }
+
+      async function queuePreDeployScan(button) {
+        const previousText = button.textContent;
+        button.disabled = true;
+        button.textContent = 'Pre-Deploy-Scan...';
+        try {
+          const commitSha = validateFullCommitSha(document.getElementById('predeploy-commit-input').value);
+          const repositoryFullName = preDeployRepositoryFullName();
+          const payload = await fetchJson('/automation/pre-deploy-scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              stack_name: 'security-watchdog',
+              repository_full_name: repositoryFullName,
+              commit_sha: commitSha,
+              compose_file: 'docker-compose.yml',
+              pause_active: true
+            })
+          });
+          dashboardRefreshAfterJobId = payload.job_id;
+          showDashboardToast(`Pre-Deploy-Scan für ${repositoryFullName} wurde eingereiht.`, 'medium');
+          await refreshScanStatus({ refreshDashboardOnCompletion: true });
+        } catch (error) {
+          showRequestError('Pre-Deploy-Scan fehlgeschlagen', error);
+        } finally {
+          button.disabled = false;
+          button.textContent = previousText;
+        }
+      }
+
       async function triggerScan(options = {}) {
         const button = document.getElementById('scan-button');
         button.disabled = true;
@@ -1092,6 +1339,47 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         }
       }
 
+      async function pauseCurrentScan() {
+        if (!currentScanJob || !isActiveScanJob(currentScanJob)) {
+          return;
+        }
+        const button = document.getElementById('pause-scan-button');
+        button.disabled = true;
+        button.textContent = 'Pause wird angefragt...';
+        try {
+          const job = await fetchJson(`/scan-jobs/${currentScanJob.id}/pause`, {
+            method: 'POST'
+          });
+          renderScanStatus(job);
+          scheduleScanStatusPolling(2500);
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = 'Scan pausieren';
+          showRequestError('Scan-Pause fehlgeschlagen', error);
+        }
+      }
+
+      async function resumeCurrentScan() {
+        if (!currentScanJob || currentScanJob.status !== 'paused') {
+          return;
+        }
+        const button = document.getElementById('resume-scan-button');
+        button.disabled = true;
+        button.textContent = 'Fortsetzen...';
+        try {
+          const job = await fetchJson(`/scan-jobs/${currentScanJob.id}/resume`, {
+            method: 'POST'
+          });
+          dashboardRefreshAfterJobId = job.id;
+          renderScanStatus(job);
+          scheduleScanStatusPolling(2500);
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = 'Scan fortsetzen';
+          showRequestError('Scan-Fortsetzung fehlgeschlagen', error);
+        }
+      }
+
       async function setRepositoryScanEnabled(repositoryId, scanEnabled, button) {
         const previousText = button.textContent;
         button.disabled = true;
@@ -1118,10 +1406,58 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         await setRepositoryScanEnabled(selectedRepository.id, !selectedRepository.scan_enabled, button);
       }
 
+      async function bulkSetScanEnabled(scanEnabled, button) {
+        const repositoryIds = selectedRepositoryIds();
+        if (!repositoryIds.length) {
+          showDashboardToast('Wähle zuerst mindestens ein System aus.', 'medium');
+          return;
+        }
+
+        const previousText = button.textContent;
+        button.disabled = true;
+        button.textContent = scanEnabled ? 'Aktiviere Auswahl...' : 'Deaktiviere Auswahl...';
+        try {
+          await fetchJson('/repositories/scan-settings/bulk', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              repository_ids: repositoryIds,
+              scan_enabled: scanEnabled
+            })
+          });
+          selectedSystemIds.clear();
+          await loadDashboard();
+          showDashboardToast(
+            scanEnabled
+              ? `${repositoryIds.length} Systeme sind wieder für Scans aktiv.`
+              : `${repositoryIds.length} Systeme sind von Scans ausgeschlossen.`,
+            'low'
+          );
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = previousText;
+          showRequestError('Bulk-Scan-Einstellung fehlgeschlagen', error);
+        }
+      }
+
       document.getElementById('scan-button').addEventListener('click', () => triggerScan());
       document.getElementById('cancel-scan-button').addEventListener('click', cancelCurrentScan);
+      document.getElementById('pause-scan-button').addEventListener('click', pauseCurrentScan);
+      document.getElementById('resume-scan-button').addEventListener('click', resumeCurrentScan);
       document.getElementById('toggle-scan-enabled-button').addEventListener('click', (event) => {
         toggleSelectedRepositoryScanEnabled(event.currentTarget);
+      });
+      document.getElementById('gate-status-button').addEventListener('click', (event) => {
+        loadGateStatus(event.currentTarget);
+      });
+      document.getElementById('predeploy-scan-button').addEventListener('click', (event) => {
+        queuePreDeployScan(event.currentTarget);
+      });
+      document.getElementById('bulk-disable-button').addEventListener('click', (event) => {
+        bulkSetScanEnabled(false, event.currentTarget);
+      });
+      document.getElementById('bulk-enable-button').addEventListener('click', (event) => {
+        bulkSetScanEnabled(true, event.currentTarget);
       });
       document.getElementById('scan-target-select').addEventListener('change', () => {
         syncTargetSourceSelection();
@@ -1142,6 +1478,11 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         }
       });
       document.getElementById('system-list').addEventListener('click', (event) => {
+        const checkbox = event.target.closest('[data-system-select-id]');
+        if (checkbox) {
+          event.stopPropagation();
+          return;
+        }
         const button = event.target.closest('[data-system-action]');
         if (!button) {
           return;
@@ -1170,6 +1511,19 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         if (action === 'remediation') {
           openRemediationPrompt(systemId, systemName, button);
         }
+      });
+      document.getElementById('system-list').addEventListener('change', (event) => {
+        const checkbox = event.target.closest('[data-system-select-id]');
+        if (!checkbox) {
+          return;
+        }
+        const repositoryId = Number(checkbox.dataset.systemSelectId);
+        if (checkbox.checked) {
+          selectedSystemIds.add(repositoryId);
+        } else {
+          selectedSystemIds.delete(repositoryId);
+        }
+        updateBulkButtons();
       });
 
       Promise.all([

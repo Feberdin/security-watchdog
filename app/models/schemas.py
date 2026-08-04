@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ScanSource = Literal["github", "unraid", "homeassistant"]
 DEFAULT_SCAN_SOURCES: tuple[ScanSource, ...] = ("github", "unraid", "homeassistant")
+ScanPurpose = Literal["manual", "pre_deploy"]
 
 
 class RepositoryOut(BaseModel):
@@ -347,6 +348,14 @@ class DeploymentSecurityGateResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class DeploymentGateStatusOut(BaseModel):
+    """Dashboard-safe gate status plus the next operator action."""
+
+    gate: DeploymentSecurityGateResponse
+    recommended_action: str
+    can_queue_pre_deploy_scan: bool
+
+
 class CodexPromptOut(BaseModel):
     """Reusable Codex prompt response for remediation actions in the dashboard."""
 
@@ -361,6 +370,11 @@ class ScanRequest(BaseModel):
     include_archived: bool = False
     force: bool = False
     scan_sources: list[ScanSource] = Field(default_factory=lambda: list(DEFAULT_SCAN_SOURCES))
+    priority: int = Field(default=0, ge=0, le=100)
+    pause_active: bool = False
+    purpose: ScanPurpose = "manual"
+    target_commit_sha: str | None = Field(default=None, min_length=40, max_length=40)
+    refresh_image_cache: bool = False
 
     @field_validator("repository_full_name")
     @classmethod
@@ -382,11 +396,60 @@ class ScanRequest(BaseModel):
             raise ValueError("scan_sources must contain at least one source")
         return deduplicated
 
+    @field_validator("target_commit_sha")
+    @classmethod
+    def normalize_target_commit_sha(cls, value: str | None) -> str | None:
+        """Accept only full hexadecimal SHAs for commit-bound pre-deploy scans."""
+
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if len(normalized) != 40 or any(character not in "0123456789abcdef" for character in normalized):
+            raise ValueError("target_commit_sha must be a full 40-character hexadecimal commit SHA")
+        return normalized
+
 
 class RepositoryScanSettingsRequest(BaseModel):
     """Operator-controlled repository scan visibility update."""
 
     scan_enabled: bool
+
+
+class RepositoryBulkScanSettingsRequest(BaseModel):
+    """Bulk scan visibility update for repository-like assets."""
+
+    repository_ids: list[int] = Field(min_length=1, max_length=500)
+    scan_enabled: bool
+
+    @field_validator("repository_ids")
+    @classmethod
+    def validate_repository_ids(cls, value: list[int]) -> list[int]:
+        """Deduplicate positive IDs while preserving the selected order."""
+
+        deduplicated = list(dict.fromkeys(value))
+        if any(repository_id <= 0 for repository_id in deduplicated):
+            raise ValueError("repository_ids must contain only positive IDs")
+        return deduplicated
+
+
+class PreDeployScanRequest(BaseModel):
+    """Queue a focused repository scan that can satisfy the deployment gate."""
+
+    stack_name: str = Field(default="security-watchdog", min_length=1, max_length=128)
+    repository_full_name: str = Field(min_length=3, max_length=255)
+    commit_sha: str = Field(min_length=40, max_length=40)
+    compose_file: str = Field(default="docker-compose.yml", min_length=1, max_length=512)
+    pause_active: bool = True
+
+    @field_validator("commit_sha")
+    @classmethod
+    def normalize_commit_sha(cls, value: str) -> str:
+        """Normalize full Git SHAs before they enter queue metadata."""
+
+        normalized = value.strip().lower()
+        if len(normalized) != 40 or any(character not in "0123456789abcdef" for character in normalized):
+            raise ValueError("commit_sha must be a full 40-character hexadecimal commit SHA")
+        return normalized
 
 
 class ScanResponse(BaseModel):
@@ -446,6 +509,11 @@ class ManualScanJobOut(BaseModel):
     force: bool
     scan_sources: list[ScanSource] = Field(default_factory=lambda: list(DEFAULT_SCAN_SOURCES))
     cancel_requested: bool = False
+    pause_requested: bool = False
+    priority: int = 0
+    purpose: ScanPurpose = "manual"
+    target_commit_sha: str | None = None
+    refresh_image_cache: bool = False
     requested_at: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None

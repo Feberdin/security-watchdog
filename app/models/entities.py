@@ -56,6 +56,7 @@ class ManualScanJobStatus(StrEnum):
 
     QUEUED = "queued"
     RUNNING = "running"
+    PAUSED = "paused"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELED = "canceled"
@@ -222,6 +223,31 @@ class ScanResult(Base):
     repository: Mapped[Repository | None] = relationship(back_populates="scan_results")
 
 
+class ContainerImageScanCache(Base):
+    """Cached normalized image findings for one immutable image digest or Docker image ID."""
+
+    __tablename__ = "container_image_scan_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "image_identity",
+            "scanner_version",
+            name="uq_container_image_scan_cache_identity_version",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    image_identity: Mapped[str] = mapped_column(String(512), index=True)
+    image_ref: Mapped[str] = mapped_column(String(1024))
+    scanner_version: Mapped[str] = mapped_column(String(100), default="trivy-grype-v1")
+    findings_json: Mapped[list[dict]] = mapped_column("findings", JSON, default=list)
+    finding_count: Mapped[int] = mapped_column(Integer, default=0)
+    scanned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class ThreatArticle(Base):
     """Normalized threat intelligence article from RSS, Reddit, HN, or GitHub issues."""
 
@@ -292,6 +318,11 @@ class ManualScanJob(Base):
     force: Mapped[bool] = mapped_column(Boolean, default=False)
     scan_sources_json: Mapped[list[str]] = mapped_column("scan_sources", JSON, default=list)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    pause_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    priority: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    purpose: Mapped[str] = mapped_column(String(50), default="manual", index=True)
+    target_commit_sha: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    refresh_image_cache: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(
         String(20),
         default=ManualScanJobStatus.QUEUED.value,

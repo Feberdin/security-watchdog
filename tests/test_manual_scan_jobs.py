@@ -61,6 +61,83 @@ def test_enqueue_manual_scan_reuses_active_job() -> None:
     assert second_job.status == ManualScanJobStatus.QUEUED.value
 
 
+def test_enqueue_pre_deploy_scan_queues_behind_running_job_and_requests_pause() -> None:
+    """High-priority deploy evidence scans should not be hidden behind an unrelated full scan."""
+
+    session_factory = build_session_factory()
+    session = session_factory()
+
+    full_scan_job, _ = manual_scan_jobs.enqueue_manual_scan(
+        session,
+        ScanRequest(repository_full_name=None, include_archived=False, force=True),
+    )
+    session.commit()
+    running_job = claim_manual_scan_job(session, job_id=full_scan_job.id)
+    session.commit()
+
+    pre_deploy_job, created = manual_scan_jobs.enqueue_manual_scan(
+        session,
+        ScanRequest(
+            repository_full_name="Feberdin/security-watchdog",
+            include_archived=False,
+            force=True,
+            scan_sources=["github"],
+            priority=100,
+            pause_active=True,
+            purpose="pre_deploy",
+            target_commit_sha="a" * 40,
+        ),
+    )
+    session.commit()
+    stored_running_job = get_manual_scan_job(session, running_job.id if running_job else 0)
+
+    assert running_job is not None
+    assert created is True
+    assert pre_deploy_job.id != full_scan_job.id
+    assert pre_deploy_job.status == ManualScanJobStatus.QUEUED.value
+    assert pre_deploy_job.priority == 100
+    assert pre_deploy_job.purpose == "pre_deploy"
+    assert stored_running_job is not None
+    assert stored_running_job.pause_requested is True
+
+
+def test_claim_manual_scan_job_prefers_highest_priority_queued_job() -> None:
+    """The queue worker should run urgent targeted jobs before older low-priority work."""
+
+    session_factory = build_session_factory()
+    session = session_factory()
+
+    low_priority_job, _ = manual_scan_jobs.enqueue_manual_scan(
+        session,
+        ScanRequest(
+            repository_full_name="Feberdin/old-low-priority",
+            include_archived=False,
+            force=True,
+            scan_sources=["github"],
+            priority=0,
+        ),
+    )
+    high_priority_job, _ = manual_scan_jobs.enqueue_manual_scan(
+        session,
+        ScanRequest(
+            repository_full_name="Feberdin/security-watchdog",
+            include_archived=False,
+            force=True,
+            scan_sources=["github"],
+            priority=80,
+        ),
+    )
+    session.commit()
+
+    claimed_job = claim_manual_scan_job(session)
+    session.commit()
+
+    assert claimed_job is not None
+    assert claimed_job.id == high_priority_job.id
+    assert claimed_job.status == ManualScanJobStatus.RUNNING.value
+    assert low_priority_job.status == ManualScanJobStatus.QUEUED.value
+
+
 def test_recover_interrupted_manual_scan_jobs_keeps_running_job_resumable(monkeypatch) -> None:
     """A runner restart should leave a running job available for resume instead of failing it."""
 
@@ -337,6 +414,36 @@ def test_cancel_manual_scan_job_marks_queued_job_canceled(monkeypatch) -> None:
     assert stored_job.completed_at is not None
 
 
+def test_pause_and_resume_manual_scan_job_requeues_paused_job(monkeypatch) -> None:
+    """Operators should be able to pause queued work and later return it to the worker queue."""
+
+    session_factory = build_session_factory()
+    monkeypatch.setattr(manual_scan_jobs, "SessionLocal", session_factory)
+
+    with session_factory() as session:
+        job, created = manual_scan_jobs.enqueue_manual_scan(
+            session,
+            ScanRequest(repository_full_name=None, include_archived=False, force=False),
+        )
+        paused = manual_scan_jobs.pause_manual_scan_job(session, job.id)
+        resumed = manual_scan_jobs.resume_paused_manual_scan_job(session, job.id)
+        session.commit()
+        job_id = job.id
+
+    with session_factory() as session:
+        stored_job = get_manual_scan_job(session, job_id)
+
+    assert created is True
+    assert paused is not None
+    assert paused.status == ManualScanJobStatus.PAUSED.value
+    assert resumed is not None
+    assert resumed.status == ManualScanJobStatus.QUEUED.value
+    assert resumed.pause_requested is False
+    assert resumed.progress.phase == "queued"
+    assert stored_job is not None
+    assert stored_job.status == ManualScanJobStatus.QUEUED.value
+
+
 def test_process_manual_scan_job_marks_running_cancel_as_canceled(monkeypatch) -> None:
     """Running scans should persist canceled instead of failed when the worker sees the cancel flag."""
 
@@ -384,3 +491,52 @@ def test_process_manual_scan_job_marks_running_cancel_as_canceled(monkeypatch) -
     assert result.progress.phase == "canceled"
     assert stored_job is not None
     assert stored_job.status == ManualScanJobStatus.CANCELED.value
+
+
+def test_process_manual_scan_job_marks_running_pause_as_paused(monkeypatch) -> None:
+    """Running scans should persist paused when the worker sees the pause flag."""
+
+    session_factory = build_session_factory()
+    monkeypatch.setattr(manual_scan_jobs, "SessionLocal", session_factory)
+
+    class PausingOrchestrator:
+        """Simulate an orchestrator that observes pause at a checkpoint."""
+
+        def run_manual_scan(
+            self,
+            session: Session,
+            request: ScanRequest,
+            *,
+            job_id: int | None = None,
+            resume_started_at=None,
+            progress_callback=None,
+            cancellation_check=None,
+        ) -> ScanResponse:
+            assert cancellation_check is not None
+            cancellation_check()
+            raise AssertionError("cancellation_check should raise before scan work continues")
+
+    monkeypatch.setattr(manual_scan_jobs, "ScanOrchestrator", PausingOrchestrator)
+
+    with session_factory() as session:
+        job, created = manual_scan_jobs.enqueue_manual_scan(
+            session,
+            ScanRequest(repository_full_name=None, include_archived=False, force=False),
+        )
+        job.status = ManualScanJobStatus.RUNNING.value
+        job.started_at = datetime.now(UTC) - timedelta(minutes=5)
+        job.pause_requested = True
+        session.commit()
+        job_id = job.id
+
+    result = manual_scan_jobs.process_manual_scan_job()
+
+    with session_factory() as session:
+        stored_job = get_manual_scan_job(session, job_id)
+
+    assert created is True
+    assert result is not None
+    assert result.status == ManualScanJobStatus.PAUSED.value
+    assert result.progress.phase == "paused"
+    assert stored_job is not None
+    assert stored_job.status == ManualScanJobStatus.PAUSED.value

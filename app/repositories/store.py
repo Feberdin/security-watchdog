@@ -18,6 +18,7 @@ from app.core.utils import sha256_text, stable_json_dumps
 from app.models.entities import (
     Alert,
     AlertStatus,
+    ContainerImageScanCache,
     Dependency,
     DependencyVulnerability,
     ManualScanJob,
@@ -29,6 +30,7 @@ from app.models.entities import (
     Vulnerability,
 )
 from app.models.schemas import (
+    ContainerFinding,
     DependencyRecord,
     ScanRequest,
     ScanResponse,
@@ -38,6 +40,7 @@ from app.models.schemas import (
 
 LOGGER = logging.getLogger(__name__)
 MANUAL_SCAN_RESUME_GRACE_SECONDS = 60
+CONTAINER_IMAGE_SCANNER_VERSION = "trivy-grype-v1"
 
 
 def utcnow() -> datetime:
@@ -114,6 +117,23 @@ def set_repository_scan_enabled(
     return repository
 
 
+def set_repositories_scan_enabled_bulk(
+    session: Session,
+    *,
+    repository_ids: list[int],
+    scan_enabled: bool,
+) -> list[Repository]:
+    """Persist scan visibility for multiple repository-like assets in one operator action."""
+
+    repositories = session.scalars(
+        select(Repository).where(Repository.id.in_(repository_ids)).order_by(Repository.full_name.asc())
+    ).all()
+    for repository in repositories:
+        repository.scan_enabled = scan_enabled
+    session.flush()
+    return repositories
+
+
 def create_manual_scan_job(session: Session, request: ScanRequest) -> ManualScanJob:
     """Persist one queued manual scan request for later execution by a durable scan runner."""
 
@@ -122,6 +142,10 @@ def create_manual_scan_job(session: Session, request: ScanRequest) -> ManualScan
         include_archived=request.include_archived,
         force=request.force,
         scan_sources_json=request.scan_sources,
+        priority=request.priority,
+        purpose=request.purpose,
+        target_commit_sha=request.target_commit_sha,
+        refresh_image_cache=request.refresh_image_cache,
         status=ManualScanJobStatus.QUEUED.value,
     )
     session.add(job)
@@ -215,6 +239,41 @@ def get_active_manual_scan_job(session: Session) -> ManualScanJob | None:
     )
 
 
+def get_running_manual_scan_job(session: Session) -> ManualScanJob | None:
+    """Return the currently running manual scan, if a worker owns one."""
+
+    return session.scalar(
+        select(ManualScanJob)
+        .where(ManualScanJob.status == ManualScanJobStatus.RUNNING.value)
+        .order_by(ManualScanJob.started_at.asc(), ManualScanJob.id.asc())
+        .limit(1)
+    )
+
+
+def get_matching_queued_manual_scan_job(session: Session, request: ScanRequest) -> ManualScanJob | None:
+    """Return an equivalent queued job so repeated clicks do not flood the queue."""
+
+    return session.scalar(
+        select(ManualScanJob)
+        .where(
+            ManualScanJob.status == ManualScanJobStatus.QUEUED.value,
+            ManualScanJob.repository_full_name.is_(None)
+            if request.repository_full_name is None
+            else ManualScanJob.repository_full_name == request.repository_full_name,
+            ManualScanJob.include_archived == request.include_archived,
+            ManualScanJob.force == request.force,
+            ManualScanJob.scan_sources_json == request.scan_sources,
+            ManualScanJob.purpose == request.purpose,
+            ManualScanJob.target_commit_sha.is_(None)
+            if request.target_commit_sha is None
+            else ManualScanJob.target_commit_sha == request.target_commit_sha,
+            ManualScanJob.refresh_image_cache == request.refresh_image_cache,
+        )
+        .order_by(desc(ManualScanJob.priority), ManualScanJob.requested_at.asc(), ManualScanJob.id.asc())
+        .limit(1)
+    )
+
+
 def fail_running_manual_scan_jobs(session: Session, *, error_message: str) -> int:
     """
     Atomically fail jobs that belonged to a previous scan-runner process.
@@ -263,6 +322,48 @@ def request_manual_scan_cancel(session: Session, *, job_id: int) -> ManualScanJo
     return job
 
 
+def request_manual_scan_pause(session: Session, *, job_id: int) -> ManualScanJob | None:
+    """
+    Mark a queued or running scan for cooperative pause.
+
+    Why this exists:
+    High-priority targeted scans should be able to interrupt a long estate scan after the current
+    safe checkpoint without losing already committed scan results.
+    """
+
+    job = get_manual_scan_job(session, job_id)
+    if job is None:
+        return None
+
+    if job.status == ManualScanJobStatus.QUEUED.value:
+        job.status = ManualScanJobStatus.PAUSED.value
+        job.pause_requested = True
+        job.completed_at = utcnow()
+        job.error_message = None
+    elif job.status == ManualScanJobStatus.RUNNING.value:
+        job.pause_requested = True
+    session.flush()
+    return job
+
+
+def resume_manual_scan_job(session: Session, *, job_id: int) -> ManualScanJob | None:
+    """Move a paused manual scan back to the prioritized queue."""
+
+    job = get_manual_scan_job(session, job_id)
+    if job is None:
+        return None
+    if job.status != ManualScanJobStatus.PAUSED.value:
+        return job
+
+    job.status = ManualScanJobStatus.QUEUED.value
+    job.pause_requested = False
+    job.cancel_requested = False
+    job.completed_at = None
+    job.error_message = None
+    session.flush()
+    return job
+
+
 def is_manual_scan_cancel_requested(session: Session, *, job_id: int) -> bool:
     """Return whether an operator has requested cancellation for one scan job."""
 
@@ -271,6 +372,19 @@ def is_manual_scan_cancel_requested(session: Session, *, job_id: int) -> bool:
             select(ManualScanJob.cancel_requested).where(
                 ManualScanJob.id == job_id,
                 ManualScanJob.cancel_requested.is_(True),
+            )
+        )
+    )
+
+
+def is_manual_scan_pause_requested(session: Session, *, job_id: int) -> bool:
+    """Return whether an operator has requested pause for one scan job."""
+
+    return bool(
+        session.scalar(
+            select(ManualScanJob.pause_requested).where(
+                ManualScanJob.id == job_id,
+                ManualScanJob.pause_requested.is_(True),
             )
         )
     )
@@ -294,7 +408,7 @@ def claim_manual_scan_job(session: Session, *, job_id: int | None = None) -> Man
         job_id = session.scalar(
             select(ManualScanJob.id)
             .where(ManualScanJob.status == ManualScanJobStatus.QUEUED.value)
-            .order_by(ManualScanJob.requested_at.asc(), ManualScanJob.id.asc())
+            .order_by(desc(ManualScanJob.priority), ManualScanJob.requested_at.asc(), ManualScanJob.id.asc())
             .limit(1)
         )
     if job_id is None:
@@ -336,6 +450,7 @@ def claim_manual_scan_job(session: Session, *, job_id: int | None = None) -> Man
             completed_at=None,
             error_message=None,
             cancel_requested=False,
+            pause_requested=False,
         )
     )
     if claim_result.rowcount != 1:
@@ -389,6 +504,7 @@ def mark_manual_scan_job_succeeded(
     job.status = ManualScanJobStatus.SUCCEEDED.value
     job.completed_at = utcnow()
     job.cancel_requested = False
+    job.pause_requested = False
     job.repository_count = response.repository_count
     job.alert_count = response.alert_count
     job.failed_system_count = response.failed_system_count
@@ -411,6 +527,8 @@ def mark_manual_scan_job_failed(
 
     job.status = ManualScanJobStatus.FAILED.value
     job.completed_at = utcnow()
+    job.cancel_requested = False
+    job.pause_requested = False
     job.error_message = error_message
     session.flush()
     return job
@@ -426,6 +544,22 @@ def mark_manual_scan_job_canceled(session: Session, *, job_id: int) -> ManualSca
     job.status = ManualScanJobStatus.CANCELED.value
     job.completed_at = utcnow()
     job.cancel_requested = True
+    job.pause_requested = False
+    job.error_message = None
+    session.flush()
+    return job
+
+
+def mark_manual_scan_job_paused(session: Session, *, job_id: int) -> ManualScanJob | None:
+    """Persist an operator-paused state for a cooperative scan stop."""
+
+    job = get_manual_scan_job(session, job_id)
+    if job is None:
+        return None
+
+    job.status = ManualScanJobStatus.PAUSED.value
+    job.completed_at = utcnow()
+    job.pause_requested = True
     job.error_message = None
     session.flush()
     return job
@@ -600,6 +734,61 @@ def record_scan_result(
             details_json=details,
         )
     )
+
+
+def get_container_image_scan_cache(
+    session: Session,
+    *,
+    image_identity: str,
+    scanner_version: str = CONTAINER_IMAGE_SCANNER_VERSION,
+) -> list[ContainerFinding] | None:
+    """Return cached normalized image findings for one immutable image identity."""
+
+    cache_entry = session.scalar(
+        select(ContainerImageScanCache).where(
+            ContainerImageScanCache.image_identity == image_identity,
+            ContainerImageScanCache.scanner_version == scanner_version,
+        )
+    )
+    if cache_entry is None:
+        return None
+    return [ContainerFinding(**finding) for finding in cache_entry.findings_json]
+
+
+def upsert_container_image_scan_cache(
+    session: Session,
+    *,
+    image_identity: str,
+    image_ref: str,
+    findings: list[ContainerFinding],
+    scanner_version: str = CONTAINER_IMAGE_SCANNER_VERSION,
+) -> ContainerImageScanCache:
+    """Store or refresh scanner findings for one immutable image identity."""
+
+    cache_entry = session.scalar(
+        select(ContainerImageScanCache).where(
+            ContainerImageScanCache.image_identity == image_identity,
+            ContainerImageScanCache.scanner_version == scanner_version,
+        )
+    )
+    findings_payload = [finding.model_dump() for finding in findings]
+    if cache_entry is None:
+        cache_entry = ContainerImageScanCache(
+            image_identity=image_identity,
+            image_ref=image_ref,
+            scanner_version=scanner_version,
+            findings_json=findings_payload,
+            finding_count=len(findings),
+            scanned_at=utcnow(),
+        )
+        session.add(cache_entry)
+    else:
+        cache_entry.image_ref = image_ref
+        cache_entry.findings_json = findings_payload
+        cache_entry.finding_count = len(findings)
+        cache_entry.scanned_at = utcnow()
+    session.flush()
+    return cache_entry
 
 
 def store_threat_article(session: Session, article: ThreatArticleRecord) -> ThreatArticle:

@@ -334,6 +334,32 @@ p {
   border-top: 1px solid var(--border-default);
 }
 
+.predeploy-controls {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) auto minmax(280px, 1.2fr);
+  gap: 14px;
+  align-items: end;
+  padding: 16px;
+  background: rgba(11, 15, 26, 0.34);
+  border: 1px solid rgba(0, 229, 255, 0.14);
+  border-radius: var(--radius-md);
+}
+
+.gate-status-panel {
+  display: flex;
+  min-width: 0;
+  gap: 10px;
+  align-items: center;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.gate-status-panel span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .scan-control-field {
   min-width: 0;
 }
@@ -494,6 +520,21 @@ p {
   align-items: flex-start;
 }
 
+.inventory-actions {
+  display: flex;
+  gap: 12px;
+  align-items: end;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.bulk-controls {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .search-field {
   min-width: min(360px, 100%);
 }
@@ -560,6 +601,13 @@ p {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.system-select-checkbox {
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 auto;
+  accent-color: var(--color-cyber-cyan);
 }
 
 .system-title-row h3 {
@@ -866,6 +914,41 @@ p {
   min-height: 1.2rem;
 }
 
+.dashboard-toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 20;
+  width: min(520px, calc(100% - 36px));
+  padding: 14px 16px;
+  color: var(--text-primary);
+  background: rgba(18, 24, 43, 0.96);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-deep);
+  line-height: 1.5;
+}
+
+.severity-border-critical {
+  border-color: rgba(255, 46, 136, 0.62);
+}
+
+.severity-border-high {
+  border-color: rgba(255, 154, 60, 0.58);
+}
+
+.severity-border-medium {
+  border-color: rgba(154, 77, 255, 0.54);
+}
+
+.severity-border-low {
+  border-color: rgba(0, 229, 255, 0.46);
+}
+
+.severity-border-none {
+  border-color: rgba(157, 168, 199, 0.3);
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -893,7 +976,16 @@ p {
     grid-template-columns: 1fr;
   }
 
+  .predeploy-controls {
+    grid-template-columns: 1fr;
+  }
+
   .scan-control-actions {
+    justify-content: flex-start;
+  }
+
+  .inventory-actions,
+  .bulk-controls {
     justify-content: flex-start;
   }
 

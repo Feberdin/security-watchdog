@@ -18,8 +18,8 @@ from sqlalchemy.orm import Session
 
 import app.models.entities  # noqa: F401
 from app.db.base import Base
-from app.models.entities import ManualScanJob, ManualScanJobStatus, Repository, ScanResult
-from app.models.schemas import ScanProgressUpdate, ScanRequest
+from app.models.entities import ContainerImageScanCache, ManualScanJob, ManualScanJobStatus, Repository, ScanResult
+from app.models.schemas import ContainerFinding, ScanProgressUpdate, ScanRequest
 from app.services.orchestrator import ScanOrchestrator
 
 
@@ -289,10 +289,16 @@ def test_manual_scan_respects_source_selection() -> None:
         _session: Session,
         repository: Repository,
         image_ref: str,
-        _progress=None,
+        image_identity: str | None = None,
+        *,
+        refresh_image_cache: bool = False,
+        progress=None,
         cancellation_check=None,
     ) -> int:
         scanned_assets.append(f"{repository.full_name}:{image_ref}")
+        assert image_identity is None
+        assert refresh_image_cache is False
+        assert progress is not None
         return 1
 
     orchestrator._scan_unraid_asset = fake_unraid_scan
@@ -310,6 +316,64 @@ def test_manual_scan_respects_source_selection() -> None:
     assert scanned_assets == ["unraid/app:example/app:latest"]
     assert response.repository_count == 1
     assert response.alert_count == 1
+
+
+def test_container_image_scan_reuses_cached_findings_by_image_identity() -> None:
+    """Immutable image identities should avoid repeat Trivy/Grype scans across assets."""
+
+    session = build_test_session()
+    orchestrator = ScanOrchestrator()
+
+    class FakeContainerScanner:
+        """Count image scans while returning one normalized finding."""
+
+        calls = 0
+
+        def scan_image(self, image_ref: str) -> list[ContainerFinding]:
+            self.calls += 1
+            return [
+                ContainerFinding(
+                    tool="trivy",
+                    target=image_ref,
+                    vulnerability_id="CVE-2026-0001",
+                    package_name="openssl",
+                    installed_version="1.0.0",
+                    severity="high",
+                    fix_version="1.0.1",
+                    description="Synthetic image finding",
+                )
+            ]
+
+    fake_scanner = FakeContainerScanner()
+    orchestrator.container_scanner = fake_scanner
+
+    first_findings, first_cache_hit = orchestrator._scan_container_image(
+        session,
+        image_ref="example/app:latest",
+        image_identity="example/app@sha256:abc",
+        refresh_image_cache=False,
+    )
+    second_findings, second_cache_hit = orchestrator._scan_container_image(
+        session,
+        image_ref="example/app:latest",
+        image_identity="example/app@sha256:abc",
+        refresh_image_cache=False,
+    )
+    refreshed_findings, refreshed_cache_hit = orchestrator._scan_container_image(
+        session,
+        image_ref="example/app:latest",
+        image_identity="example/app@sha256:abc",
+        refresh_image_cache=True,
+    )
+    cache_entries = session.scalars(select(ContainerImageScanCache)).all()
+
+    assert fake_scanner.calls == 2
+    assert first_cache_hit is False
+    assert second_cache_hit is True
+    assert refreshed_cache_hit is False
+    assert first_findings == second_findings == refreshed_findings
+    assert len(cache_entries) == 1
+    assert cache_entries[0].finding_count == 1
 
 
 def test_manual_scan_skips_disabled_repositories() -> None:

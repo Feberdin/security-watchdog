@@ -21,6 +21,11 @@ How to debug: When in doubt, review mount permissions, token scopes, and alertin
 - Protect the Docker socket carefully; anyone controlling the container with that mount can influence the host.
 - Store `.env` in a secret manager or encrypted backup, never in source control.
 - Limit access to the dashboard behind a reverse proxy, VPN, or SSO if it will be reachable outside a trusted LAN.
+- The production image intentionally starts as root only for the Unraid bootstrap in
+  `docker/entrypoint.sh`: it aligns `PUID`/`PGID`, prepares `/app/data`, joins the mounted Docker
+  socket group, and then executes the API or worker command through `gosu` as the unprivileged
+  `watchdog` user. `.trivyignore` suppresses only Trivy `DS-0002`/`AVD-DS-0002` for that documented
+  bootstrap exception; do not add unrelated findings to that file.
 
 ## Logging and Secret Handling
 

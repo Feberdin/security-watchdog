@@ -1,12 +1,12 @@
 <!--
 Purpose: Main synthwave dashboard for systems, dependencies, debugging exports, and remediation.
 Input/Output: Loaded by the browser and hydrated from `/reports`, `/systems`, `/diagnostics/export`,
-`/automation/high-risk-updates/codex-prompt`, `/scan-jobs/latest`, and per-system Codex helper
+`/automation/grouped-remediation/codex-prompt`, `/scan-jobs/latest`, and per-system Codex helper
 endpoints.
 Important invariants: Operators should be able to scan the whole platform quickly, then drill into
 one system and export structured data or a remediation prompt without leaving the page.
 Debugging: If one of the Codex helper buttons appears broken, inspect the browser requests to
-`/scan`, `/scan-jobs/latest`, `/diagnostics/export`, `/automation/high-risk-updates/codex-prompt`,
+`/scan`, `/scan-jobs/latest`, `/diagnostics/export`, `/automation/grouped-remediation/codex-prompt`,
 `/systems/{id}/debug-export`, and `/systems/{id}/codex-remediation`.
 -->
 <!DOCTYPE html>
@@ -34,7 +34,7 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         </div>
         <div class="topbar-actions">
           <button id="high-risk-update-button" class="action-button secondary-button">
-            High-Risk Updates
+            Codex Gesamt-Prompt
           </button>
           <button id="debug-export-button" class="action-button secondary-button">
             Codex Debug Export
@@ -1102,15 +1102,15 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
 
       async function openHighRiskUpdatePrompt(button) {
         button.disabled = true;
-        button.textContent = 'Queue wird erstellt...';
+        button.textContent = 'Prompt wird erstellt...';
         try {
-          const payload = await fetchJson('/automation/high-risk-updates/codex-prompt');
+          const payload = await fetchJson('/automation/grouped-remediation/codex-prompt');
           showModal(payload.title, payload.prompt);
         } catch (error) {
-          showRequestError('High-Risk Update Queue fehlgeschlagen', error);
+          showRequestError('Codex Gesamt-Prompt fehlgeschlagen', error);
         } finally {
           button.disabled = false;
-          button.textContent = 'High-Risk Updates';
+          button.textContent = 'Codex Gesamt-Prompt';
         }
       }
 

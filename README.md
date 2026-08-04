@@ -21,6 +21,7 @@ How to debug: Start with `LOG_LEVEL=DEBUG`, inspect `/health`, `/reports`, worke
 - Exposes REST endpoints and a browser dashboard.
 - Lets operators start full, source-specific, single-asset, and pre-deploy scans; pause, resume, or cancel manual scans; and disable irrelevant assets individually or in batches without deleting historical findings.
 - Classifies remediation ownership so Codex prompts only suggest Issue/PR work for owned repos or owned images with a mapped source repo; forks, external images, and unknown sources stay advisory-only or exclusion candidates.
+- Generates a grouped Codex remediation prompt after full scans: owned GitHub repos plus matching owned Unraid containers first, external or unmapped Unraid containers next, Home Assistant assets after that, and every group sorted by severity.
 - Sends alerts to Slack, email, and GitHub issues.
 
 ## Quickstart
@@ -109,6 +110,7 @@ restart or deployment. Queued work is claimed by descending `priority`, then req
 - `GET /systems`: System-centric inventory for the dashboard with expandable dependency details, latest-version hints, and a backend remediation policy per system.
 - `GET /automation/high-risk-updates`: Prioritized update queue for high-risk and outdated dependencies. Each task includes the same remediation policy so Codex can distinguish managed fixes from advisory-only work.
 - `GET /automation/high-risk-updates/codex-prompt`: Master prompt for a controlled Codex update run across queued repositories.
+- `GET /automation/grouped-remediation/codex-prompt`: Full-scan Codex prompt grouped by ownership and source repository. Use this after a broad scan when one agent should process owned repos, related owned Unraid images, external containers, and Home Assistant findings in a deterministic order.
 - `GET /automation/daily-security-check`: Machine-readable runbook for the recurring Codex security task.
 - `GET /automation/deployment-security-gate/status`: Dashboard-safe gate status for one exact commit; no Broker token required.
 - `POST /automation/deployment-security-gate`: Authenticated, fail-closed pre-deployment decision for one exact Git commit. See [Deployment Broker security gate](docs/deployment-broker-security-gate.md).

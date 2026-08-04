@@ -86,6 +86,41 @@ def _ensure_runtime_schema() -> None:
                 generic="ALTER TABLE manual_scan_jobs ADD COLUMN cancel_requested BOOLEAN NOT NULL DEFAULT FALSE",
                 dialect_name=dialect_name,
             )
+        if "pause_requested" not in job_columns:
+            _execute_schema_ddl(
+                postgresql="ALTER TABLE manual_scan_jobs ADD COLUMN pause_requested BOOLEAN NOT NULL DEFAULT FALSE",
+                sqlite="ALTER TABLE manual_scan_jobs ADD COLUMN pause_requested BOOLEAN NOT NULL DEFAULT 0",
+                generic="ALTER TABLE manual_scan_jobs ADD COLUMN pause_requested BOOLEAN NOT NULL DEFAULT FALSE",
+                dialect_name=dialect_name,
+            )
+        if "priority" not in job_columns:
+            _execute_schema_ddl(
+                postgresql="ALTER TABLE manual_scan_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+                sqlite="ALTER TABLE manual_scan_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+                generic="ALTER TABLE manual_scan_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+                dialect_name=dialect_name,
+            )
+        if "purpose" not in job_columns:
+            _execute_schema_ddl(
+                postgresql="ALTER TABLE manual_scan_jobs ADD COLUMN purpose VARCHAR(50) NOT NULL DEFAULT 'manual'",
+                sqlite="ALTER TABLE manual_scan_jobs ADD COLUMN purpose VARCHAR(50) NOT NULL DEFAULT 'manual'",
+                generic="ALTER TABLE manual_scan_jobs ADD COLUMN purpose VARCHAR(50) NOT NULL DEFAULT 'manual'",
+                dialect_name=dialect_name,
+            )
+        if "target_commit_sha" not in job_columns:
+            _execute_schema_ddl(
+                postgresql="ALTER TABLE manual_scan_jobs ADD COLUMN target_commit_sha VARCHAR(40)",
+                sqlite="ALTER TABLE manual_scan_jobs ADD COLUMN target_commit_sha VARCHAR(40)",
+                generic="ALTER TABLE manual_scan_jobs ADD COLUMN target_commit_sha VARCHAR(40)",
+                dialect_name=dialect_name,
+            )
+        if "refresh_image_cache" not in job_columns:
+            _execute_schema_ddl(
+                postgresql="ALTER TABLE manual_scan_jobs ADD COLUMN refresh_image_cache BOOLEAN NOT NULL DEFAULT FALSE",
+                sqlite="ALTER TABLE manual_scan_jobs ADD COLUMN refresh_image_cache BOOLEAN NOT NULL DEFAULT 0",
+                generic="ALTER TABLE manual_scan_jobs ADD COLUMN refresh_image_cache BOOLEAN NOT NULL DEFAULT FALSE",
+                dialect_name=dialect_name,
+            )
 
 
 def _execute_schema_ddl(

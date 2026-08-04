@@ -10,7 +10,7 @@ How to debug: Start with `LOG_LEVEL=DEBUG`, inspect `/health`, `/reports`, worke
 - Inventories all GitHub repositories available to the configured user token.
 - Clones or updates repositories and extracts dependencies from Python, Node.js, Java, PHP, Rust, Go, and Docker manifests.
 - Scans repositories for likely leaked secrets with regex and entropy heuristics, including public git history for owned public repositories.
-- Scans Docker images and Dockerfiles with Trivy and Grype.
+- Scans Docker images and Dockerfiles with Trivy and Grype, and reuses cached image findings for the same immutable digest or image ID.
 - Discovers running Unraid Docker containers through the Docker API or socket.
 - Discovers Home Assistant integrations from mounted config/component paths or from a remote Home Assistant REST API.
 - Correlates dependencies with OSV, NVD, GitHub Security Advisories, and CISA KEV.
@@ -19,7 +19,7 @@ How to debug: Start with `LOG_LEVEL=DEBUG`, inspect `/health`, `/reports`, worke
 - Generates CycloneDX and SPDX SBOMs for every scanned asset.
 - Exports active alerts as SARIF 2.1.0 JSON for GitHub Code Scanning-compatible tooling.
 - Exposes REST endpoints and a browser dashboard.
-- Lets operators start full or targeted scans, cancel a running manual scan, and disable irrelevant assets without deleting historical findings.
+- Lets operators start full, source-specific, single-asset, and pre-deploy scans; pause, resume, or cancel manual scans; and disable irrelevant assets individually or in batches without deleting historical findings.
 - Sends alerts to Slack, email, and GitHub issues.
 
 ## Quickstart
@@ -84,27 +84,32 @@ Key environment variables:
 
 ## API Overview
 
-- `POST /scan`: Queue an immediate scan and return `202 Accepted` plus a status URL. Optional JSON fields: `repository_full_name` for one asset, `scan_sources` with `github`, `unraid`, and/or `homeassistant`, `force`, and `include_archived`.
+- `POST /scan`: Queue an immediate scan and return `202 Accepted` plus a status URL. Optional JSON fields: `repository_full_name` for one asset, `scan_sources` with `github`, `unraid`, and/or `homeassistant`, `force`, `include_archived`, `priority`, `pause_active`, `purpose`, `target_commit_sha`, and `refresh_image_cache`.
 - `GET /scan-jobs/latest`: Latest manual scan including lifecycle state, percentage, phase, and recent progress events.
 - `GET /scan-jobs/{job_id}`: One manual scan job with timestamps, counts, error details, and a bounded operator log.
 - `POST /scan-jobs/{job_id}/cancel`: Request cooperative cancellation for a queued or running scan. Running scans stop at the next safe checkpoint; already committed asset results stay stored.
+- `POST /scan-jobs/{job_id}/pause`: Request cooperative pause for a queued or running scan. Running scans pause at the next safe checkpoint; already committed asset results stay stored.
+- `POST /scan-jobs/{job_id}/resume`: Return a paused scan to the prioritized queue.
 
 Manual scans are stored in PostgreSQL before execution. The dedicated `worker`, or the API's
 embedded scheduler in single-container installations, claims queued work. Running jobs persist
 progress counters after each asset and resume from the newest durable asset outcome after a worker
-restart or deployment.
+restart or deployment. Queued work is claimed by descending `priority`, then request time.
 - `GET /reports`: Aggregated dashboard/report data.
 - `GET /reports/sarif`: Active alerts as SARIF 2.1.0 JSON. Add `?include_resolved=true` for audit exports.
 - `GET /alerts`: Latest alerts.
 - `GET /threats`: Recent threat articles and AI-extracted threat records.
 - `GET /dependencies`: Recently scanned dependencies.
 - `GET /repositories`: Repository-like assets, including Unraid and Home Assistant.
-- `PATCH /repositories/{repository_id}/scan-settings`: Set `scan_enabled` to include or exclude an asset from future scans and normal reports without deleting its history.
+- `PATCH /repositories/{repository_id}/scan-settings`: Set `scan_enabled` to include or exclude one asset from future scans and normal reports without deleting its history.
+- `PATCH /repositories/scan-settings/bulk`: Set `scan_enabled` for up to 500 selected assets in one operator action.
 - `GET /systems`: System-centric inventory for the dashboard with expandable dependency details and latest-version hints.
 - `GET /automation/high-risk-updates`: Prioritized update queue for high-risk and outdated dependencies.
 - `GET /automation/high-risk-updates/codex-prompt`: Master prompt for a controlled Codex update run across queued repositories.
 - `GET /automation/daily-security-check`: Machine-readable runbook for the recurring Codex security task.
+- `GET /automation/deployment-security-gate/status`: Dashboard-safe gate status for one exact commit; no Broker token required.
 - `POST /automation/deployment-security-gate`: Authenticated, fail-closed pre-deployment decision for one exact Git commit. See [Deployment Broker security gate](docs/deployment-broker-security-gate.md).
+- `POST /automation/pre-deploy-scan`: Queue a high-priority, commit-bound GitHub scan that can satisfy the deployment gate. It can pause the currently running scan first.
 - `GET /health`: Liveness check.
 - Default port: `31337` because it is a memorable security-themed port and was free on the current host during setup.
 
@@ -152,6 +157,7 @@ For Home Assistant coverage:
 - `Remote Home Assistant scan fails with 401`: create a fresh long-lived access token and verify `HOMEASSISTANT_REMOTE_TOKEN`.
 - `Remote Home Assistant scan fails with TLS errors`: if you use a self-signed certificate, set `HOMEASSISTANT_REMOTE_VERIFY_TLS=false` or install the CA certificate into the container.
 - `Container findings empty`: confirm `trivy` and `grype` are installed inside the image and the worker can reach image registries.
+- `Container image scan repeats too often`: verify the Unraid inventory exposes `image_identity` in repository metadata. Set `refresh_image_cache=true` on `POST /scan` only when you intentionally want to refresh digest-level image findings.
 - `AI extraction not running`: set `AI_ENABLED=true`, provide `OPENAI_API_KEY`, and inspect worker logs.
 - `Manual scan remains queued`: verify the `worker` is healthy, or enable
   `RUN_EMBEDDED_SCHEDULER=true` for a supported single-container installation.
@@ -161,11 +167,14 @@ For Home Assistant coverage:
   PostgreSQL for 24 hours by default. Provider errors are not cached; NVD is paused briefly after a
   `429` response while OSV and GitHub checks continue.
 - `Manual scan should stop`: click `Scan abbrechen` in the dashboard or call `POST /scan-jobs/{id}/cancel`. If an external scanner binary is running, the worker stops after that command returns or times out.
+- `Manual scan should make room for a targeted scan`: click `Scan pausieren` or queue a pre-deploy scan with `pause_active=true`. The current scan pauses at the next checkpoint and can be resumed with `POST /scan-jobs/{id}/resume`.
 - `Manual scan resumed after a restart`: this is expected. Running jobs stay resumable and continue from committed asset outcomes after the worker restarts.
 - `Irrelevant repo keeps appearing`: disable it from the dashboard target selector or call `PATCH /repositories/{id}/scan-settings` with `{"scan_enabled": false}`. Disabled assets stay visible in `/repositories` so they can be re-enabled later.
+- `Many irrelevant repos keep appearing`: select them in the System Inventory and use `Auswahl ausschließen`, or call `PATCH /repositories/scan-settings/bulk` with the selected repository IDs.
 - `Deployment gate returns 401`: verify that the Broker sends the dedicated Bearer token configured through the secure secret flow.
 - `Deployment gate returns 503`: configure `SECURITY_WATCHDOG_DEPLOYMENT_GATE_TOKEN` or inspect API/database errors in the watchdog logs.
 - `Deployment gate returns indeterminate`: scan the exact requested full commit and ensure the aggregate scan is fresh and successful.
+- `Dashboard gate status says no matching evidence`: enter the full deploy commit SHA and start `Pre-Deploy-Scan`. The dashboard queues a high-priority GitHub-only scan for the selected repo, defaulting to `Feberdin/security-watchdog` when no target is selected.
 
 ## Logs and Debugging
 
@@ -173,12 +182,13 @@ For Home Assistant coverage:
 - API logs: `docker compose logs -f watchdog`
 - Worker logs: `docker compose logs -f worker`
 - Manual scan progress: `curl -fsS http://localhost:31337/scan-jobs/latest`
+- Dashboard-safe deployment gate status: `curl -fsS "http://localhost:31337/automation/deployment-security-gate/status?stack_name=security-watchdog&repository_full_name=Feberdin/security-watchdog&commit_sha=<40-char-sha>&compose_file=docker-compose.yml"`
 - SARIF export: `curl -fsS http://localhost:31337/reports/sarif > security-watchdog.sarif`
 - Stable local image upgrade: `docker compose -f docker-compose.yml -f docker-compose.local.yml pull && docker compose -f docker-compose.yml -f docker-compose.local.yml up -d`
 - Local source rebuild: `docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.build.yml up -d --build`
 - Database state: inspect `repositories`, `dependencies`, `vulnerabilities`, `scan_results`,
   `manual_scan_jobs`, `manual_scan_progress_events`, `vulnerability_provider_cache`,
-  `threat_articles`, `ai_extracted_threats`, and `alerts`.
+  `container_image_scan_cache`, `threat_articles`, `ai_extracted_threats`, and `alerts`.
 - SBOM output: `data/sbom/<asset>/cyclonedx.json` and `data/sbom/<asset>/spdx.json`
 
 ## Security Notes

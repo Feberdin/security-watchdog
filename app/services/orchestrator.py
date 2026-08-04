@@ -18,15 +18,17 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.models.entities import AIExtractedThreat, Alert, Dependency, ManualScanJob, Repository, ScanResult
-from app.models.schemas import DependencyRecord, ScanRequest, ScanResponse, VulnerabilityRecord
+from app.models.schemas import ContainerFinding, DependencyRecord, ScanRequest, ScanResponse, VulnerabilityRecord
 from app.repositories.store import (
     build_alert_fingerprint,
+    get_container_image_scan_cache,
     link_dependency_to_vulnerability,
     record_scan_result,
     replace_repository_dependencies,
     resolve_stale_alerts,
     update_manual_scan_job_checkpoint,
     upsert_alert,
+    upsert_container_image_scan_cache,
     upsert_vulnerability,
 )
 from app.scanners.container_scanner import ContainerScanner
@@ -40,7 +42,7 @@ from app.services.alerts import AlertDispatcher
 from app.services.matching import is_exact_version, version_matches
 from app.services.risk import calculate_risk_score
 from app.services.sbom import SbomService
-from app.services.scan_control import ScanCanceledError
+from app.services.scan_control import ScanCanceledError, ScanPausedError
 from app.services.scan_progress import ScanProgressCallback, ScanProgressReporter
 from app.services.threat_intelligence import ThreatIntelligenceService
 from app.services.vulnerability_service import VulnerabilityService
@@ -210,6 +212,7 @@ class ScanOrchestrator:
                 details={
                     "full_name": repository.full_name,
                     "source_type": repository.source_type,
+                    "target_commit_sha": request.target_commit_sha or "",
                 },
                 scan_callable=lambda repository=repository: self._scan_repository_asset(
                     session,
@@ -217,6 +220,7 @@ class ScanOrchestrator:
                     progress,
                     cancellation_check=cancellation_check,
                 ),
+                expected_commit_sha=request.target_commit_sha,
             )
             created_alerts += alerts_created
             processed_count += 1
@@ -282,7 +286,9 @@ class ScanOrchestrator:
                     session,
                     asset["repository"],
                     asset["image_ref"],
-                    progress,
+                    asset.get("image_identity"),
+                    refresh_image_cache=request.refresh_image_cache,
+                    progress=progress,
                     cancellation_check=cancellation_check,
                 ),
             )
@@ -585,6 +591,9 @@ class ScanOrchestrator:
         session: Session,
         repository: Repository,
         image_ref: str,
+        image_identity: str | None = None,
+        *,
+        refresh_image_cache: bool = False,
         progress: ScanProgressReporter | None = None,
         cancellation_check: ScanCancellationCheck | None = None,
     ) -> int:
@@ -606,13 +615,19 @@ class ScanOrchestrator:
                 message=f"Container-Image {image_ref} wird analysiert.",
                 fraction=0.15,
             )
-        findings = self.container_scanner.scan_image(image_ref)
+        findings, cache_hit = self._scan_container_image(
+            session,
+            image_ref=image_ref,
+            image_identity=image_identity,
+            refresh_image_cache=refresh_image_cache,
+        )
         self._check_cancellation(cancellation_check)
         if progress:
+            cache_label = " aus Cache" if cache_hit else ""
             progress.asset_step(
                 phase="container",
                 asset_name=repository.full_name,
-                message=f"Image-Scan abgeschlossen: {len(findings)} Findings.",
+                message=f"Image-Scan{cache_label} abgeschlossen: {len(findings)} Findings.",
                 fraction=0.65,
             )
         record_scan_result(
@@ -621,7 +636,11 @@ class ScanOrchestrator:
             scanner_name="unraid_container_scanner",
             status="success",
             findings_count=len(findings),
-            details={"image_ref": image_ref},
+            details={
+                "image_ref": image_ref,
+                "image_identity": image_identity or "",
+                "cache_hit": cache_hit,
+            },
         )
         active_alerts_by_source = {
             "dependency_vulnerability": set(),
@@ -669,6 +688,42 @@ class ScanOrchestrator:
         )
         repository.risk_score = self._calculate_repository_risk(session, repository.id)
         return alerts_created
+
+    def _scan_container_image(
+        self,
+        session: Session,
+        *,
+        image_ref: str,
+        image_identity: str | None,
+        refresh_image_cache: bool,
+    ) -> tuple[list[ContainerFinding], bool]:
+        """
+        Return image findings from cache when an immutable digest or image ID is already known.
+
+        Why this exists:
+        Runtime estate scans often see the same image digest through multiple containers. Trivy and
+        Grype are expensive, but their normalized findings are stable for the same immutable image
+        identity and scanner version.
+        """
+
+        if image_identity and not refresh_image_cache:
+            cached_findings = get_container_image_scan_cache(session, image_identity=image_identity)
+            if cached_findings is not None:
+                LOGGER.info(
+                    "Reusing cached container image scan",
+                    extra={"image_ref": image_ref, "image_identity": image_identity},
+                )
+                return cached_findings, True
+
+        findings = self.container_scanner.scan_image(image_ref)
+        if image_identity:
+            upsert_container_image_scan_cache(
+                session,
+                image_identity=image_identity,
+                image_ref=image_ref,
+                findings=findings,
+            )
+        return findings, False
 
     def _scan_homeassistant_asset(
         self,
@@ -1175,6 +1230,7 @@ class ScanOrchestrator:
         scanner_name: str,
         details: dict[str, str],
         scan_callable,
+        expected_commit_sha: str | None = None,
     ) -> tuple[int, int]:
         """
         Run one asset scan without letting a single failure abort the whole manual scan.
@@ -1188,9 +1244,13 @@ class ScanOrchestrator:
         effective_details = dict(details)
         try:
             if scanner_name == "repository_asset_scan":
-                effective_details["commit_sha"] = self.repository_scanner.get_checkout_commit_sha(
-                    Path(repository.local_path)
-                )
+                commit_sha = self.repository_scanner.get_checkout_commit_sha(Path(repository.local_path))
+                effective_details["commit_sha"] = commit_sha
+                if expected_commit_sha and commit_sha != expected_commit_sha:
+                    raise RuntimeError(
+                        "Repository checkout does not match the requested pre-deploy commit. "
+                        f"repository={repository.full_name} expected={expected_commit_sha} actual={commit_sha}"
+                    )
             alerts_created = scan_callable()
             record_scan_result(
                 session,
@@ -1203,6 +1263,9 @@ class ScanOrchestrator:
             session.commit()
             return alerts_created, 0
         except ScanCanceledError:
+            session.rollback()
+            raise
+        except ScanPausedError:
             session.rollback()
             raise
         except Exception as error:

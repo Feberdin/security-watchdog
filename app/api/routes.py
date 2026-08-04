@@ -23,24 +23,29 @@ from app.models.schemas import (
     AlertOut,
     CodexPromptOut,
     DailySecurityAutomationOut,
+    DeploymentGateStatusOut,
     DeploymentSecurityGateRequest,
     DeploymentSecurityGateResponse,
     HighRiskUpdateQueueOut,
     ManualScanJobOut,
+    PreDeployScanRequest,
     ReportOut,
+    RepositoryBulkScanSettingsRequest,
     RepositoryOut,
     RepositoryScanSettingsRequest,
     ScanAcceptedResponse,
     ScanRequest,
     SystemInventoryOut,
 )
-from app.repositories.store import set_repository_scan_enabled
+from app.repositories.store import set_repositories_scan_enabled_bulk, set_repository_scan_enabled
 from app.services.deployment_security_gate import DeploymentSecurityGateService
 from app.services.manual_scan_jobs import (
     cancel_manual_scan_job,
     enqueue_manual_scan,
     get_latest_manual_scan_job_out,
     get_manual_scan_job_out,
+    pause_manual_scan_job,
+    resume_paused_manual_scan_job,
 )
 from app.services.reporting import ReportingService
 from app.services.sarif import SarifReportingService
@@ -125,6 +130,44 @@ def cancel_scan_job(job_id: int, session: Session = Depends(get_db_session)) -> 
         session.rollback()
         LOGGER.exception("Manual scan cancellation failed", extra={"job_id": job_id})
         raise HTTPException(status_code=500, detail=f"Manual scan cancellation failed: {error}") from error
+
+
+@router.post("/scan-jobs/{job_id}/pause", response_model=ManualScanJobOut)
+def pause_scan_job(job_id: int, session: Session = Depends(get_db_session)) -> ManualScanJobOut:
+    """Request cooperative pause for one queued or running manual scan job."""
+
+    try:
+        job = pause_manual_scan_job(session, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"Manual scan job {job_id} was not found.")
+        session.commit()
+        return job
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception as error:
+        session.rollback()
+        LOGGER.exception("Manual scan pause failed", extra={"job_id": job_id})
+        raise HTTPException(status_code=500, detail=f"Manual scan pause failed: {error}") from error
+
+
+@router.post("/scan-jobs/{job_id}/resume", response_model=ManualScanJobOut)
+def resume_scan_job(job_id: int, session: Session = Depends(get_db_session)) -> ManualScanJobOut:
+    """Move one paused manual scan job back into the prioritized queue."""
+
+    try:
+        job = resume_paused_manual_scan_job(session, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"Manual scan job {job_id} was not found.")
+        session.commit()
+        return job
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception as error:
+        session.rollback()
+        LOGGER.exception("Manual scan resume failed", extra={"job_id": job_id})
+        raise HTTPException(status_code=500, detail=f"Manual scan resume failed: {error}") from error
 
 
 @router.get("/reports", response_model=ReportOut)
@@ -239,6 +282,29 @@ def update_repository_scan_settings(
     return RepositoryOut.model_validate(repository)
 
 
+@router.patch("/repositories/scan-settings/bulk", response_model=list[RepositoryOut])
+def update_repository_scan_settings_bulk(
+    settings_request: RepositoryBulkScanSettingsRequest,
+    session: Session = Depends(get_db_session),
+) -> list[RepositoryOut]:
+    """Enable or disable future scans for multiple repository-like assets."""
+
+    repositories = set_repositories_scan_enabled_bulk(
+        session,
+        repository_ids=settings_request.repository_ids,
+        scan_enabled=settings_request.scan_enabled,
+    )
+    missing_ids = set(settings_request.repository_ids) - {repository.id for repository in repositories}
+    if missing_ids:
+        session.rollback()
+        raise HTTPException(
+            status_code=404,
+            detail=f"Repository/system IDs not found: {sorted(missing_ids)}",
+        )
+    session.commit()
+    return [RepositoryOut.model_validate(repository) for repository in repositories]
+
+
 @router.get("/systems", response_model=list[SystemInventoryOut])
 def get_systems(session: Session = Depends(get_db_session)) -> list[SystemInventoryOut]:
     """Return all scanned systems with dependency details for the dashboard accordion view."""
@@ -314,6 +380,91 @@ def evaluate_deployment_security_gate(
                 "Deployment must remain blocked; inspect the Security Watchdog API logs."
             ),
         ) from error
+
+
+@router.get("/automation/deployment-security-gate/status", response_model=DeploymentGateStatusOut)
+def get_deployment_security_gate_status(
+    stack_name: str,
+    repository_full_name: str,
+    commit_sha: str,
+    compose_file: str = "docker-compose.yml",
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(get_db_session),
+) -> DeploymentGateStatusOut:
+    """Return dashboard-safe gate status without requiring the Broker token."""
+
+    gate_request = DeploymentSecurityGateRequest(
+        stack_name=stack_name,
+        repository_full_name=repository_full_name,
+        commit_sha=commit_sha,
+        compose_file=compose_file,
+    )
+    gate = DeploymentSecurityGateService(settings).evaluate(session, gate_request)
+    return DeploymentGateStatusOut(
+        gate=gate,
+        recommended_action=_recommended_gate_action(gate),
+        can_queue_pre_deploy_scan=not gate.deploy_allowed,
+    )
+
+
+@router.post("/automation/pre-deploy-scan", response_model=ScanAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)
+def queue_pre_deploy_scan(
+    pre_deploy_request: PreDeployScanRequest,
+    http_request: Request,
+    session: Session = Depends(get_db_session),
+) -> ScanAcceptedResponse:
+    """Queue a focused high-priority scan for exact deployment-gate evidence."""
+
+    scan_request = ScanRequest(
+        repository_full_name=pre_deploy_request.repository_full_name,
+        include_archived=False,
+        force=True,
+        scan_sources=["github"],
+        priority=100,
+        pause_active=pre_deploy_request.pause_active,
+        purpose="pre_deploy",
+        target_commit_sha=pre_deploy_request.commit_sha,
+    )
+    try:
+        scan_job, created_new_job = enqueue_manual_scan(session, scan_request)
+        session.commit()
+        message = (
+            "Pre-deploy scan accepted and queued for worker processing."
+            if created_new_job
+            else "An equivalent pre-deploy scan is already queued or active."
+        )
+        return ScanAcceptedResponse(
+            message=message,
+            job_id=scan_job.id,
+            status=scan_job.status,
+            status_url=str(http_request.url_for("get_scan_job", job_id=scan_job.id)),
+        )
+    except Exception as error:
+        session.rollback()
+        LOGGER.exception(
+            "Pre-deploy scan request failed",
+            extra={
+                "stack_name": pre_deploy_request.stack_name,
+                "repository_full_name": pre_deploy_request.repository_full_name,
+                "commit_sha": pre_deploy_request.commit_sha,
+            },
+        )
+        raise HTTPException(status_code=500, detail=f"Pre-deploy scan enqueue failed: {error}") from error
+
+
+def _recommended_gate_action(gate: DeploymentSecurityGateResponse) -> str:
+    """Return one compact operator action for dashboard and automation callers."""
+
+    if gate.deploy_allowed:
+        return "deploy"
+    if any(
+        code in gate.reason_codes
+        for code in ("REPOSITORY_NOT_SCANNED", "SCANNED_COMMIT_MISMATCH", "NO_AGGREGATE_SCAN_EVIDENCE")
+    ):
+        return "queue_pre_deploy_scan"
+    if "SCAN_EVIDENCE_STALE" in gate.reason_codes:
+        return "queue_fresh_scan"
+    return "review_blockers"
 
 
 @router.get("/diagnostics/export")

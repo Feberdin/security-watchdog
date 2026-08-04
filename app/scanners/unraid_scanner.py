@@ -49,6 +49,8 @@ class UnraidScanner:
         for container in containers:
             image_tags = container.image.tags or [container.image.short_id]
             primary_image = image_tags[0]
+            repo_digests = container.image.attrs.get("RepoDigests") or []
+            image_identity = repo_digests[0] if repo_digests else container.image.id
             full_name = f"unraid/{container.name}"
             repository = upsert_repository(
                 session,
@@ -63,6 +65,8 @@ class UnraidScanner:
                     "container_id": container.id,
                     "status": container.status,
                     "image": primary_image,
+                    "image_identity": image_identity,
+                    "repo_digests": repo_digests,
                     "image_tags": image_tags,
                     "labels": container.labels,
                     "ports": container.attrs.get("NetworkSettings", {}).get("Ports", {}),
@@ -72,6 +76,7 @@ class UnraidScanner:
                 {
                     "repository": repository,
                     "image_ref": primary_image,
+                    "image_identity": image_identity,
                     "container_name": container.name,
                 }
             )

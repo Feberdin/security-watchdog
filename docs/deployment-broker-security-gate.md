@@ -20,7 +20,7 @@ Important invariants:
 Debugging: Correlate the response `request_id` and `evidence.scan_result_id` with API logs and the
 `scan_results` table. Enable `LOG_LEVEL=DEBUG` only in a controlled environment.
 
-## Endpoint
+## Broker Endpoint
 
 `POST /automation/deployment-security-gate`
 
@@ -169,3 +169,34 @@ curl --fail-with-body \
 ```
 
 Do not place a real token directly in shell history; use a secure environment injection mechanism.
+
+## Dashboard Helpers
+
+Operators can inspect the same gate decision from the dashboard without exposing the Broker token:
+
+```text
+GET /automation/deployment-security-gate/status?stack_name=security-watchdog&repository_full_name=Feberdin/security-watchdog&commit_sha=<40-character-sha>&compose_file=docker-compose.yml
+```
+
+This helper is read-only and never authorizes deployment. It returns the gate response plus a compact
+`recommended_action`. When the action is `queue_pre_deploy_scan`, start a commit-bound scan:
+
+```text
+POST /automation/pre-deploy-scan
+```
+
+Request:
+
+```json
+{
+  "stack_name": "security-watchdog",
+  "repository_full_name": "Feberdin/security-watchdog",
+  "commit_sha": "0123456789abcdef0123456789abcdef01234567",
+  "compose_file": "docker-compose.yml",
+  "pause_active": true
+}
+```
+
+The scan is queued as a high-priority GitHub-only manual scan with `purpose=pre_deploy` and
+`target_commit_sha` set to the requested commit. If `pause_active` is true, the current running scan
+is asked to pause at the next safe checkpoint so the commit-bound evidence can run first.

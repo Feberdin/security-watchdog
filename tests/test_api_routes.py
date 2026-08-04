@@ -253,6 +253,112 @@ def test_cancel_scan_endpoint_marks_queued_job_canceled() -> None:
     assert payload["progress"]["phase"] == "canceled"
 
 
+def test_pause_and_resume_scan_endpoints_requeue_job() -> None:
+    """The API should expose pause and resume controls for dashboard scan management."""
+
+    session_factory = build_session_factory()
+
+    def override_db_session() -> Generator[Session, None, None]:
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app = FastAPI()
+    app.include_router(api_router)
+    app.dependency_overrides[get_db_session] = override_db_session
+    client = TestClient(app)
+
+    scan_response = client.post("/scan", json={"include_archived": False, "force": True})
+    job_id = scan_response.json()["job_id"]
+    pause_response = client.post(f"/scan-jobs/{job_id}/pause")
+    resume_response = client.post(f"/scan-jobs/{job_id}/resume")
+    latest_job = client.get("/scan-jobs/latest").json()
+
+    assert pause_response.status_code == 200
+    assert pause_response.json()["status"] == "paused"
+    assert pause_response.json()["pause_requested"] is True
+    assert resume_response.status_code == 200
+    assert resume_response.json()["status"] == "queued"
+    assert resume_response.json()["pause_requested"] is False
+    assert latest_job["status"] == "queued"
+
+
+def test_pre_deploy_scan_endpoint_queues_high_priority_commit_bound_job() -> None:
+    """The dashboard should be able to queue exact-commit scan evidence before a deployment."""
+
+    session_factory = build_session_factory()
+
+    def override_db_session() -> Generator[Session, None, None]:
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app = FastAPI()
+    app.include_router(api_router)
+    app.dependency_overrides[get_db_session] = override_db_session
+    client = TestClient(app)
+    commit_sha = "b" * 40
+
+    response = client.post(
+        "/automation/pre-deploy-scan",
+        json={
+            "stack_name": "security-watchdog",
+            "repository_full_name": "Feberdin/security-watchdog",
+            "commit_sha": commit_sha,
+            "compose_file": "docker-compose.yml",
+        },
+    )
+    latest_job = client.get("/scan-jobs/latest").json()
+
+    assert response.status_code == 202
+    assert latest_job["status"] == "queued"
+    assert latest_job["repository_full_name"] == "Feberdin/security-watchdog"
+    assert latest_job["scan_sources"] == ["github"]
+    assert latest_job["priority"] == 100
+    assert latest_job["purpose"] == "pre_deploy"
+    assert latest_job["target_commit_sha"] == commit_sha
+
+
+def test_gate_status_endpoint_is_dashboard_safe_without_bearer_token() -> None:
+    """The dashboard can ask for gate evidence without receiving or sending the Broker secret."""
+
+    session_factory = build_session_factory()
+
+    def override_db_session() -> Generator[Session, None, None]:
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app = FastAPI()
+    app.include_router(api_router)
+    app.dependency_overrides[get_db_session] = override_db_session
+    client = TestClient(app)
+
+    response = client.get(
+        "/automation/deployment-security-gate/status",
+        params={
+            "stack_name": "security-watchdog",
+            "repository_full_name": "Feberdin/security-watchdog",
+            "commit_sha": "c" * 40,
+            "compose_file": "docker-compose.yml",
+        },
+    )
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["gate"]["decision"] == "indeterminate"
+    assert payload["gate"]["deploy_allowed"] is False
+    assert payload["gate"]["reason_codes"] == ["REPOSITORY_NOT_SCANNED"]
+    assert payload["recommended_action"] == "queue_pre_deploy_scan"
+    assert payload["can_queue_pre_deploy_scan"] is True
+
+
 def test_repository_scan_settings_can_disable_asset() -> None:
     """Irrelevant repositories should be switchable out of future scans without deleting history."""
 
@@ -292,3 +398,52 @@ def test_repository_scan_settings_can_disable_asset() -> None:
     assert response.status_code == 200
     assert response.json()["scan_enabled"] is False
     assert repositories[0]["scan_enabled"] is False
+
+
+def test_repository_scan_settings_bulk_updates_multiple_assets() -> None:
+    """Operators should be able to disable stale repositories in batches."""
+
+    session_factory = build_session_factory()
+
+    def override_db_session() -> Generator[Session, None, None]:
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    with session_factory() as session:
+        first_repository = Repository(
+            source_type="github",
+            owner="Feberdin",
+            name="old-repo",
+            full_name="Feberdin/old-repo",
+            default_branch="main",
+            local_path="/tmp/old-repo",
+        )
+        second_repository = Repository(
+            source_type="github",
+            owner="Feberdin",
+            name="obsolete-repo",
+            full_name="Feberdin/obsolete-repo",
+            default_branch="main",
+            local_path="/tmp/obsolete-repo",
+        )
+        session.add_all([first_repository, second_repository])
+        session.commit()
+        repository_ids = [first_repository.id, second_repository.id]
+
+    app = FastAPI()
+    app.include_router(api_router)
+    app.dependency_overrides[get_db_session] = override_db_session
+    client = TestClient(app)
+
+    response = client.patch(
+        "/repositories/scan-settings/bulk",
+        json={"repository_ids": repository_ids, "scan_enabled": False},
+    )
+    repositories = client.get("/repositories").json()
+
+    assert response.status_code == 200
+    assert {repository["scan_enabled"] for repository in response.json()} == {False}
+    assert {repository["scan_enabled"] for repository in repositories} == {False}

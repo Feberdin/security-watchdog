@@ -34,3 +34,25 @@ def test_scan_dockerfile_uses_filename_relative_to_working_directory(tmp_path, m
     assert findings == []
     assert captured["command"] == ["trivy", "config", "--format", "json", "Dockerfile"]
     assert captured["cwd"] == Path(dockerfile_path.parent)
+
+
+def test_scan_image_disables_trivy_secret_scanner(monkeypatch) -> None:
+    """Image scans should stay bounded by using vulnerability scanning only in Trivy."""
+
+    commands: list[list[str]] = []
+
+    def fake_run_command(command: list[str], **kwargs) -> str:
+        commands.append(command)
+        if command[0] == "trivy":
+            assert kwargs["timeout"] == 300
+            return "{}"
+        assert kwargs["timeout"] == 600
+        return "{}"
+
+    monkeypatch.setattr("app.scanners.container_scanner.run_command", fake_run_command)
+
+    findings = ContainerScanner().scan_image("example/app:latest")
+
+    assert findings == []
+    assert commands[0] == ["trivy", "image", "--scanners", "vuln", "--format", "json", "example/app:latest"]
+    assert commands[1] == ["grype", "example/app:latest", "-o", "json"]

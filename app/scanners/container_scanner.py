@@ -70,12 +70,12 @@ class ContainerScanner:
         return findings
 
     def _scan_with_trivy_image(self, image_ref: str) -> list[ContainerFinding]:
-        """Parse Trivy image scan JSON output."""
+        """Parse Trivy image scan JSON output without enabling expensive image secret scans."""
 
         try:
             output = run_command(
-                [self.trivy_binary, "image", "--format", "json", image_ref],
-                timeout=600,
+                [self.trivy_binary, "image", "--scanners", "vuln", "--format", "json", image_ref],
+                timeout=300,
             )
         except Exception as error:
             LOGGER.warning("Trivy image scan failed", extra={"image": image_ref, "error": str(error)})

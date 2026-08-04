@@ -74,6 +74,9 @@ Key environment variables:
 - `GITHUB_INCLUDE_FORKS`: Include forked GitHub repositories in repository scans and reports. Defaults to `false`, so forks such as large upstream mirrors stay out of the normal security queue.
 - `MANAGED_GITHUB_OWNERS`: Comma-separated GitHub owners where Codex may propose managed Issue/PR remediation. Defaults to `Feberdin`.
 - `MANAGED_CONTAINER_NAMESPACES`: Comma-separated container namespaces treated as owned images, for example `feberdin` for `ghcr.io/feberdin/...`. Owned images still need an OCI source label or manual mapping before PRs are allowed.
+- `CONTAINER_TRIVY_IMAGE_TIMEOUT_SECONDS`: Runtime image scan timeout for Trivy. Default `180` keeps full estate scans moving when a registry or scanner stalls.
+- `CONTAINER_GRYPE_IMAGE_ENABLED`: Optional secondary runtime image scan with Grype. Default `false` because Trivy already provides the primary image vulnerability signal and Grype can add several minutes per uncached image.
+- `CONTAINER_GRYPE_IMAGE_TIMEOUT_SECONDS`: Runtime image scan timeout for the optional Grype pass. Default `180`.
 - `SECRET_HISTORY_SCAN_ENABLED`: When `true`, public GitHub repositories are fetched with full history and scanned for secrets in old commits as well as the current tree.
 - `SECRET_HISTORY_MAX_COMMITS_PER_REPO`: Optional safety limit for history scanning. `0` means scan the full reachable history.
 - `DATABASE_URL`: PostgreSQL connection string.
@@ -163,8 +166,9 @@ For Home Assistant coverage:
 - `Home Assistant integrations missing`: check that `.storage/core.config_entries` exists in the mounted config path.
 - `Remote Home Assistant scan fails with 401`: create a fresh long-lived access token and verify `HOMEASSISTANT_REMOTE_TOKEN`.
 - `Remote Home Assistant scan fails with TLS errors`: if you use a self-signed certificate, set `HOMEASSISTANT_REMOTE_VERIFY_TLS=false` or install the CA certificate into the container.
-- `Container findings empty`: confirm `trivy` and `grype` are installed inside the image and the worker can reach image registries.
+- `Container findings empty`: confirm `trivy` is installed inside the image and the worker can reach image registries. If you enabled the optional Grype pass, verify `grype` separately.
 - `Container image scan repeats too often`: verify the Unraid inventory exposes `image_identity` in repository metadata. Set `refresh_image_cache=true` on `POST /scan` only when you intentionally want to refresh digest-level image findings.
+- `Repository sync failed` with `Not possible to fast-forward`: the scanner treats `data/repos/...` as disposable cache and resets the checkout to `origin/<default_branch>` on the next scan. If it keeps failing, delete the cached checkout path shown in the logs and rerun the scan.
 - `AI extraction not running`: set `AI_ENABLED=true`, provide `OPENAI_API_KEY`, and inspect worker logs.
 - `Manual scan remains queued`: verify the `worker` is healthy, or enable
   `RUN_EMBEDDED_SCHEDULER=true` for a supported single-container installation.

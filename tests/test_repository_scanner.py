@@ -189,6 +189,42 @@ def test_existing_repository_pull_refreshes_origin_with_current_token(tmp_path, 
     assert recorded_commands[2][:4] == [scanner.settings.git_binary, "-C", str(checkout_path), "pull"]
 
 
+def test_existing_repository_recovers_diverged_checkout(tmp_path, monkeypatch) -> None:
+    """A disposable scanner checkout should reset to GitHub when fast-forward pull fails."""
+
+    scanner = RepositoryScanner()
+    scanner.settings.github_token = ""
+    checkout_path = tmp_path / "diverged-repo"
+    checkout_path.mkdir(parents=True)
+    recorded_commands: list[list[str]] = []
+
+    def fake_run_command(command: list[str], **kwargs) -> str:
+        recorded_commands.append(command)
+        if command[-2:] == ["pull", "--ff-only"]:
+            raise RuntimeError("fatal: Not possible to fast-forward, aborting.")
+        return ""
+
+    monkeypatch.setattr("app.scanners.repository_scanner.run_command", fake_run_command)
+
+    scanner._sync_local_checkout(
+        "https://github.com/Feberdin/diverged-repo.git",
+        checkout_path,
+        "main",
+        fetch_full_history=False,
+    )
+
+    assert [command[3:] for command in recorded_commands] == [
+        ["remote", "set-url", "origin", "https://github.com/Feberdin/diverged-repo.git"],
+        ["checkout", "main"],
+        ["pull", "--ff-only"],
+        ["fetch", "--prune", "origin", "main"],
+        ["reset", "--hard"],
+        ["clean", "-fdx"],
+        ["checkout", "-B", "main", "origin/main"],
+        ["reset", "--hard", "origin/main"],
+    ]
+
+
 def test_checkout_commit_sha_requires_full_verified_git_commit(tmp_path, monkeypatch) -> None:
     """Aggregate scan evidence should use the exact full commit returned by Git."""
 

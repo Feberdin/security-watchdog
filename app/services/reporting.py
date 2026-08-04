@@ -10,6 +10,7 @@ Debugging: If a dashboard card looks wrong, compare the raw query result with th
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
@@ -33,11 +34,13 @@ from app.models.schemas import (
     HighRiskDependencyUpdateOut,
     HighRiskSystemUpdateOut,
     HighRiskUpdateQueueOut,
+    RemediationPlanOut,
     ReportOut,
     RuntimeFindingOut,
     SystemInventoryOut,
 )
 from app.services.matching import normalize_version
+from app.services.remediation import RemediationPlanner, RepositoryIdentity
 from app.services.version_catalog import LatestVersionRecord, VersionCatalogService
 
 SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "none": 0}
@@ -52,6 +55,7 @@ class ReportingService:
     def __init__(self, version_catalog: VersionCatalogService | None = None) -> None:
         self.version_catalog = version_catalog or DEFAULT_VERSION_CATALOG
         self.settings = get_settings()
+        self.remediation_planner = RemediationPlanner(self.settings)
 
     def build_report(self, session: Session) -> ReportOut:
         """Aggregate the main metrics needed by operators."""
@@ -423,12 +427,15 @@ class ReportingService:
             f"- Risk score: {system.risk_score}\n"
             f"- Last scanned at: {system.last_scanned_at or 'unknown'}\n"
             f"- Summary: {system.summary or 'n/a'}\n\n"
+            "Ownership and remediation channel:\n"
+            f"{self._format_remediation_policy_block(system.remediation)}\n"
             "Findings to address:\n"
             f"{findings_block}\n"
             "Tasks:\n"
+            f"{self._format_remediation_task_block(system.remediation)}"
             "- Inspect the relevant manifests, lockfiles, Dockerfiles, or integration metadata.\n"
-            "- Update or pin safe dependency versions where possible.\n"
-            "- Remove or replace malicious/compromised packages immediately if any are flagged.\n"
+            "- Update or pin safe dependency versions where ownership and compatibility allow it.\n"
+            "- Remove or replace malicious/compromised packages immediately if any are flagged in owned code.\n"
             "- Preserve expected behavior and add or run tests where appropriate.\n"
             "- Summarize what changed, what remains risky, and what should be monitored next.\n"
         )
@@ -513,7 +520,8 @@ class ReportingService:
             guardrails=self._build_update_guardrails(),
             allowed_actions=[
                 "Inspect repository manifests, lockfiles, docs, workflows, and changelogs.",
-                "Create one branch and one pull request per repository or system.",
+                "Create one branch and one pull request only when the remediation policy allows pull requests.",
+                "Create advisory or upstream issue text for external repositories, forks, and unmapped images.",
                 "Update dependency constraints only after compatibility and purpose are verified.",
                 "Change related config, code, migrations, tests, or lockfiles when an update requires it.",
                 "Run local checks and verify CI for the exact pushed commit.",
@@ -521,6 +529,7 @@ class ReportingService:
             blocked_actions=[
                 "Do not update solely because a target version is higher.",
                 "Do not widen a version constraint without identifying why the constraint exists.",
+                "Do not create branches or pull requests for advisory-only remediation targets.",
                 "Do not merge pull requests automatically.",
                 "Do not deploy automatically.",
                 "Do not use SSH, direct Docker CLI, raw HTTP, root shells, or secret values for Unraid work.",
@@ -564,7 +573,10 @@ class ReportingService:
             "- Inspect manifests, lockfiles, Dockerfiles, workflows, and project docs before changing versions.\n"
             f"{self._format_guardrails_for_prompt(self._build_update_guardrails())}"
             "- Run local tests, type checks, linters, and builds that the repository documents.\n"
-            "- Push only reviewable branches, then wait for CI for the exact pushed commit before moving on.\n"
+            "- Push only reviewable branches when the task policy allows pull requests, then wait for CI for the exact "
+            "pushed commit before moving on.\n"
+            "- For advisory-only tasks, produce issue text, replacement guidance, or a scan-exclusion recommendation "
+            "instead of repository changes.\n"
             "- Do not commit secrets, tokens, .env files with real values, logs with credentials, or generated private "
             "debug dumps.\n"
             "- For Docker or Unraid deployments, use only the `unraid_deploy` MCP broker flow. Do not use SSH, direct "
@@ -588,6 +600,9 @@ class ReportingService:
         return [
             "Do not update solely because a target version is higher. First verify package purpose, runtime "
             "compatibility, framework version, peer dependencies, engine requirements, and project configuration.",
+            "Before opening an issue, branch, or pull request, follow the remediation policy for the system. Owned "
+            "repositories and owned images with a mapped source repository may get PR proposals; forks, external "
+            "repositories, and unmapped images are advisory-only.",
             "Treat `constraint` status as a warning. The project currently restricts the allowed version range; "
             "identify why that range exists before changing it.",
             "For major-version updates, dev-tooling updates, framework updates, and runtime updates, read release "
@@ -602,6 +617,50 @@ class ReportingService:
         """Format guardrails as prompt bullets without duplicating wording in multiple call sites."""
 
         return "".join(f"- {guardrail}\n" for guardrail in guardrails)
+
+    def _format_remediation_policy_block(self, remediation: RemediationPlanOut) -> str:
+        """Format the backend remediation decision as an explicit Codex policy block."""
+
+        lines = [
+            f"- Ownership: {remediation.ownership}",
+            f"- Mode: {remediation.mode}",
+            f"- Target: {remediation.target or 'n/a'}",
+            f"- Source repository: {remediation.source_repository or 'unknown'}",
+            f"- Issue recommended: {'yes' if remediation.issue_recommended else 'no'}",
+            f"- Pull request allowed: {'yes' if remediation.pull_request_allowed else 'no'}",
+            f"- Scan exclusion recommended: {'yes' if remediation.scan_exclusion_recommended else 'no'}",
+            f"- Summary: {remediation.summary}",
+        ]
+        if remediation.guidance:
+            lines.append("- Guidance:")
+            lines.extend(f"  - {item}" for item in remediation.guidance)
+        if remediation.allowed_actions:
+            lines.append("- Allowed actions:")
+            lines.extend(f"  - {item}" for item in remediation.allowed_actions)
+        if remediation.blocked_actions:
+            lines.append("- Blocked actions:")
+            lines.extend(f"  - {item}" for item in remediation.blocked_actions)
+        return "\n".join(lines) + "\n"
+
+    def _format_remediation_task_block(self, remediation: RemediationPlanOut) -> str:
+        """Return ownership-aware task instructions for Codex remediation prompts."""
+
+        if remediation.pull_request_allowed:
+            issue_target = remediation.source_repository or remediation.target
+            return (
+                f"- Create or update a tracking issue in `{issue_target}` if the fix needs follow-up.\n"
+                f"- Propose code changes only in `{issue_target}` on a dedicated branch and PR.\n"
+                "- Keep one reviewable PR per repository or image source.\n"
+            )
+        if remediation.scan_exclusion_recommended:
+            return (
+                "- Do not change code by default; prepare an advisory and explain why scan exclusion is recommended.\n"
+                "- If the operator confirms the asset is relevant again, ask them to re-enable scanning first.\n"
+            )
+        return (
+            "- Do not create branches or pull requests for this target.\n"
+            "- Prepare an advisory, upstream issue text, image update recommendation, or replacement plan instead.\n"
+        )
 
     def _build_daily_security_prompt(
         self,
@@ -623,7 +682,10 @@ class ReportingService:
             "Required workflow:\n"
             "- If the queue is empty, report that no repository changes are needed and stop.\n"
             "- Work only on the highest-priority queued tasks listed below, one repository or system at a time.\n"
-            "- For every changed repository, create a dedicated branch and pull request.\n"
+            "- For every allowed code change, create a dedicated branch and pull request in the mapped source "
+            "repository.\n"
+            "- For advisory-only tasks, create upstream issue text, replacement guidance, or scan-exclusion notes "
+            "instead of code changes.\n"
             "- Run the repository's documented local checks and wait for CI for the exact pushed commit.\n"
             "- Do not merge pull requests and do not deploy automatically.\n"
             "- For Docker or Unraid deployments, only prepare notes unless the user explicitly requests deployment; "
@@ -672,6 +734,7 @@ class ReportingService:
             risk_score=system.risk_score,
             priority=self._classify_update_priority(system, dependencies, runtime_findings),
             reason=self._build_update_reason(system, dependencies, runtime_findings),
+            remediation=system.remediation,
             dependencies=dependencies[:25],
             runtime_findings=runtime_findings[:25],
         )
@@ -804,6 +867,14 @@ class ReportingService:
             f"  Priority: {task.priority}",
             f"  Risk score: {task.risk_score}",
             f"  Reason: {task.reason}",
+            "  Remediation policy:",
+            f"    Ownership: {task.remediation.ownership}",
+            f"    Mode: {task.remediation.mode}",
+            f"    Target: {task.remediation.target or 'n/a'}",
+            f"    Source repository: {task.remediation.source_repository or 'unknown'}",
+            f"    Pull request allowed: {'yes' if task.remediation.pull_request_allowed else 'no'}",
+            f"    Issue recommended: {'yes' if task.remediation.issue_recommended else 'no'}",
+            f"    Summary: {task.remediation.summary}",
         ]
 
         if task.dependencies:
@@ -942,7 +1013,22 @@ class ReportingService:
             summary=self._build_system_summary(repository),
             dependencies=dependencies,
             runtime_findings=self._build_runtime_findings(repository),
+            remediation=self._build_remediation_plan(repository),
         )
+
+    def _build_remediation_plan(self, repository: Repository) -> RemediationPlanOut:
+        """Classify one tracked asset into the safe Codex remediation channel."""
+
+        identity = RepositoryIdentity(
+            source_type=repository.source_type,
+            owner=repository.owner,
+            name=repository.name,
+            full_name=repository.full_name,
+            clone_url=repository.clone_url,
+            metadata=repository.metadata_json or {},
+        )
+        plan = self.remediation_planner.classify(identity)
+        return RemediationPlanOut(**asdict(plan))
 
     def _load_repositories_with_inventory(self, session: Session) -> list[Repository]:
         """Load all repositories with the relationships needed for inventory and prompt views."""
@@ -1025,6 +1111,7 @@ class ReportingService:
             "open_alert_count": system.open_alert_count,
             "last_scanned_at": system.last_scanned_at,
             "summary": system.summary,
+            "remediation": system.remediation.model_dump(mode="json"),
             "flagged_dependencies": flagged_dependencies,
             "runtime_findings": [finding.model_dump(mode="json") for finding in system.runtime_findings[:25]],
         }

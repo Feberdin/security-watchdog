@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     github_request_timeout_seconds: int = 30
     github_include_private: bool = True
     github_include_forks: bool = False
+    managed_github_owners: list[str] = Field(default_factory=lambda: ["Feberdin"])
+    managed_container_namespaces: list[str] = Field(default_factory=lambda: ["feberdin"])
     secret_history_scan_enabled: bool = True
     secret_history_max_commits_per_repo: int = 0
 
@@ -123,6 +125,15 @@ class Settings(BaseSettings):
         """Strip whitespace and trailing slashes so API calls compose predictably."""
 
         return value.strip().rstrip("/")
+
+    @field_validator("managed_github_owners", "managed_container_namespaces", mode="before")
+    @classmethod
+    def normalize_managed_owner_lists(cls, value: str | list[str]) -> list[str]:
+        """Accept comma-separated env values while keeping defaults readable in code."""
+
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return [str(item).strip() for item in value if str(item).strip()]
 
 
 @lru_cache(maxsize=1)

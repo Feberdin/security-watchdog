@@ -373,6 +373,25 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
         return allRepositories.find((repository) => repository.full_name === fullName) || null;
       }
 
+      function remediationButtonLabel(system) {
+        const mode = system.remediation?.mode || 'advisory_only';
+        if (system.remediation?.pull_request_allowed) {
+          return 'Codex Issue/PR-Prompt';
+        }
+        if (mode === 'exclude_recommended') {
+          return 'Ausschluss-/Advisory-Prompt';
+        }
+        if (mode === 'source_mapping_required') {
+          return 'Source-Zuordnungs-Prompt';
+        }
+        return 'Codex Advisory-Prompt';
+      }
+
+      function remediationModeClass(system) {
+        const mode = String(system.remediation?.mode || 'advisory_only').replaceAll('_', '-');
+        return `remediation-mode remediation-mode-${mode}`;
+      }
+
       function renderRows(targetId, rows, renderer) {
         const target = document.getElementById(targetId);
         if (!rows.length) {
@@ -891,11 +910,13 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
                 data-system-action="remediation"
                 data-system-id="${system.id}"
                 data-system-name="${escapeHtml(system.display_name)}"
+                data-system-remediation-label="${escapeHtml(remediationButtonLabel(system))}"
               >
-                Codex Sanierungs-Prompt
+                ${escapeHtml(remediationButtonLabel(system))}
               </button>
             `
           : '';
+        const remediation = system.remediation || {};
 
         return `
           <details class="system-card synth-card" ${query ? 'open' : ''}>
@@ -917,6 +938,9 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
                 <div class="system-meta">
                   <span>${escapeHtml(system.summary || 'Kein Zusatzkontext')}</span>
                   <span>Zuletzt gescannt: ${escapeHtml(formatDateTime(system.last_scanned_at, 'Noch kein Scan'))}</span>
+                  <span class="${escapeHtml(remediationModeClass(system))}" title="${escapeHtml(remediation.summary || '')}">
+                    ${escapeHtml(remediation.ownership || 'unknown')} · ${escapeHtml(remediation.mode || 'advisory_only')}
+                  </span>
                 </div>
               </div>
               <div class="system-summary-stats">
@@ -1105,16 +1129,17 @@ Debugging: If one of the Codex helper buttons appears broken, inspect the browse
       }
 
       async function openRemediationPrompt(systemId, systemName, button) {
+        const originalLabel = button.dataset.systemRemediationLabel || button.textContent || 'Codex Sanierungs-Prompt';
         button.disabled = true;
         button.textContent = 'Prompt wird erstellt...';
         try {
           const payload = await fetchJson(`/systems/${systemId}/codex-remediation`);
-          showModal(`Codex Sanierungs-Prompt · ${systemName}`, payload.prompt);
+          showModal(`${originalLabel} · ${systemName}`, payload.prompt);
         } catch (error) {
           showRequestError(`Codex Sanierungs-Prompt fehlgeschlagen · ${systemName}`, error);
         } finally {
           button.disabled = false;
-          button.textContent = 'Codex Sanierungs-Prompt';
+          button.textContent = originalLabel;
         }
       }
 

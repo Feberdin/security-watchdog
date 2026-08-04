@@ -13,6 +13,7 @@ import math
 import re
 import subprocess
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config import get_settings
@@ -156,8 +157,69 @@ VARIABLE_REFERENCE_SUBSTRINGS = (
     "vault:",
 )
 GENERIC_SECRET_VALUE_PATTERN = re.compile(r"[^\s'\"#]{8,}")
+SECRET_REFERENCE_PATTERN = re.compile(r"secret://[A-Za-z0-9_.-]+")
+ASSIGNMENT_PATTERN = re.compile(
+    r"""^\s*(?:-\s*)?(?:export\s+)?(?P<name>["']?[A-Za-z_][A-Za-z0-9_.-]*["']?)\s*(?::|=)\s*(?P<value>.+?)\s*,?\s*$"""
+)
 GIT_HISTORY_COMMIT_PREFIX = "__COMMIT__"
 GIT_HUNK_PATTERN = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)")
+
+BROKER_SECRET_NAMES = {
+    "BITWARDEN_CLIENT_ID",
+    "BITWARDEN_CLIENT_SECRET",
+    "BITWARDEN_MASTER_PASSWORD",
+    "BITWARDEN_SERVER_URL",
+    "BITWARDEN_SERVER_URL_FALLBACK_SECRET_REFS",
+    "BROKER_MCP_TOKEN",
+    "BROKER_SECRET_KEY",
+    "BROKER_WEBHOOK_TOKEN",
+    "GITHUB_NOTIFICATIONS_TOKEN",
+    "NTFY_TOKEN",
+    "NTFY_TOPIC",
+    "SECURITY_WATCHDOG_DEPLOYMENT_GATE_TOKEN",
+    "SECURITY_WATCHDOG_GATE_TOKEN",
+    "SECURITY_WATCHDOG_GITHUB_TOKEN",
+    "SMTP_PASSWORD",
+    "SMTP_USERNAME",
+    "UNIFI_PASSWORD",
+    "UNIFI_USERNAME",
+    "UNRAID_API_KEY",
+    "UNRAID_DEPLOY_BROKER_TOKEN",
+}
+BROKER_TEMPLATE_SECRET_NAMES = {
+    "SECONDBRAIN_VOICE_OAUTH_ALLOWED_REDIRECT_URIS",
+    "SECONDBRAIN_VOICE_OAUTH_BOOTSTRAP_USER_EMAIL",
+    "SECONDBRAIN_VOICE_OAUTH_BOOTSTRAP_USER_PASSWORD",
+    "SECONDBRAIN_VOICE_OAUTH_CLIENT_SECRET",
+    "SECONDBRAIN_VOICE_OAUTH_DATABASE_URL",
+    "SECONDBRAIN_VOICE_OAUTH_JWT_SECRET",
+    "SECONDBRAIN_VOICE_OAUTH_POSTGRES_PASSWORD",
+    "SECONDBRAIN_VOICE_OAUTH_PUBLIC_BASE_URL",
+}
+BROKER_NON_SECRET_VARIABLES = {
+    "BROKER_CONFIG",
+    "BROKER_DATA_DIR",
+    "BROKER_LOG_LEVEL",
+    "BROKER_STACKS_HOST_DIR",
+    "CSI_SOURCE",
+    "MODELS_DIR",
+    "RUST_LOG",
+    "SENSING_ALLOWED_HOSTS",
+}
+BROKER_SECRET_NAME_FIELD_NAMES = {
+    "database_url_secret_name",
+    "password_secret_name",
+}
+SAFE_LITERAL_VALUES = {
+    "false",
+    "none",
+    "null",
+    "off",
+    "on",
+    "true",
+}
+SECRET_NAME_VALUE_PATTERN = re.compile(r"[A-Z][A-Z0-9_.-]*")
+SECRET_NAME_LIST_PATTERN = re.compile(r"[A-Z][A-Z0-9_.-]*(?:\s*,\s*[A-Z][A-Z0-9_.-]*)*")
 
 SECRET_PATTERNS: dict[str, re.Pattern[str]] = {
     "aws_access_key": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
@@ -183,6 +245,14 @@ SECRET_PATTERNS: dict[str, re.Pattern[str]] = {
     "credential_in_url": re.compile(r"\bhttps?://[^/\s:@]+:[^/\s:@]+@[^/\s]+\b"),
     "bearer_token": re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._-]{20,}\b"),
 }
+
+
+@dataclass(frozen=True)
+class ParsedAssignment:
+    """One simple key/value assignment from env, YAML, TOML, or JSON-like config."""
+
+    name: str
+    value: str
 
 
 class SecretScanner:
@@ -341,6 +411,21 @@ class SecretScanner:
         """Run regex and entropy detectors against one logical source line."""
 
         findings: list[SecretFinding] = []
+        assignment = self._parse_assignment(line)
+        assignment_finding = self._scan_assignment_for_secret(
+            assignment=assignment,
+            file_path=file_path,
+            line_number=line_number,
+            content_source=content_source,
+            commit_sha=commit_sha,
+        )
+        if assignment_finding is not None:
+            findings.append(assignment_finding)
+            if assignment_finding.detector != "generic_token_assignment":
+                return findings
+        if assignment is not None and self._is_safe_assignment_context(assignment):
+            return findings
+
         for detector_name, pattern in SECRET_PATTERNS.items():
             match = pattern.search(line)
             if match is None:
@@ -386,6 +471,256 @@ class SecretScanner:
                     )
                 )
         return findings
+
+    def _parse_assignment(self, line: str) -> ParsedAssignment | None:
+        """
+        Parse simple config assignments without attempting to parse whole files.
+
+        Why this exists:
+        Broker and Compose configuration often uses `KEY=value`, `KEY: value`, or JSON/TOML-like
+        `"KEY": "value"` lines. Understanding the left-hand variable name lets the scanner separate
+        secret references from hard-coded credentials before broader regex checks run.
+        """
+
+        match = ASSIGNMENT_PATTERN.search(line)
+        if match is None:
+            return None
+        name = match.group("name").strip().strip("'\"")
+        value = self._clean_assignment_value(match.group("value"))
+        if not name or not value:
+            return None
+        return ParsedAssignment(name=name, value=value)
+
+    def _clean_assignment_value(self, value: str) -> str:
+        """Normalize one assigned value while preserving enough evidence for detector decisions."""
+
+        normalized_value = re.sub(r"\s+#.*$", "", value).strip().rstrip(",").strip()
+        return normalized_value.strip("'\"")
+
+    def _scan_assignment_for_secret(
+        self,
+        *,
+        assignment: ParsedAssignment | None,
+        file_path: str,
+        line_number: int,
+        content_source: str,
+        commit_sha: str | None,
+    ) -> SecretFinding | None:
+        """
+        Apply explicit Broker and environment-variable secret-name rules to one assignment.
+
+        Why this exists:
+        The Deployment Broker uses many variables whose names contain `secret`, `token`, or `url`
+        even when the value is only a Broker-managed reference. These rules flag literal values for
+        credential-bearing names and skip safe reference/name fields.
+        """
+
+        if assignment is None:
+            return None
+
+        normalized_name = self._normalize_variable_name(assignment.name)
+        value = assignment.value
+        if self._is_secret_name_field(normalized_name):
+            if self._looks_safe_secret_name_reference_value(value):
+                return None
+            if self._looks_concrete_secret_value(value, allow_short=False, allow_url=True):
+                return self._build_secret_finding(
+                    detector="secret_name_field_unusual_value",
+                    value=value,
+                    file_path=file_path,
+                    line_number=line_number,
+                    content_source=content_source,
+                    commit_sha=commit_sha,
+                )
+            return None
+
+        if self._is_known_non_secret_variable(normalized_name):
+            return None
+
+        if self._is_known_broker_secret_name(normalized_name):
+            if self._looks_concrete_secret_value(value, allow_short=True, allow_url=True):
+                return self._build_secret_finding(
+                    detector="broker_secret_assignment",
+                    value=value,
+                    file_path=file_path,
+                    line_number=line_number,
+                    content_source=content_source,
+                    commit_sha=commit_sha,
+                )
+            return None
+
+        if self._is_heuristic_secret_name(normalized_name) and self._looks_concrete_secret_value(
+            value,
+            allow_short=False,
+            allow_url=normalized_name.endswith("_DATABASE_URL"),
+        ):
+            return self._build_secret_finding(
+                detector="generic_token_assignment",
+                value=value,
+                file_path=file_path,
+                line_number=line_number,
+                content_source=content_source,
+                commit_sha=commit_sha,
+            )
+        return None
+
+    def _build_secret_finding(
+        self,
+        *,
+        detector: str,
+        value: str,
+        file_path: str,
+        line_number: int,
+        content_source: str,
+        commit_sha: str | None,
+    ) -> SecretFinding:
+        """Create a redacted finding for an assigned literal credential."""
+
+        return SecretFinding(
+            file_path=file_path,
+            line_number=line_number,
+            detector=detector,
+            excerpt=self._redact_line(value),
+            content_source=content_source,
+            commit_sha=commit_sha,
+        )
+
+    def _is_safe_assignment_context(self, assignment: ParsedAssignment) -> bool:
+        """Return true when an assignment is intentionally a reference or non-secret config."""
+
+        normalized_name = self._normalize_variable_name(assignment.name)
+        if SECRET_REFERENCE_PATTERN.search(assignment.value):
+            return True
+        if self._is_secret_name_field(normalized_name) and self._looks_safe_secret_name_reference_value(
+            assignment.value
+        ):
+            return True
+        if self._is_known_non_secret_variable(normalized_name):
+            return not self._contains_high_signal_literal_secret(assignment.value)
+        return False
+
+    def _normalize_variable_name(self, name: str) -> str:
+        """Normalize config keys for case-insensitive secret-name classification."""
+
+        return name.strip().strip("'\"").replace("-", "_").upper()
+
+    def _is_secret_name_field(self, normalized_name: str) -> bool:
+        """Identify fields whose value is expected to be one or more Broker secret names."""
+
+        lowered_name = normalized_name.lower()
+        return (
+            lowered_name in BROKER_SECRET_NAME_FIELD_NAMES
+            or lowered_name.endswith("_secret_ref")
+            or lowered_name.endswith("_secret_refs")
+        )
+
+    def _is_known_non_secret_variable(self, normalized_name: str) -> bool:
+        """Recognize Broker runtime settings that are configuration, not credentials."""
+
+        return normalized_name in BROKER_NON_SECRET_VARIABLES
+
+    def _is_known_broker_secret_name(self, normalized_name: str) -> bool:
+        """Recognize Broker-managed secret variables and template-generated secret names."""
+
+        return (
+            normalized_name in BROKER_SECRET_NAMES
+            or normalized_name in BROKER_TEMPLATE_SECRET_NAMES
+            or normalized_name.startswith("INTERNET_WATCHER_COMPLAINT_SMTP_")
+        )
+
+    def _is_heuristic_secret_name(self, normalized_name: str) -> bool:
+        """Catch credential-like environment names outside the explicit Broker lists."""
+
+        if self._is_known_non_secret_variable(normalized_name):
+            return False
+        if self._is_secret_name_field(normalized_name):
+            return False
+        return (
+            "_TOKEN" in normalized_name
+            or "_SECRET" in normalized_name
+            or "_PASSWORD" in normalized_name
+            or "_API_KEY" in normalized_name
+            or "_CLIENT_SECRET" in normalized_name
+            or "BEARER" in normalized_name
+            or normalized_name.endswith("_DATABASE_URL")
+            or normalized_name.endswith("_DATABASE_PASSWORD")
+            or normalized_name.endswith("_KEY")
+        )
+
+    def _looks_safe_secret_name_reference_value(self, value: str) -> bool:
+        """Accept `secret://NAME`, env references, and uppercase secret-name lists as references."""
+
+        normalized_value = value.strip().strip("'\"")
+        if not normalized_value:
+            return True
+        lowered_value = normalized_value.lower()
+        if normalized_value.startswith(VARIABLE_REFERENCE_PREFIXES):
+            return True
+        if any(marker in lowered_value for marker in VARIABLE_REFERENCE_SUBSTRINGS):
+            return True
+        if SECRET_REFERENCE_PATTERN.fullmatch(normalized_value):
+            return True
+        if SECRET_NAME_VALUE_PATTERN.fullmatch(normalized_value) and self._is_secret_reference_name_token(
+            normalized_value
+        ):
+            return True
+        if SECRET_NAME_LIST_PATTERN.fullmatch(normalized_value):
+            parts = [part.strip() for part in normalized_value.split(",") if part.strip()]
+            return bool(parts) and all(self._is_secret_reference_name_token(part) for part in parts)
+
+        list_value = normalized_value.strip("[]")
+        if list_value == normalized_value:
+            return False
+        parts = [part.strip().strip("'\"") for part in list_value.split(",") if part.strip()]
+        return bool(parts) and all(
+            SECRET_NAME_VALUE_PATTERN.fullmatch(part) and self._is_secret_reference_name_token(part)
+            for part in parts
+        )
+
+    def _is_secret_reference_name_token(self, value: str) -> bool:
+        """Return true when a plain string is shaped like a Broker secret name, not a secret value."""
+
+        normalized_name = self._normalize_variable_name(value)
+        return self._is_known_broker_secret_name(normalized_name) or self._is_heuristic_secret_name(
+            normalized_name
+        )
+
+    def _looks_concrete_secret_value(self, value: str, *, allow_short: bool, allow_url: bool) -> bool:
+        """Return true for literal credential values, false for placeholders and references."""
+
+        normalized_value = value.strip().strip("'\"")
+        lowered_value = normalized_value.lower()
+        if self._looks_placeholder_secret(normalized_value):
+            return False
+        if self._looks_safe_secret_name_reference_value(normalized_value):
+            return False
+        if lowered_value in SAFE_LITERAL_VALUES:
+            return False
+        if re.fullmatch(r"\d+(?:\.\d+)?", normalized_value):
+            return False
+        if not allow_url and normalized_value.startswith(("http://", "https://")):
+            return False
+        if allow_short:
+            return True
+        return self._looks_plausible_assigned_secret(normalized_value)
+
+    def _contains_high_signal_literal_secret(self, value: str) -> bool:
+        """Let strong token/key detectors still fire inside otherwise non-secret settings."""
+
+        return any(
+            pattern.search(value)
+            for detector_name, pattern in SECRET_PATTERNS.items()
+            if detector_name
+            in {
+                "aws_access_key",
+                "bearer_token",
+                "credential_in_url",
+                "github_token",
+                "openai_key",
+                "private_key",
+                "slack_token",
+            }
+        )
 
     def _redact_line(self, value: str) -> str:
         """Keep only a tiny preview so alerts do not leak the full secret."""

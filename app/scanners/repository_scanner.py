@@ -35,6 +35,7 @@ class RepositoryScanner:
         *,
         repository_full_name: str | None = None,
         include_archived: bool = False,
+        target_commit_sha: str | None = None,
     ) -> list:
         """Fetch repository metadata from GitHub and clone or pull locally."""
 
@@ -80,6 +81,11 @@ class RepositoryScanner:
                     local_path,
                     repository.default_branch,
                     fetch_full_history=self._should_fetch_full_history(repository_data),
+                    target_commit_sha=(
+                        target_commit_sha
+                        if repository_full_name is None or repository_data.get("full_name") == repository_full_name
+                        else None
+                    ),
                 )
                 synced.append(repository)
             except Exception as error:
@@ -129,6 +135,7 @@ class RepositoryScanner:
         default_branch: str,
         *,
         fetch_full_history: bool,
+        target_commit_sha: str | None = None,
     ) -> None:
         """Clone missing repositories or update existing ones with the required history depth."""
 
@@ -146,6 +153,8 @@ class RepositoryScanner:
             if not fetch_full_history:
                 clone_command[2:2] = ["--depth", "1"]
             run_command(clone_command, timeout=900)
+            if target_commit_sha:
+                self._align_checkout_to_target_commit(local_path, target_commit_sha)
             return
 
         self._refresh_origin_remote(local_path, authenticated_url)
@@ -160,6 +169,8 @@ class RepositoryScanner:
                     fetch_full_history=True,
                     original_error=error,
                 )
+            if target_commit_sha:
+                self._align_checkout_to_target_commit(local_path, target_commit_sha)
             return
         try:
             run_command([self.settings.git_binary, "-C", str(local_path), "pull", "--ff-only"], timeout=900)
@@ -169,6 +180,75 @@ class RepositoryScanner:
                 default_branch,
                 fetch_full_history=False,
                 original_error=error,
+            )
+        if target_commit_sha:
+            self._align_checkout_to_target_commit(local_path, target_commit_sha)
+
+    def _align_checkout_to_target_commit(self, local_path: Path, target_commit_sha: str) -> None:
+        """
+        Move a repository cache to the exact commit requested by pre-deploy scans.
+
+        Why this exists:
+        Deployment-gate evidence is evaluated against a precise commit SHA.
+        Checkout drift to the default branch after inventory sync can otherwise block deployment
+        even when an exact target commit has been scanned and is in Git history.
+        """
+
+        target_commit_sha = target_commit_sha.lower()
+        try:
+            current_commit = run_command(
+                [
+                    self.settings.git_binary,
+                    "-C",
+                    str(local_path),
+                    "rev-parse",
+                    "--verify",
+                    target_commit_sha,
+                ],
+                timeout=120,
+            )
+            if current_commit.lower() == target_commit_sha:
+                return
+        except RuntimeError:
+            LOGGER.debug(
+                "Target commit is not checked out; fetching explicit commit from origin.",
+                extra={"target": target_commit_sha},
+            )
+        try:
+            run_command(
+                [self.settings.git_binary, "-C", str(local_path), "fetch", "--depth=1", "origin", target_commit_sha],
+                timeout=900,
+            )
+        except RuntimeError:
+            LOGGER.warning(
+                "Target commit was not directly reachable; refreshing remote heads for exact checkout.",
+                extra={"local_path": str(local_path), "target_commit_sha": target_commit_sha},
+            )
+            run_command(
+                [
+                    self.settings.git_binary,
+                    "-C",
+                    str(local_path),
+                    "fetch",
+                    "--depth=1",
+                    "origin",
+                    "+refs/heads/*:refs/remotes/origin/*",
+                ],
+                timeout=900,
+            )
+
+        run_command(
+            [self.settings.git_binary, "-C", str(local_path), "checkout", "--detach", target_commit_sha],
+            timeout=120,
+        )
+        detached_commit = run_command(
+            [self.settings.git_binary, "-C", str(local_path), "rev-parse", "--verify", "HEAD^{commit}"],
+            timeout=120,
+        ).lower()
+        if detached_commit != target_commit_sha:
+            raise RuntimeError(
+                "Target commit could not be checked out for pre-deploy scanning. "
+                f"local_path={local_path} expected={target_commit_sha} actual={detached_commit}"
             )
 
     def _refresh_full_history_checkout(self, local_path: Path, default_branch: str) -> None:

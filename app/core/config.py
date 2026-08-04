@@ -110,6 +110,9 @@ class Settings(BaseSettings):
 
     trivy_binary: str = "trivy"
     grype_binary: str = "grype"
+    container_trivy_image_timeout_seconds: int = Field(default=180, ge=30, le=900)
+    container_grype_image_enabled: bool = False
+    container_grype_image_timeout_seconds: int = Field(default=180, ge=30, le=900)
     git_binary: str = "git"
 
     @computed_field

@@ -36,17 +36,14 @@ def test_scan_dockerfile_uses_filename_relative_to_working_directory(tmp_path, m
     assert captured["cwd"] == Path(dockerfile_path.parent)
 
 
-def test_scan_image_disables_trivy_secret_scanner(monkeypatch) -> None:
-    """Image scans should stay bounded by using vulnerability scanning only in Trivy."""
+def test_scan_image_uses_bounded_trivy_only_by_default(monkeypatch) -> None:
+    """Default runtime image scans should avoid the slower secondary scanner."""
 
     commands: list[list[str]] = []
 
     def fake_run_command(command: list[str], **kwargs) -> str:
         commands.append(command)
-        if command[0] == "trivy":
-            assert kwargs["timeout"] == 300
-            return "{}"
-        assert kwargs["timeout"] == 600
+        assert kwargs["timeout"] == 180
         return "{}"
 
     monkeypatch.setattr("app.scanners.container_scanner.run_command", fake_run_command)
@@ -54,5 +51,28 @@ def test_scan_image_disables_trivy_secret_scanner(monkeypatch) -> None:
     findings = ContainerScanner().scan_image("example/app:latest")
 
     assert findings == []
-    assert commands[0] == ["trivy", "image", "--scanners", "vuln", "--format", "json", "example/app:latest"]
-    assert commands[1] == ["grype", "example/app:latest", "-o", "json"]
+    assert commands == [["trivy", "image", "--scanners", "vuln", "--format", "json", "example/app:latest"]]
+
+
+def test_scan_image_can_enable_optional_grype(monkeypatch) -> None:
+    """Operators can opt into the slower secondary scanner for deep image reviews."""
+
+    commands: list[tuple[list[str], int]] = []
+
+    def fake_run_command(command: list[str], **kwargs) -> str:
+        commands.append((command, kwargs["timeout"]))
+        return "{}"
+
+    monkeypatch.setattr("app.scanners.container_scanner.run_command", fake_run_command)
+
+    scanner = ContainerScanner()
+    scanner.grype_image_enabled = True
+    scanner.grype_image_timeout_seconds = 240
+
+    findings = scanner.scan_image("example/app:latest")
+
+    assert findings == []
+    assert commands == [
+        (["trivy", "image", "--scanners", "vuln", "--format", "json", "example/app:latest"], 180),
+        (["grype", "example/app:latest", "-o", "json"], 240),
+    ]

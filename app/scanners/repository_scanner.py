@@ -1,8 +1,9 @@
 """
 Purpose: Synchronize GitHub repositories into local checkouts that other scanners can inspect.
 Input/Output: Uses the GitHub API plus local `git` commands and returns repository metadata.
-Important invariants: Existing repositories are updated with fast-forward pulls only; clone paths are
-stable so historical scan artifacts remain easy to inspect on disk.
+Important invariants: Clone paths are stable, but cached checkouts are disposable scanner state. If
+the local branch diverges from GitHub, the scanner must recover by resetting it to the remote default
+branch instead of silently dropping that repository from a full scan.
 Debugging: If a repository does not update, inspect the logged git command and local checkout path.
 """
 
@@ -150,9 +151,25 @@ class RepositoryScanner:
         self._refresh_origin_remote(local_path, authenticated_url)
         run_command([self.settings.git_binary, "-C", str(local_path), "checkout", default_branch], timeout=120)
         if fetch_full_history:
-            self._refresh_full_history_checkout(local_path, default_branch)
+            try:
+                self._refresh_full_history_checkout(local_path, default_branch)
+            except RuntimeError as error:
+                self._recover_diverged_checkout(
+                    local_path,
+                    default_branch,
+                    fetch_full_history=True,
+                    original_error=error,
+                )
             return
-        run_command([self.settings.git_binary, "-C", str(local_path), "pull", "--ff-only"], timeout=900)
+        try:
+            run_command([self.settings.git_binary, "-C", str(local_path), "pull", "--ff-only"], timeout=900)
+        except RuntimeError as error:
+            self._recover_diverged_checkout(
+                local_path,
+                default_branch,
+                fetch_full_history=False,
+                original_error=error,
+            )
 
     def _refresh_full_history_checkout(self, local_path: Path, default_branch: str) -> None:
         """Ensure public repositories are unshallowed before history-based secret scanning."""
@@ -171,6 +188,53 @@ class RepositoryScanner:
             [self.settings.git_binary, "-C", str(local_path), "pull", "--ff-only", "origin", default_branch],
             timeout=900,
         )
+
+    def _recover_diverged_checkout(
+        self,
+        local_path: Path,
+        default_branch: str,
+        *,
+        fetch_full_history: bool,
+        original_error: RuntimeError,
+    ) -> None:
+        """
+        Reset a disposable scanner checkout when fast-forward update cannot proceed.
+
+        Why this exists:
+        `data/repos/...` is not a developer worktree; it is a cache used to inspect the current
+        GitHub state. A diverged branch would otherwise make a full scan silently skip an owned repo
+        until someone manually deletes the cache. Resetting to `origin/<default_branch>` keeps the
+        scan complete while preserving the stable cache path for debug inspection.
+        """
+
+        LOGGER.warning(
+            "Recovering diverged repository checkout",
+            extra={"local_path": str(local_path), "default_branch": default_branch, "error": str(original_error)},
+        )
+        if fetch_full_history:
+            if (local_path / ".git" / "shallow").exists():
+                run_command(
+                    [self.settings.git_binary, "-C", str(local_path), "fetch", "--unshallow", "--tags", "origin"],
+                    timeout=900,
+                )
+            else:
+                run_command(
+                    [self.settings.git_binary, "-C", str(local_path), "fetch", "--tags", "--prune", "origin"],
+                    timeout=900,
+                )
+        else:
+            run_command(
+                [self.settings.git_binary, "-C", str(local_path), "fetch", "--prune", "origin", default_branch],
+                timeout=900,
+            )
+        remote_ref = f"origin/{default_branch}"
+        run_command([self.settings.git_binary, "-C", str(local_path), "reset", "--hard"], timeout=120)
+        run_command([self.settings.git_binary, "-C", str(local_path), "clean", "-fdx"], timeout=120)
+        run_command(
+            [self.settings.git_binary, "-C", str(local_path), "checkout", "-B", default_branch, remote_ref],
+            timeout=120,
+        )
+        run_command([self.settings.git_binary, "-C", str(local_path), "reset", "--hard", remote_ref], timeout=120)
 
     def _authenticated_clone_url(self, clone_url: str) -> str:
         """Inject the GitHub token for private repository cloning without exposing it in logs."""

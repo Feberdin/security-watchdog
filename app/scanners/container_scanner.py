@@ -1,10 +1,11 @@
 """
-Purpose: Scan Docker images and Dockerfiles with Trivy and Grype and normalize findings.
+Purpose: Scan Docker images and Dockerfiles with Trivy plus optional Grype and normalize findings.
 Input/Output: Calls external scanner binaries and returns `ContainerFinding` objects.
 Important invariants: Tool failures should be logged and converted into empty results instead of
-crashing the whole pipeline; findings must preserve the originating tool and target.
+crashing the whole pipeline; runtime image scans must stay bounded so one slow image cannot hold a
+full estate scan for many minutes.
 Debugging: If scans return nothing, verify that `trivy` and `grype` are installed inside the image
-and run the logged command manually with `LOG_LEVEL=debug`.
+and run the logged command manually with `LOG_LEVEL=debug`. Enable Grype only for slower deep scans.
 """
 
 from __future__ import annotations
@@ -27,13 +28,19 @@ class ContainerScanner:
         settings = get_settings()
         self.trivy_binary = settings.trivy_binary
         self.grype_binary = settings.grype_binary
+        self.trivy_image_timeout_seconds = settings.container_trivy_image_timeout_seconds
+        self.grype_image_enabled = settings.container_grype_image_enabled
+        self.grype_image_timeout_seconds = settings.container_grype_image_timeout_seconds
 
     def scan_image(self, image_ref: str) -> list[ContainerFinding]:
-        """Run both scanners against a container image reference."""
+        """Run the bounded image scanners against one container image reference."""
 
         findings: list[ContainerFinding] = []
         findings.extend(self._scan_with_trivy_image(image_ref))
-        findings.extend(self._scan_with_grype(image_ref))
+        if self.grype_image_enabled:
+            findings.extend(self._scan_with_grype(image_ref))
+        else:
+            LOGGER.debug("Skipping optional Grype image scan", extra={"image": image_ref})
         return self._deduplicate_findings(findings)
 
     def scan_dockerfile(self, dockerfile_path: Path) -> list[ContainerFinding]:
@@ -75,7 +82,7 @@ class ContainerScanner:
         try:
             output = run_command(
                 [self.trivy_binary, "image", "--scanners", "vuln", "--format", "json", image_ref],
-                timeout=300,
+                timeout=self.trivy_image_timeout_seconds,
             )
         except Exception as error:
             LOGGER.warning("Trivy image scan failed", extra={"image": image_ref, "error": str(error)})
@@ -102,7 +109,7 @@ class ContainerScanner:
         """Parse Grype image scan JSON output."""
 
         try:
-            output = run_command([self.grype_binary, image_ref, "-o", "json"], timeout=600)
+            output = run_command([self.grype_binary, image_ref, "-o", "json"], timeout=self.grype_image_timeout_seconds)
         except Exception as error:
             LOGGER.warning("Grype image scan failed", extra={"image": image_ref, "error": str(error)})
             return []

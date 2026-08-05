@@ -1,0 +1,7 @@
+# Purpose: Ignore only two historical synthetic generic-key fixtures from scanner unit tests.
+# Input/Output: Gitleaks reads these metadata-only fingerprints; no credential values are stored.
+# Important invariant: Provider-token rules and all working-tree findings remain active.
+# Debugging: Remove an entry only after confirming the referenced historical fixture no longer
+# appears in a full `gitleaks git` scan.
+059803646eb87598dc84be5896b8223bdee53777:tests/test_secret_scanner.py:generic-api-key:26
+059803646eb87598dc84be5896b8223bdee53777:tests/test_secret_scanner.py:generic-api-key:55

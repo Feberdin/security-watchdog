@@ -27,7 +27,7 @@ def test_detects_high_entropy_string(tmp_path):
     value = "".join(("Q7mP2xR9", "L4vN8cT1", "K6wD3sF5", "H2jB9zU4"))
     sample.write_text(f'api_key = "{value}"\n', encoding="utf-8")
 
-    findings = SecretScanner(entropy_threshold=3.5).scan_file(sample, tmp_path)
+    findings = SecretScanner().scan_file(sample, tmp_path)
 
     assert any(finding.detector == "high_entropy" for finding in findings)
 
@@ -67,6 +67,60 @@ def test_skips_code_level_token_references(tmp_path):
     findings = SecretScanner().scan_file(sample, tmp_path)
 
     assert findings == []
+
+
+def test_skips_business_key_values_and_code_expressions(tmp_path):
+    """Business grouping keys and runtime expressions are not credential literals."""
+
+    samples = {
+        "app/services/inbox_cleanup_service.py": "normalized_key = validated_sender_group_key(sender_key)\n",
+        "app/web/routes.py": "sender_key = validated_sender_group_key(form.sender_key)\n",
+        "tests/test_inbox_cleanup_service.py": 'sender_key="email:person@gmail.com"\n',
+    }
+    for relative_path, content in samples.items():
+        sample = tmp_path / relative_path
+        sample.parent.mkdir(parents=True, exist_ok=True)
+        sample.write_text(content, encoding="utf-8")
+
+    findings = SecretScanner().scan_directory(tmp_path)
+
+    assert findings == []
+
+
+def test_detects_explicit_security_key_assignments(tmp_path):
+    """Named API, private, encryption, signing, and session keys remain findings."""
+
+    values = {
+        "API_KEY": "".join(("Api", "Signal_", "1234", "Abcd", "5678")),
+        "PRIVATE_KEY": "".join(("Private", "Signal_", "1234", "Abcd")),
+        "ENCRYPTION_KEY": "".join(("Encrypt", "Signal_", "1234", "Abcd")),
+        "SIGNING_KEY": "".join(("Signing", "Signal_", "1234", "Abcd")),
+        "SESSION_KEY": "".join(("Session", "Signal_", "1234", "Abcd")),
+    }
+    sample = tmp_path / ".env"
+    sample.write_text(
+        "\n".join(f'{name}="{value}"' for name, value in values.items()),
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assignment_findings = [
+        finding for finding in findings if finding.detector == "generic_token_assignment"
+    ]
+    assert len(assignment_findings) == len(values)
+
+
+def test_detects_high_entropy_literal_for_generic_key_name(tmp_path):
+    """A random-looking literal remains suspicious even when the `*_key` name is ambiguous."""
+
+    sample = tmp_path / "settings.py"
+    value = "".join(("Q7mP2xR9", "L4vN8cT1", "K6wD3sF5", "H2jB9zU4"))
+    sample.write_text(f'sender_key = "{value}"\n', encoding="utf-8")
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert any(finding.detector == "generic_token_assignment" for finding in findings)
 
 
 def test_detects_quoted_dotted_literal_in_source_code(tmp_path):
@@ -273,7 +327,8 @@ def test_skips_high_entropy_noise_in_docs_paths(tmp_path):
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     sample = docs_path / "README.md"
-    sample.write_text('api_key = "A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6"\n', encoding="utf-8")
+    value = "".join(("A1B2C3D4", "E5F6G7H8", "I9J0K1L2", "M3N4O5P6"))
+    sample.write_text(f'api_key = "{value}"\n', encoding="utf-8")
 
     findings = SecretScanner(entropy_threshold=3.5).scan_file(sample, tmp_path)
 
@@ -333,6 +388,40 @@ def test_skips_entropy_only_findings_in_git_history(monkeypatch, tmp_path):
                 "+++ b/app.py\n",
                 "@@ -0,0 +1 @@\n",
                 '+headers = {"Authorization": "A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6"}\n',
+            ]
+        ),
+    )
+
+    findings = scanner.scan_git_history(repo)
+
+    assert findings == []
+
+
+def test_skips_business_key_values_and_code_expressions_in_git_history(monkeypatch, tmp_path):
+    """The same non-secret rules apply to added lines from historical commits."""
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+
+    scanner = SecretScanner()
+    monkeypatch.setattr(
+        scanner,
+        "_iter_git_history_lines",
+        lambda root_path: iter(
+            [
+                "__COMMIT__abc123def456\n",
+                "diff --git a/app/services/inbox_cleanup_service.py b/app/services/inbox_cleanup_service.py\n",
+                "+++ b/app/services/inbox_cleanup_service.py\n",
+                "@@ -0,0 +362 @@\n",
+                "+normalized_key = validated_sender_group_key(sender_key)\n",
+                "diff --git a/app/web/routes.py b/app/web/routes.py\n",
+                "+++ b/app/web/routes.py\n",
+                "@@ -0,0 +1240 @@\n",
+                "+sender_key = validated_sender_group_key(form.sender_key)\n",
+                "diff --git a/tests/test_inbox_cleanup_service.py b/tests/test_inbox_cleanup_service.py\n",
+                "+++ b/tests/test_inbox_cleanup_service.py\n",
+                "@@ -0,0 +253 @@\n",
+                '+sender_key="email:person@gmail.com"\n',
             ]
         ),
     )

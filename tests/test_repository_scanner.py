@@ -218,14 +218,18 @@ def test_align_checkout_to_target_commit_prefers_direct_fetch(tmp_path, monkeypa
     repo_path.mkdir()
     target_commit_sha = "a1" * 20
     commands: list[list[str]] = []
+    checked_out = False
 
     def fake_run_command(command: list[str], **kwargs) -> str:
+        nonlocal checked_out
         commands.append(command)
         if command[1:3] == ["-C", str(repo_path)] and command[3] == "rev-parse":
-            if command[-1] == target_commit_sha:
+            if command[-1] == f"{target_commit_sha}^{{commit}}":
                 raise RuntimeError("missing")
             if command[-1] == "HEAD^{commit}":
-                return target_commit_sha
+                return target_commit_sha if checked_out else "b2" * 20
+        if command[1:3] == ["-C", str(repo_path)] and command[3:5] == ["checkout", "--detach"]:
+            checked_out = True
         return ""
 
     monkeypatch.setattr("app.scanners.repository_scanner.run_command", fake_run_command)
@@ -248,20 +252,24 @@ def test_align_checkout_to_target_commit_falls_back_to_all_heads_when_direct_fet
     target_commit_sha = "a1" * 20
     commands: list[list[str]] = []
     fetch_attempts = {"count": 0}
+    checked_out = False
 
     def fake_run_command(command: list[str], **kwargs) -> str:
+        nonlocal checked_out
         commands.append(command)
         if command[1:3] == ["-C", str(repo_path)] and command[3] == "rev-parse":
-            if command[-1] == target_commit_sha:
+            if command[-1] == f"{target_commit_sha}^{{commit}}":
                 raise RuntimeError("missing")
             if command[-1] == "HEAD^{commit}":
-                return target_commit_sha
+                return target_commit_sha if checked_out else "b2" * 20
         if command[1:3] == ["-C", str(repo_path)] and command[3] == "fetch" and command[4] == "--depth=1":
             if command[-1] == target_commit_sha:
                 fetch_attempts["count"] += 1
                 if fetch_attempts["count"] == 1:
                     raise RuntimeError("not found")
             return ""
+        if command[1:3] == ["-C", str(repo_path)] and command[3:5] == ["checkout", "--detach"]:
+            checked_out = True
         return ""
 
     monkeypatch.setattr("app.scanners.repository_scanner.run_command", fake_run_command)
@@ -276,6 +284,36 @@ def test_align_checkout_to_target_commit_falls_back_to_all_heads_when_direct_fet
     assert any(
         "+refs/heads/*:refs/remotes/origin/*" in " ".join(command) for command in commands
     )
+
+
+def test_align_checkout_to_cached_target_commit_moves_head_without_fetch(tmp_path, monkeypatch) -> None:
+    """A cached target object must still be checked out when HEAD points somewhere else."""
+
+    scanner = RepositoryScanner()
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    target_commit_sha = "a1" * 20
+    commands: list[list[str]] = []
+    checked_out = False
+
+    def fake_run_command(command: list[str], **kwargs) -> str:
+        nonlocal checked_out
+        commands.append(command)
+        if command[1:3] == ["-C", str(repo_path)] and command[3] == "rev-parse":
+            if command[-1] == "HEAD^{commit}":
+                return target_commit_sha if checked_out else "b2" * 20
+            if command[-1] == f"{target_commit_sha}^{{commit}}":
+                return target_commit_sha
+        if command[1:3] == ["-C", str(repo_path)] and command[3:5] == ["checkout", "--detach"]:
+            checked_out = True
+        return ""
+
+    monkeypatch.setattr("app.scanners.repository_scanner.run_command", fake_run_command)
+
+    scanner._align_checkout_to_target_commit(repo_path, target_commit_sha)
+
+    assert any(command[3:6] == ["checkout", "--detach", target_commit_sha] for command in commands)
+    assert not any(command[3] == "fetch" for command in commands)
 
 
 def test_existing_repository_pull_refreshes_origin_with_current_token(tmp_path, monkeypatch) -> None:

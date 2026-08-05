@@ -69,6 +69,48 @@ def test_skips_code_level_token_references(tmp_path):
     assert findings == []
 
 
+def test_typed_source_assignments_use_the_real_right_hand_side(tmp_path):
+    """Type annotations are code syntax; literal values still remain detectable."""
+
+    sample = tmp_path / "settings.py"
+    api_value = "".join(("Typed", "Signal_", "1234", "Abcd", "5678"))
+    sample.write_text(
+        "smtp_username: str = \"\"\n"
+        "smtp_password: str = \"\"\n"
+        "session_key: str = settings.session_key\n"
+        f'api_key: str = "{api_value}"\n',
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assignment_findings = [
+        finding for finding in findings if finding.detector == "generic_token_assignment"
+    ]
+    assert len(assignment_findings) == 1
+    assert assignment_findings[0].line_number == 4
+
+
+def test_embedded_scanner_fixtures_keep_provider_detectors_active(tmp_path):
+    """Generic unit-test examples are ignored, but provider-shaped tokens are still findings."""
+
+    tests_path = tmp_path / "tests"
+    tests_path.mkdir()
+    sample = tests_path / "test_secret_scanner.py"
+    provider_value = "".join(("ghp_", "AbCdEf123456", "GhIjKl789012"))
+    sample.write_text(
+        "sample.write_text('api_key = \"config.live123\"\\n', encoding=\"utf-8\")\n"
+        '    "BROKER_MCP_TOKEN=MYTOKENVALUE123",\n'
+        f'    "AUTH_TOKEN={provider_value}",\n',
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert {finding.detector for finding in findings} == {"github_token"}
+    assert findings[0].line_number == 3
+
+
 def test_skips_business_key_values_and_code_expressions(tmp_path):
     """Business grouping keys and runtime expressions are not credential literals."""
 
@@ -429,3 +471,41 @@ def test_skips_business_key_values_and_code_expressions_in_git_history(monkeypat
     findings = scanner.scan_git_history(repo)
 
     assert findings == []
+
+
+def test_history_skips_scanner_fixtures_and_typed_empty_defaults_but_keeps_provider_tokens(
+    monkeypatch,
+    tmp_path,
+):
+    """Historical generic fixtures resolve without suppressing strong provider evidence."""
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    provider_value = "".join(("ghp_", "AbCdEf123456", "GhIjKl789012"))
+
+    scanner = SecretScanner()
+    monkeypatch.setattr(
+        scanner,
+        "_iter_git_history_lines",
+        lambda root_path: iter(
+            [
+                "__COMMIT__abc123def456\n",
+                "diff --git a/tests/test_secret_scanner.py b/tests/test_secret_scanner.py\n",
+                "+++ b/tests/test_secret_scanner.py\n",
+                "@@ -0,0 +1,3 @@\n",
+                "+sample.write_text('api_key = \"config.live123\"\\n', encoding=\"utf-8\")\n",
+                '+    "BROKER_MCP_TOKEN=MYTOKENVALUE123",\n',
+                f'+    "AUTH_TOKEN={provider_value}",\n',
+                "diff --git a/app/core/config.py b/app/core/config.py\n",
+                "+++ b/app/core/config.py\n",
+                "@@ -0,0 +1,2 @@\n",
+                '+smtp_username: str = ""\n',
+                '+smtp_password: str = ""\n',
+            ]
+        ),
+    )
+
+    findings = scanner.scan_git_history(repo)
+
+    assert {finding.detector for finding in findings} == {"github_token"}
+    assert findings[0].content_source == "git_history"

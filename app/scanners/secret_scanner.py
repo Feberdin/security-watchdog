@@ -180,6 +180,9 @@ CODE_MEMBER_REFERENCE_PATTERN = re.compile(
     r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+"
 )
 HUMAN_READABLE_SLUG_PATTERN = re.compile(r"[a-z]+(?:[-_](?:[a-z]+|\d+))+")
+TYPED_SOURCE_ASSIGNMENT_PATTERN = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_.\[\], |]*\s*=\s*(?P<assigned_value>.*)$"
+)
 SOURCE_CODE_EXTENSIONS = {
     ".c",
     ".cc",
@@ -199,8 +202,9 @@ SOURCE_CODE_EXTENSIONS = {
     ".ts",
     ".tsx",
 }
+SCANNER_FIXTURE_FILE_NAMES = {"test_secret_scanner.py"}
 ASSIGNMENT_PATTERN = re.compile(
-    r"""^\s*(?:-\s*)?(?:export\s+)?(?P<name>["']?[A-Za-z_][A-Za-z0-9_.-]*["']?)\s*(?::|=)\s*(?P<value>.+?)\s*,?\s*$"""
+    r"""^\s*(?:-\s*)?(?:export\s+)?(?P<name>["']?[A-Za-z_][A-Za-z0-9_.-]*["']?)\s*(?P<separator>:|=)\s*(?P<value>.+?)\s*,?\s*$"""
 )
 GIT_HISTORY_COMMIT_PREFIX = "__COMMIT__"
 GIT_HUNK_PATTERN = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)")
@@ -453,7 +457,11 @@ class SecretScanner:
         """Run regex and entropy detectors against one logical source line."""
 
         findings: list[SecretFinding] = []
-        assignment = self._parse_assignment(line)
+        is_embedded_scanner_fixture = self._is_embedded_scanner_fixture_line(
+            line=line,
+            file_path=file_path,
+        )
+        assignment = self._parse_assignment(line, file_path=file_path)
         assignment_finding = self._scan_assignment_for_secret(
             assignment=assignment,
             file_path=file_path,
@@ -461,7 +469,7 @@ class SecretScanner:
             content_source=content_source,
             commit_sha=commit_sha,
         )
-        if assignment_finding is not None:
+        if assignment_finding is not None and not is_embedded_scanner_fixture:
             findings.append(assignment_finding)
             if assignment_finding.detector != "generic_token_assignment":
                 return findings
@@ -471,6 +479,11 @@ class SecretScanner:
         for detector_name, pattern in SECRET_PATTERNS.items():
             match = pattern.search(line)
             if match is None:
+                continue
+            if (
+                is_embedded_scanner_fixture
+                and detector_name in {"generic_password", "generic_token_assignment"}
+            ):
                 continue
 
             secret_preview_source = match.groupdict().get("secret_value") or match.group(0)
@@ -520,14 +533,15 @@ class SecretScanner:
                 )
         return findings
 
-    def _parse_assignment(self, line: str) -> ParsedAssignment | None:
+    def _parse_assignment(self, line: str, *, file_path: str) -> ParsedAssignment | None:
         """
         Parse simple config assignments without attempting to parse whole files.
 
         Why this exists:
         Broker and Compose configuration often uses `KEY=value`, `KEY: value`, or JSON/TOML-like
         `"KEY": "value"` lines. Understanding the left-hand variable name lets the scanner separate
-        secret references from hard-coded credentials before broader regex checks run.
+        secret references from hard-coded credentials before broader regex checks run. Typed source
+        declarations such as `api_key: str = value` must use the value after `=`, not the type.
         """
 
         match = ASSIGNMENT_PATTERN.search(line)
@@ -535,6 +549,11 @@ class SecretScanner:
             return None
         name = match.group("name").strip().strip("'\"")
         raw_value = re.sub(r"\s+#.*$", "", match.group("value")).strip().rstrip(",").strip()
+        raw_value = self._extract_typed_source_assignment_value(
+            raw_value=raw_value,
+            separator=match.group("separator"),
+            file_path=file_path,
+        )
         value_was_quoted = (
             len(raw_value) >= 2
             and raw_value[0] == raw_value[-1]
@@ -545,10 +564,49 @@ class SecretScanner:
             return None
         return ParsedAssignment(name=name, value=value, value_was_quoted=value_was_quoted)
 
+    def _extract_typed_source_assignment_value(
+        self,
+        *,
+        raw_value: str,
+        separator: str,
+        file_path: str,
+    ) -> str:
+        """
+        Extract the real right-hand side from a typed source declaration.
+
+        Example:
+        `smtp_password: str = ""` becomes an empty assigned value, while
+        `api_key: str = "LiveSignal123"` keeps the quoted literal for normal detection.
+        """
+
+        if separator != ":" or Path(file_path).suffix.lower() not in SOURCE_CODE_EXTENSIONS:
+            return raw_value
+        match = TYPED_SOURCE_ASSIGNMENT_PATTERN.fullmatch(raw_value)
+        if match is None:
+            return raw_value
+        return match.group("assigned_value").strip()
+
     def _clean_assignment_value(self, value: str) -> str:
         """Normalize one assigned value while preserving enough evidence for detector decisions."""
 
         return value.strip().strip("'\"")
+
+    def _is_embedded_scanner_fixture_line(self, *, line: str, file_path: str) -> bool:
+        """
+        Identify generic secret examples embedded in the scanner's own unit-test source.
+
+        Why this exists:
+        The scanner test module intentionally stores generic credential-shaped examples as Python
+        string literals. Assignment heuristics must not treat those wrapper literals as repository
+        credentials. Provider-specific detectors still run, so a committed provider token in this
+        test file remains a finding.
+        """
+
+        path = Path(file_path.lower())
+        if path.name not in SCANNER_FIXTURE_FILE_NAMES:
+            return False
+        stripped_line = line.lstrip()
+        return ".write_text(" in line or stripped_line.startswith(("'", '"'))
 
     def _scan_assignment_for_secret(
         self,

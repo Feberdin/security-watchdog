@@ -200,3 +200,8 @@ Request:
 The scan is queued as a high-priority GitHub-only manual scan with `purpose=pre_deploy` and
 `target_commit_sha` set to the requested commit. If `pause_active` is true, the current running scan
 is asked to pause at the next safe checkpoint so the commit-bound evidence can run first.
+
+The resulting scan-job response exposes `scanned_commit_sha` separately from
+`target_commit_sha`. The value is read from the checked-out repository, persisted with the job
+checkpoint, and returned only after an exact comparison succeeded. A commit-bound job is marked
+failed when this measured evidence is missing or differs from the requested full SHA.

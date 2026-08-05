@@ -142,6 +142,88 @@ def test_manual_scan_targets_specific_commit_during_inventory_sync() -> None:
     assert response.repository_count == 0
 
 
+def test_commit_bound_scan_persists_measured_checkout_sha() -> None:
+    """A pre-deploy result must expose evidence measured from the successful checkout."""
+
+    session = build_test_session()
+    requested_commit_sha = "a" * 40
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="security-watchdog",
+        full_name="Feberdin/security-watchdog",
+        local_path="/tmp/security-watchdog",
+    )
+    job = ManualScanJob(
+        repository_full_name=repository.full_name,
+        purpose="pre_deploy",
+        target_commit_sha=requested_commit_sha,
+        status=ManualScanJobStatus.RUNNING.value,
+    )
+    session.add_all([repository, job])
+    session.commit()
+
+    orchestrator = ScanOrchestrator()
+    orchestrator.repository_scanner.sync_repositories = lambda *args, **kwargs: [repository]
+    orchestrator.repository_scanner.get_checkout_commit_sha = (
+        lambda *args, **kwargs: requested_commit_sha
+    )
+    orchestrator._scan_repository_asset = lambda *args, **kwargs: 0
+    orchestrator._dispatch_open_alerts = lambda *args, **kwargs: None
+
+    response = orchestrator.run_manual_scan(
+        session,
+        ScanRequest(
+            repository_full_name=repository.full_name,
+            scan_sources=["github"],
+            purpose="pre_deploy",
+            target_commit_sha=requested_commit_sha,
+        ),
+        job_id=job.id,
+    )
+    stored_job = session.get(ManualScanJob, job.id)
+
+    assert response.failed_system_count == 0
+    assert response.scanned_commit_sha == requested_commit_sha
+    assert stored_job is not None
+    assert stored_job.scanned_commit_sha == requested_commit_sha
+
+
+def test_commit_bound_scan_rejects_mismatched_checkout_sha() -> None:
+    """A different checkout must fail the asset scan and must never become commit evidence."""
+
+    session = build_test_session()
+    requested_commit_sha = "a" * 40
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="security-watchdog",
+        full_name="Feberdin/security-watchdog",
+        local_path="/tmp/security-watchdog",
+    )
+    session.add(repository)
+    session.commit()
+
+    orchestrator = ScanOrchestrator()
+    orchestrator.repository_scanner.sync_repositories = lambda *args, **kwargs: [repository]
+    orchestrator.repository_scanner.get_checkout_commit_sha = lambda *args, **kwargs: "b" * 40
+    orchestrator._scan_repository_asset = lambda *args, **kwargs: 0
+    orchestrator._dispatch_open_alerts = lambda *args, **kwargs: None
+
+    response = orchestrator.run_manual_scan(
+        session,
+        ScanRequest(
+            repository_full_name=repository.full_name,
+            scan_sources=["github"],
+            purpose="pre_deploy",
+            target_commit_sha=requested_commit_sha,
+        ),
+    )
+
+    assert response.failed_system_count == 1
+    assert response.scanned_commit_sha is None
+
+
 def test_manual_scan_resume_uses_existing_asset_outcomes_and_updates_checkpoint() -> None:
     """A resumed scan should skip durable successes/failures and continue with pending assets."""
 
@@ -296,6 +378,58 @@ def test_manual_scan_resume_does_not_double_count_checkpointed_assets() -> None:
     assert stored_job is not None
     assert stored_job.repository_count == 2
     assert stored_job.alert_count == 6
+
+
+def test_commit_bound_scan_resume_keeps_checkpointed_checkout_evidence() -> None:
+    """A restarted pre-deploy scan must retain its previously measured checkout SHA."""
+
+    session = build_test_session()
+    requested_commit_sha = "a" * 40
+    job_started_at = datetime.now(UTC) - timedelta(minutes=10)
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="security-watchdog",
+        full_name="Feberdin/security-watchdog",
+        local_path="/tmp/security-watchdog",
+        last_scanned_at=datetime.now(UTC) - timedelta(minutes=2),
+    )
+    job = ManualScanJob(
+        repository_full_name=repository.full_name,
+        purpose="pre_deploy",
+        target_commit_sha=requested_commit_sha,
+        scanned_commit_sha=requested_commit_sha,
+        status=ManualScanJobStatus.RUNNING.value,
+        started_at=job_started_at,
+        repository_count=1,
+    )
+    session.add_all([repository, job])
+    session.commit()
+
+    orchestrator = ScanOrchestrator()
+    orchestrator.repository_scanner.sync_repositories = lambda *args, **kwargs: [repository]
+
+    def fail_if_repository_is_rescanned(*args, **kwargs) -> int:
+        raise AssertionError("checkpointed repository must not be scanned again")
+
+    orchestrator._scan_repository_asset = fail_if_repository_is_rescanned
+    orchestrator._dispatch_open_alerts = lambda *args, **kwargs: None
+
+    response = orchestrator.run_manual_scan(
+        session,
+        ScanRequest(
+            repository_full_name=repository.full_name,
+            scan_sources=["github"],
+            purpose="pre_deploy",
+            target_commit_sha=requested_commit_sha,
+        ),
+        job_id=job.id,
+        resume_started_at=job_started_at,
+    )
+
+    assert response.repository_count == 1
+    assert response.failed_system_count == 0
+    assert response.scanned_commit_sha == requested_commit_sha
 
 
 def test_manual_scan_respects_source_selection() -> None:

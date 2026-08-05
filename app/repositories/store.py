@@ -471,6 +471,7 @@ def update_manual_scan_job_checkpoint(
     repository_count: int,
     alert_count: int,
     failed_system_count: int,
+    scanned_commit_sha: str | None = None,
 ) -> ManualScanJob | None:
     """
     Store durable progress counters for a running manual scan.
@@ -488,6 +489,8 @@ def update_manual_scan_job_checkpoint(
     job.repository_count = repository_count
     job.alert_count = alert_count
     job.failed_system_count = failed_system_count
+    if scanned_commit_sha is not None:
+        job.scanned_commit_sha = scanned_commit_sha
     session.flush()
     return job
 
@@ -511,6 +514,7 @@ def mark_manual_scan_job_succeeded(
     job.repository_count = response.repository_count
     job.alert_count = response.alert_count
     job.failed_system_count = response.failed_system_count
+    job.scanned_commit_sha = response.scanned_commit_sha
     job.error_message = None
     session.flush()
     return job

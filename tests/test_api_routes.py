@@ -406,6 +406,7 @@ def test_pre_deploy_scan_endpoint_queues_high_priority_commit_bound_job() -> Non
     assert latest_job["priority"] == 100
     assert latest_job["purpose"] == "pre_deploy"
     assert latest_job["target_commit_sha"] == commit_sha
+    assert latest_job["scanned_commit_sha"] is None
 
 
 def test_gate_status_endpoint_is_dashboard_safe_without_bearer_token() -> None:

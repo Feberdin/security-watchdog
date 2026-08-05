@@ -323,6 +323,90 @@ def test_process_manual_scan_job_marks_job_succeeded(monkeypatch) -> None:
     assert stored_job.error_message is None
 
 
+def test_process_commit_bound_scan_persists_exact_evidence(monkeypatch) -> None:
+    """The queue should publish measured evidence only when it exactly matches the target."""
+
+    session_factory = build_session_factory()
+    monkeypatch.setattr(manual_scan_jobs, "SessionLocal", session_factory)
+    requested_commit_sha = "a" * 40
+
+    class ExactCommitOrchestrator:
+        """Return deterministic checkout evidence without accessing an external repository."""
+
+        def run_manual_scan(self, session: Session, request: ScanRequest, **kwargs) -> ScanResponse:
+            assert request.target_commit_sha == requested_commit_sha
+            return ScanResponse(
+                message="Scan completed",
+                repository_count=1,
+                alert_count=0,
+                failed_system_count=0,
+                scanned_commit_sha=requested_commit_sha,
+            )
+
+    monkeypatch.setattr(manual_scan_jobs, "ScanOrchestrator", ExactCommitOrchestrator)
+
+    with session_factory() as session:
+        job, _ = manual_scan_jobs.enqueue_manual_scan(
+            session,
+            ScanRequest(
+                repository_full_name="Feberdin/security-watchdog",
+                scan_sources=["github"],
+                purpose="pre_deploy",
+                target_commit_sha=requested_commit_sha,
+            ),
+        )
+        session.commit()
+        job_id = job.id
+
+    result = manual_scan_jobs.process_manual_scan_job(job_id)
+
+    assert result is not None
+    assert result.status == ManualScanJobStatus.SUCCEEDED.value
+    assert result.target_commit_sha == requested_commit_sha
+    assert result.scanned_commit_sha == requested_commit_sha
+
+
+def test_process_commit_bound_scan_fails_without_exact_evidence(monkeypatch) -> None:
+    """A successful-looking aggregate must fail closed when checkout evidence is missing."""
+
+    session_factory = build_session_factory()
+    monkeypatch.setattr(manual_scan_jobs, "SessionLocal", session_factory)
+    requested_commit_sha = "a" * 40
+
+    class MissingEvidenceOrchestrator:
+        """Simulate an upstream scan that forgot to return the measured checkout SHA."""
+
+        def run_manual_scan(self, session: Session, request: ScanRequest, **kwargs) -> ScanResponse:
+            return ScanResponse(
+                message="Scan completed",
+                repository_count=1,
+                alert_count=0,
+                failed_system_count=0,
+            )
+
+    monkeypatch.setattr(manual_scan_jobs, "ScanOrchestrator", MissingEvidenceOrchestrator)
+
+    with session_factory() as session:
+        job, _ = manual_scan_jobs.enqueue_manual_scan(
+            session,
+            ScanRequest(
+                repository_full_name="Feberdin/security-watchdog",
+                scan_sources=["github"],
+                purpose="pre_deploy",
+                target_commit_sha=requested_commit_sha,
+            ),
+        )
+        session.commit()
+        job_id = job.id
+
+    result = manual_scan_jobs.process_manual_scan_job(job_id)
+
+    assert result is not None
+    assert result.status == ManualScanJobStatus.FAILED.value
+    assert result.scanned_commit_sha is None
+    assert "without exact checkout evidence" in (result.error_message or "")
+
+
 def test_process_manual_scan_job_marks_job_failed(monkeypatch) -> None:
     """Unexpected scan errors should be reflected on the job row and in the returned status."""
 

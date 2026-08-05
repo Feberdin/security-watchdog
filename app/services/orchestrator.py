@@ -162,10 +162,12 @@ class ScanOrchestrator:
         )
         progress.configure_assets(len(repositories) + len(unraid_assets) + len(homeassistant_assets))
 
-        processed_count, created_alerts, failed_system_count = self._load_manual_scan_checkpoint(
-            session,
-            job_id,
-        )
+        (
+            processed_count,
+            created_alerts,
+            failed_system_count,
+            scanned_commit_sha,
+        ) = self._load_manual_scan_checkpoint(session, job_id)
         resume_counts_are_persisted = processed_count > 0
 
         for repository in repositories:
@@ -206,7 +208,7 @@ class ScanOrchestrator:
                 message="Repository-Scan wird vorbereitet.",
                 fraction=0.0,
             )
-            alerts_created, failed = self._run_guarded_asset_scan(
+            alerts_created, failed, observed_commit_sha = self._run_guarded_asset_scan(
                 session,
                 repository=repository,
                 scanner_name="repository_asset_scan",
@@ -223,6 +225,8 @@ class ScanOrchestrator:
                 ),
                 expected_commit_sha=request.target_commit_sha,
             )
+            if request.target_commit_sha is not None and observed_commit_sha is not None:
+                scanned_commit_sha = observed_commit_sha
             created_alerts += alerts_created
             processed_count += 1
             failed_system_count += failed
@@ -232,6 +236,7 @@ class ScanOrchestrator:
                 repository_count=processed_count,
                 alert_count=created_alerts,
                 failed_system_count=failed_system_count,
+                scanned_commit_sha=scanned_commit_sha,
             )
             progress.finish_asset(asset_name=repository.full_name, failed=bool(failed))
 
@@ -274,7 +279,7 @@ class ScanOrchestrator:
                 message="Laufzeit-Container wird vorbereitet.",
                 fraction=0.0,
             )
-            alerts_created, failed = self._run_guarded_asset_scan(
+            alerts_created, failed, _ = self._run_guarded_asset_scan(
                 session,
                 repository=repository,
                 scanner_name="unraid_asset_scan",
@@ -344,7 +349,7 @@ class ScanOrchestrator:
                 message="Integration wird vorbereitet.",
                 fraction=0.0,
             )
-            alerts_created, failed = self._run_guarded_asset_scan(
+            alerts_created, failed, _ = self._run_guarded_asset_scan(
                 session,
                 repository=repository,
                 scanner_name="homeassistant_asset_scan",
@@ -388,6 +393,7 @@ class ScanOrchestrator:
             repository_count=processed_count,
             alert_count=created_alerts,
             failed_system_count=failed_system_count,
+            scanned_commit_sha=scanned_commit_sha,
         )
 
     def collect_threat_intelligence(self, session: Session) -> int:
@@ -1057,7 +1063,7 @@ class ScanOrchestrator:
         self,
         session: Session,
         job_id: int | None,
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int, str | None]:
         """
         Return persisted manual-scan counters before a resumed run continues.
 
@@ -1068,13 +1074,18 @@ class ScanOrchestrator:
         """
 
         if job_id is None:
-            return 0, 0, 0
+            return 0, 0, 0, None
 
         job = session.get(ManualScanJob, job_id)
         if job is None:
-            return 0, 0, 0
+            return 0, 0, 0, None
 
-        return job.repository_count, job.alert_count, job.failed_system_count
+        return (
+            job.repository_count,
+            job.alert_count,
+            job.failed_system_count,
+            job.scanned_commit_sha,
+        )
 
     def _save_manual_scan_checkpoint(
         self,
@@ -1084,6 +1095,7 @@ class ScanOrchestrator:
         repository_count: int,
         alert_count: int,
         failed_system_count: int,
+        scanned_commit_sha: str | None = None,
     ) -> None:
         """
         Persist current manual-scan counters after one asset decision.
@@ -1103,6 +1115,7 @@ class ScanOrchestrator:
             repository_count=repository_count,
             alert_count=alert_count,
             failed_system_count=failed_system_count,
+            scanned_commit_sha=scanned_commit_sha,
         )
         session.commit()
 
@@ -1232,7 +1245,7 @@ class ScanOrchestrator:
         details: dict[str, str],
         scan_callable,
         expected_commit_sha: str | None = None,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, str | None]:
         """
         Run one asset scan without letting a single failure abort the whole manual scan.
 
@@ -1243,14 +1256,18 @@ class ScanOrchestrator:
         """
 
         effective_details = dict(details)
+        scanned_commit_sha: str | None = None
         try:
             if scanner_name == "repository_asset_scan":
-                commit_sha = self.repository_scanner.get_checkout_commit_sha(Path(repository.local_path))
-                effective_details["commit_sha"] = commit_sha
-                if expected_commit_sha and commit_sha != expected_commit_sha:
+                scanned_commit_sha = self.repository_scanner.get_checkout_commit_sha(
+                    Path(repository.local_path)
+                )
+                effective_details["commit_sha"] = scanned_commit_sha
+                if expected_commit_sha and scanned_commit_sha != expected_commit_sha:
                     raise RuntimeError(
                         "Repository checkout does not match the requested pre-deploy commit. "
-                        f"repository={repository.full_name} expected={expected_commit_sha} actual={commit_sha}"
+                        f"repository={repository.full_name} expected={expected_commit_sha} "
+                        f"actual={scanned_commit_sha}"
                     )
             alerts_created = scan_callable()
             record_scan_result(
@@ -1262,7 +1279,7 @@ class ScanOrchestrator:
                 details=effective_details,
             )
             session.commit()
-            return alerts_created, 0
+            return alerts_created, 0, scanned_commit_sha
         except ScanCanceledError:
             session.rollback()
             raise
@@ -1284,7 +1301,7 @@ class ScanOrchestrator:
                 details={**effective_details, "error": str(error)},
             )
             session.commit()
-            return 0, 1
+            return 0, 1, None
 
     def _calculate_repository_risk(self, session: Session, repository_id: int) -> float:
         """Set repository risk to the current highest open alert score."""

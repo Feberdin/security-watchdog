@@ -56,13 +56,88 @@ def test_skips_code_level_token_references(tmp_path):
 
     sample = tmp_path / "client.py"
     sample.write_text(
-        'token = self._validated_token()\nheader = f"Bearer {token}"\n',
+        'token = self._validated_token()\n'
+        "const browserToken = window.localStorage.getItem('paperless_worker_token') || '';\n"
+        'auth_token=str(auth_token or "")\n'
+        "ai_api_key = self.config.ai_api_key\n"
+        'header = f"Bearer {token}"\n',
         encoding="utf-8",
     )
 
     findings = SecretScanner().scan_file(sample, tmp_path)
 
     assert findings == []
+
+
+def test_detects_quoted_dotted_literal_in_source_code(tmp_path):
+    """A quoted dotted value is data, not a member reference, and must remain detectable."""
+
+    sample = tmp_path / "client.py"
+    sample.write_text('api_key = "config.live123"\n', encoding="utf-8")
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert any(finding.detector == "generic_token_assignment" for finding in findings)
+
+
+def test_skips_angle_bracket_documentation_placeholders(tmp_path):
+    """README placeholders name required input without embedding a usable credential."""
+
+    sample = tmp_path / "README.md"
+    sample.write_text(
+        "Paperless Token: <PAPERLESS_TOKEN>\nAI API Key: <OPENAI_API_KEY>\n",
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
+def test_skips_readable_token_slugs_only_in_low_signal_paths(tmp_path):
+    """Human-readable fixture values should not block deploys, but production literals should."""
+
+    tests_path = tmp_path / "tests"
+    tests_path.mkdir()
+    fixture = tests_path / "test_worker.py"
+    fixture.write_text(
+        'auth_token="worker-review-token"\npaperless_token="token-123"\n',
+        encoding="utf-8",
+    )
+    production = tmp_path / ".env"
+    production.write_text("AUTH_TOKEN=worker-review-token\n", encoding="utf-8")
+
+    assert SecretScanner().scan_file(fixture, tmp_path) == []
+    assert SecretScanner().scan_file(production, tmp_path)
+
+
+def test_token_count_configuration_is_not_a_secret_name(tmp_path):
+    """Plural token counters and pricing constants describe units rather than credentials."""
+
+    sample = tmp_path / "runner.py"
+    sample.write_text(
+        "input_cost_per_1k_tokens_eur = DEFAULT_INPUT_COST_PER_1K_TOKENS_EUR\n"
+        "self.min_remaining_tokens = config.min_remaining_tokens\n",
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
+def test_detects_high_signal_token_in_test_path(tmp_path):
+    """Low-signal paths must not suppress a provider-shaped credential."""
+
+    tests_path = tmp_path / "tests"
+    tests_path.mkdir()
+    sample = tests_path / "fixture.py"
+    value = "".join(("ghp_", "AbCdEf123456", "GhIjKl789012"))
+    sample.write_text(f'auth_token="{value}"\n', encoding="utf-8")
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert any(finding.detector == "github_token" for finding in findings)
 
 
 def test_skips_broker_secret_references(tmp_path):

@@ -195,47 +195,70 @@ class RepositoryScanner:
         """
 
         target_commit_sha = target_commit_sha.lower()
+        head_commit = run_command(
+            [
+                self.settings.git_binary,
+                "-C",
+                str(local_path),
+                "rev-parse",
+                "--verify",
+                "HEAD^{commit}",
+            ],
+            timeout=120,
+        ).lower()
+        if head_commit == target_commit_sha:
+            return
+
+        target_available_locally = False
         try:
-            current_commit = run_command(
+            resolved_target = run_command(
                 [
                     self.settings.git_binary,
                     "-C",
                     str(local_path),
                     "rev-parse",
                     "--verify",
-                    target_commit_sha,
+                    f"{target_commit_sha}^{{commit}}",
                 ],
                 timeout=120,
-            )
-            if current_commit.lower() == target_commit_sha:
-                return
+            ).lower()
+            target_available_locally = resolved_target == target_commit_sha
         except RuntimeError:
             LOGGER.debug(
-                "Target commit is not checked out; fetching explicit commit from origin.",
+                "Target commit is not available locally; fetching explicit commit from origin.",
                 extra={"target": target_commit_sha},
             )
-        try:
-            run_command(
-                [self.settings.git_binary, "-C", str(local_path), "fetch", "--depth=1", "origin", target_commit_sha],
-                timeout=900,
-            )
-        except RuntimeError:
-            LOGGER.warning(
-                "Target commit was not directly reachable; refreshing remote heads for exact checkout.",
-                extra={"local_path": str(local_path), "target_commit_sha": target_commit_sha},
-            )
-            run_command(
-                [
-                    self.settings.git_binary,
-                    "-C",
-                    str(local_path),
-                    "fetch",
-                    "--depth=1",
-                    "origin",
-                    "+refs/heads/*:refs/remotes/origin/*",
-                ],
-                timeout=900,
-            )
+        if not target_available_locally:
+            try:
+                run_command(
+                    [
+                        self.settings.git_binary,
+                        "-C",
+                        str(local_path),
+                        "fetch",
+                        "--depth=1",
+                        "origin",
+                        target_commit_sha,
+                    ],
+                    timeout=900,
+                )
+            except RuntimeError:
+                LOGGER.warning(
+                    "Target commit was not directly reachable; refreshing remote heads for exact checkout.",
+                    extra={"local_path": str(local_path), "target_commit_sha": target_commit_sha},
+                )
+                run_command(
+                    [
+                        self.settings.git_binary,
+                        "-C",
+                        str(local_path),
+                        "fetch",
+                        "--depth=1",
+                        "origin",
+                        "+refs/heads/*:refs/remotes/origin/*",
+                    ],
+                    timeout=900,
+                )
 
         run_command(
             [self.settings.git_binary, "-C", str(local_path), "checkout", "--detach", target_commit_sha],

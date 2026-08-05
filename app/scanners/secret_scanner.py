@@ -116,6 +116,21 @@ HIGH_SIGNAL_PREFIXES = (
     "sk-",
     "xox",
 )
+SECURITY_KEY_QUALIFIERS = {
+    "ACCESS",
+    "API",
+    "AUTH",
+    "CREDENTIAL",
+    "ENCRYPTION",
+    "HMAC",
+    "JWT",
+    "MASTER",
+    "PRIVATE",
+    "SECRET",
+    "SESSION",
+    "SIGNING",
+    "SSH",
+}
 PLACEHOLDER_SECRET_TOKENS = (
     "a1b2c3d4",
     "abcdefghijklmnopqrstuvwxyz",
@@ -604,22 +619,34 @@ class SecretScanner:
         if normalized_name in {"PASSWORD", "PASSWD", "PWD"}:
             return None
 
-        if self._is_heuristic_secret_name(normalized_name) and self._looks_concrete_secret_value(
+        is_credential_name = self._is_heuristic_secret_name(normalized_name)
+        is_generic_key_name = normalized_name.endswith("_KEY")
+        if not is_credential_name and not is_generic_key_name:
+            return None
+
+        if not self._looks_concrete_secret_value(
             value,
             allow_short=False,
             allow_url=normalized_name.endswith("_DATABASE_URL"),
             file_path=file_path,
             value_was_quoted=assignment.value_was_quoted,
         ):
-            return self._build_secret_finding(
-                detector="generic_token_assignment",
-                value=value,
-                file_path=file_path,
-                line_number=line_number,
-                content_source=content_source,
-                commit_sha=commit_sha,
-            )
-        return None
+            return None
+
+        # Why this exists:
+        # A generic `*_key` can be a business identifier such as `sender_key=email:...`. Only
+        # explicit security-key names or genuinely high-entropy literals are credential evidence.
+        if not is_credential_name and not self._looks_high_entropy_literal(value):
+            return None
+
+        return self._build_secret_finding(
+            detector="generic_token_assignment",
+            value=value,
+            file_path=file_path,
+            line_number=line_number,
+            content_source=content_source,
+            commit_sha=commit_sha,
+        )
 
     def _build_secret_finding(
         self,
@@ -698,12 +725,28 @@ class SecretScanner:
             or "SECRET" in name_parts
             or "PASSWORD" in name_parts
             or "BEARER" in name_parts
-            or {"API", "KEY"}.issubset(name_parts)
             or {"CLIENT", "SECRET"}.issubset(name_parts)
             or normalized_name.endswith("_DATABASE_URL")
             or normalized_name.endswith("_DATABASE_PASSWORD")
-            or normalized_name.endswith("_KEY")
+            or ("KEY" in name_parts and bool(name_parts & SECURITY_KEY_QUALIFIERS))
         )
+
+    def _looks_high_entropy_literal(self, value: str) -> bool:
+        """
+        Recognize credential-shaped literals assigned to otherwise generic `*_key` fields.
+
+        Why this exists:
+        Names such as `sender_key` or `cache_key` are ambiguous. A readable structured identifier
+        is business data, while a long random-looking literal still warrants review even without a
+        security qualifier in the variable name.
+        """
+
+        normalized_value = value.strip().strip("'\"")
+        if re.fullmatch(r"[A-Za-z0-9/+_=.-]{20,}", normalized_value) is None:
+            return False
+        if not self._is_high_entropy_candidate(normalized_value):
+            return False
+        return self._shannon_entropy(normalized_value) >= self.entropy_threshold
 
     def _looks_safe_secret_name_reference_value(self, value: str) -> bool:
         """Accept `secret://NAME`, env references, and uppercase secret-name lists as references."""

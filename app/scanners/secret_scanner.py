@@ -8,6 +8,7 @@ Debugging: If a secret is missed, add a detector or inspect the entropy threshol
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import math
 import re
@@ -15,6 +16,7 @@ import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from app.core.config import get_settings
 from app.models.schemas import SecretFinding
@@ -39,6 +41,12 @@ LOW_SIGNAL_PATH_PARTS = {
     "docs",
     "example",
     "examples",
+    "fixture",
+    "fixtures",
+    "test",
+    "tests",
+}
+TEST_FIXTURE_PATH_PARTS = {
     "fixture",
     "fixtures",
     "test",
@@ -179,6 +187,14 @@ CODE_REFERENCE_EXPRESSION_PATTERN = re.compile(
 CODE_MEMBER_REFERENCE_PATTERN = re.compile(
     r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+"
 )
+CODE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
+CODE_KEYWORD_ARGUMENT_PATTERN = re.compile(
+    r"[A-Za-z_$][A-Za-z0-9_$]*=[A-Za-z_$][A-Za-z0-9_$]*"
+)
+CODE_TYPE_ANNOTATION_PATTERN = re.compile(
+    r"[A-Za-z_$][A-Za-z0-9_$.]*(?:\s*\|\s*[A-Za-z_$][A-Za-z0-9_$.]*)*"
+    r"\s*=\s*(?:None|null|undefined)?"
+)
 HUMAN_READABLE_SLUG_PATTERN = re.compile(r"[a-z]+(?:[-_](?:[a-z]+|\d+))+")
 SOURCE_CODE_EXTENSIONS = {
     ".c",
@@ -189,15 +205,19 @@ SOURCE_CODE_EXTENSIONS = {
     ".java",
     ".js",
     ".jsx",
+    ".htm",
+    ".html",
     ".kt",
     ".kts",
     ".php",
     ".py",
     ".rb",
     ".rs",
+    ".svelte",
     ".swift",
     ".ts",
     ".tsx",
+    ".vue",
 }
 ASSIGNMENT_PATTERN = re.compile(
     r"""^\s*(?:-\s*)?(?:export\s+)?(?P<name>["']?[A-Za-z_][A-Za-z0-9_.-]*["']?)\s*(?::|=)\s*(?P<value>.+?)\s*,?\s*$"""
@@ -286,6 +306,13 @@ SECRET_PATTERNS: dict[str, re.Pattern[str]] = {
     "credential_in_url": re.compile(r"\bhttps?://[^/\s:@]+:[^/\s:@]+@[^/\s]+\b"),
     "bearer_token": re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._-]{20,}\b"),
 }
+HIGH_SIGNAL_SECRET_DETECTORS = {
+    "aws_access_key",
+    "github_token",
+    "openai_key",
+    "private_key",
+    "slack_token",
+}
 
 
 @dataclass(frozen=True)
@@ -294,6 +321,7 @@ class ParsedAssignment:
 
     name: str
     value: str
+    name_was_quoted: bool
     value_was_quoted: bool
 
 
@@ -462,19 +490,41 @@ class SecretScanner:
             commit_sha=commit_sha,
         )
         if assignment_finding is not None:
-            findings.append(assignment_finding)
-            if assignment_finding.detector != "generic_token_assignment":
+            is_generic_fixture_finding = (
+                self._is_test_fixture_path(file_path)
+                and not self._contains_high_signal_literal_secret(assignment.value)
+            )
+            if not is_generic_fixture_finding:
+                findings.append(assignment_finding)
+            if (
+                assignment_finding.detector != "generic_token_assignment"
+                and not is_generic_fixture_finding
+            ):
                 return findings
-        if assignment is not None and self._is_safe_assignment_context(assignment):
+        if assignment is not None and self._is_safe_assignment_context(
+            assignment,
+            file_path=file_path,
+        ):
             return findings
 
         for detector_name, pattern in SECRET_PATTERNS.items():
+            if (
+                self._is_test_fixture_path(file_path)
+                and detector_name not in HIGH_SIGNAL_SECRET_DETECTORS
+            ):
+                continue
             match = pattern.search(line)
             if match is None:
                 continue
 
             secret_preview_source = match.groupdict().get("secret_value") or match.group(0)
             if self._looks_placeholder_secret(secret_preview_source):
+                continue
+            if self._looks_synthetic_regex_match(
+                detector_name,
+                secret_preview_source,
+                file_path=file_path,
+            ):
                 continue
             if detector_name in {"generic_password", "generic_token_assignment"}:
                 value_start = match.start("secret_value")
@@ -503,7 +553,11 @@ class SecretScanner:
         for candidate in re.findall(r"[A-Za-z0-9/+_=.-]{20,}", line):
             if not self._is_high_entropy_candidate(candidate):
                 continue
-            if not self._is_secret_like_entropy_context(line, candidate):
+            if not self._is_secret_like_entropy_context(
+                line,
+                candidate,
+                file_path=file_path,
+            ):
                 continue
             entropy = self._shannon_entropy(candidate)
             if entropy >= self.entropy_threshold:
@@ -533,7 +587,13 @@ class SecretScanner:
         match = ASSIGNMENT_PATTERN.search(line)
         if match is None:
             return None
-        name = match.group("name").strip().strip("'\"")
+        raw_name = match.group("name").strip()
+        name_was_quoted = (
+            len(raw_name) >= 2
+            and raw_name[0] == raw_name[-1]
+            and raw_name[0] in {"'", '"'}
+        )
+        name = raw_name.strip("'\"")
         raw_value = re.sub(r"\s+#.*$", "", match.group("value")).strip().rstrip(",").strip()
         value_was_quoted = (
             len(raw_value) >= 2
@@ -543,7 +603,12 @@ class SecretScanner:
         value = self._clean_assignment_value(raw_value)
         if not name or not value:
             return None
-        return ParsedAssignment(name=name, value=value, value_was_quoted=value_was_quoted)
+        return ParsedAssignment(
+            name=name,
+            value=value,
+            name_was_quoted=name_was_quoted,
+            value_was_quoted=value_was_quoted,
+        )
 
     def _clean_assignment_value(self, value: str) -> str:
         """Normalize one assigned value while preserving enough evidence for detector decisions."""
@@ -573,6 +638,11 @@ class SecretScanner:
 
         normalized_name = self._normalize_variable_name(assignment.name)
         value = assignment.value
+        if self._looks_non_literal_source_assignment(
+            assignment,
+            file_path=file_path,
+        ):
+            return None
         if self._is_secret_name_field(normalized_name):
             if self._looks_safe_secret_name_reference_value(value):
                 return None
@@ -669,10 +739,20 @@ class SecretScanner:
             commit_sha=commit_sha,
         )
 
-    def _is_safe_assignment_context(self, assignment: ParsedAssignment) -> bool:
+    def _is_safe_assignment_context(
+        self,
+        assignment: ParsedAssignment,
+        *,
+        file_path: str,
+    ) -> bool:
         """Return true when an assignment is intentionally a reference or non-secret config."""
 
         normalized_name = self._normalize_variable_name(assignment.name)
+        if self._looks_non_literal_source_assignment(
+            assignment,
+            file_path=file_path,
+        ):
+            return True
         if SECRET_REFERENCE_PATTERN.search(assignment.value):
             return True
         if self._is_secret_name_field(normalized_name) and self._looks_safe_secret_name_reference_value(
@@ -681,6 +761,20 @@ class SecretScanner:
             return True
         if self._is_known_non_secret_variable(normalized_name):
             return not self._contains_high_signal_literal_secret(assignment.value)
+        if (
+            self._is_known_broker_secret_name(normalized_name)
+            or self._is_heuristic_secret_name(normalized_name)
+        ):
+            return not self._looks_concrete_secret_value(
+                assignment.value,
+                allow_short=self._is_known_broker_secret_name(normalized_name),
+                allow_url=(
+                    normalized_name == "BITWARDEN_SERVER_URL"
+                    or normalized_name.endswith("_DATABASE_URL")
+                ),
+                file_path=file_path,
+                value_was_quoted=assignment.value_was_quoted,
+            )
         return False
 
     def _normalize_variable_name(self, name: str) -> str:
@@ -710,6 +804,56 @@ class SecretScanner:
             normalized_name in BROKER_SECRET_NAMES
             or normalized_name in BROKER_TEMPLATE_SECRET_NAMES
             or normalized_name.startswith("INTERNET_WATCHER_COMPLAINT_SMTP_")
+        )
+
+    def _looks_non_literal_source_assignment(
+        self,
+        assignment: ParsedAssignment,
+        *,
+        file_path: str,
+    ) -> bool:
+        """
+        Recognize source-code metadata and runtime references before treating them as credentials.
+
+        Why this exists:
+        A line scanner sees Python type annotations, JavaScript object properties, help-text maps,
+        and role labels in the same `name: value` shape as YAML. Source files therefore need a
+        narrow syntax-aware filter. Provider-shaped tokens and random-looking literal values are
+        deliberately not suppressed here.
+        """
+
+        if Path(file_path).suffix.lower() not in SOURCE_CODE_EXTENSIONS:
+            return False
+
+        value = assignment.value.strip().strip("'\"").rstrip(",;")
+        lowered_value = value.lower()
+        if self._contains_high_signal_literal_secret(value):
+            return False
+
+        if not assignment.value_was_quoted:
+            if self._looks_code_reference_expression(value, file_path=file_path):
+                return True
+            if CODE_IDENTIFIER_PATTERN.fullmatch(value):
+                return True
+            if CODE_TYPE_ANNOTATION_PATTERN.fullmatch(value):
+                return True
+
+        if assignment.name_was_quoted:
+            if (
+                HUMAN_READABLE_SLUG_PATTERN.fullmatch(lowered_value)
+                and lowered_value.endswith(
+                    ("-admin", "-operator", "-read", "-role", "-scope", "-viewer", "-write")
+                )
+            ):
+                return True
+            words = value.split()
+            if len(words) >= 4 and value.endswith((".", ":")):
+                return True
+
+        return bool(
+            assignment.value_was_quoted
+            and lowered_value.startswith(("example-", "my-", "sample-", "test-"))
+            and HUMAN_READABLE_SLUG_PATTERN.fullmatch(lowered_value)
         )
 
     def _is_heuristic_secret_name(self, normalized_name: str) -> bool:
@@ -830,17 +974,66 @@ class SecretScanner:
         return any(
             pattern.search(value)
             for detector_name, pattern in SECRET_PATTERNS.items()
-            if detector_name
-            in {
-                "aws_access_key",
-                "bearer_token",
-                "credential_in_url",
-                "github_token",
-                "openai_key",
-                "private_key",
-                "slack_token",
-            }
+            if detector_name in HIGH_SIGNAL_SECRET_DETECTORS
         )
+
+    def _is_test_fixture_path(self, file_path: str) -> bool:
+        """
+        Return true only for tests and fixtures, not general documentation.
+
+        Generic credentials in README files remain actionable. Tests and fixtures are different:
+        they intentionally contain scanner examples, so only provider-shaped signatures are
+        trustworthy enough to alert there.
+        """
+
+        path = Path(file_path.lower())
+        return any(part in TEST_FIXTURE_PATH_PARTS for part in path.parts)
+
+    def _looks_synthetic_regex_match(
+        self,
+        detector_name: str,
+        value: str,
+        *,
+        file_path: str,
+    ) -> bool:
+        """Suppress readable test fixtures while retaining provider-shaped credentials."""
+
+        if self._allow_entropy_scan(file_path):
+            return False
+
+        normalized_value = value.strip().strip("'\"")
+        if normalized_value.lower().startswith(HIGH_SIGNAL_PREFIXES):
+            return False
+        if detector_name == "bearer_token":
+            token = re.sub(r"(?i)^bearer\s+", "", normalized_value).lower()
+            return bool(HUMAN_READABLE_SLUG_PATTERN.fullmatch(token))
+        if detector_name == "credential_in_url":
+            try:
+                parsed = urlsplit(normalized_value)
+            except ValueError:
+                return False
+            credential_parts = [part for part in (parsed.username, parsed.password) if part]
+            if not credential_parts or any(
+                part.lower().startswith(HIGH_SIGNAL_PREFIXES) for part in credential_parts
+            ):
+                return False
+            hostname = (parsed.hostname or "").lower()
+            local_fixture_host = (
+                hostname == "localhost"
+                or hostname.endswith((".example", ".internal", ".invalid", ".local", ".test"))
+            )
+            if not local_fixture_host:
+                try:
+                    local_fixture_host = ipaddress.ip_address(hostname).is_private
+                except ValueError:
+                    local_fixture_host = False
+            return local_fixture_host and all(
+                len(part) <= 12
+                or self._looks_placeholder_secret(part)
+                or HUMAN_READABLE_SLUG_PATTERN.fullmatch(part.lower())
+                for part in credential_parts
+            )
+        return False
 
     def _redact_line(self, value: str) -> str:
         """Keep only a tiny preview so alerts do not leak the full secret."""
@@ -920,7 +1113,13 @@ class SecretScanner:
         signal_classes = sum((has_lower, has_upper, has_digit, has_symbol))
         return signal_classes >= 2
 
-    def _is_secret_like_entropy_context(self, line: str, candidate: str) -> bool:
+    def _is_secret_like_entropy_context(
+        self,
+        line: str,
+        candidate: str,
+        *,
+        file_path: str,
+    ) -> bool:
         """Require secret-like context so entropy alone does not overwhelm the dashboard."""
 
         lowered_candidate = candidate.lower()
@@ -930,7 +1129,36 @@ class SecretScanner:
             return False
         if lowered_candidate.startswith(HIGH_SIGNAL_PREFIXES):
             return True
+        if self._looks_source_code_entropy_noise(candidate, file_path=file_path):
+            return False
         return bool(SECRET_CONTEXT_PATTERN.search(line))
+
+    def _looks_source_code_entropy_noise(self, candidate: str, *, file_path: str) -> bool:
+        """
+        Exclude code identifiers, API routes, and asset paths from entropy-only findings.
+
+        Literal credential assignments are handled before entropy scanning. This filter only
+        removes tokens whose shape is ordinary source code but whose surrounding line happens to
+        mention words such as `secret`, `token`, or `bearer`.
+        """
+
+        if Path(file_path).suffix.lower() not in SOURCE_CODE_EXTENSIONS:
+            return False
+        normalized_value = candidate.strip().strip("'\"")
+        lowered_value = normalized_value.lower()
+        if lowered_value.startswith(HIGH_SIGNAL_PREFIXES):
+            return False
+        if normalized_value.startswith("/"):
+            return True
+        if CODE_IDENTIFIER_PATTERN.fullmatch(normalized_value):
+            return True
+        if CODE_MEMBER_REFERENCE_PATTERN.fullmatch(normalized_value):
+            return True
+        if CODE_KEYWORD_ARGUMENT_PATTERN.fullmatch(normalized_value):
+            return True
+        if HUMAN_READABLE_SLUG_PATTERN.fullmatch(lowered_value):
+            return True
+        return "/" in normalized_value
 
     def _looks_plausible_assigned_secret(
         self,
@@ -978,12 +1206,15 @@ class SecretScanner:
         it is not a committed credential literal.
         """
 
-        normalized_value = value.strip().strip("'\"").rstrip(",;")
+        normalized_value = value.strip().strip("'\"").rstrip(",;)]}")
         if CODE_REFERENCE_EXPRESSION_PATTERN.match(normalized_value):
             return True
         if file_path is None or Path(file_path).suffix.lower() not in SOURCE_CODE_EXTENSIONS:
             return False
-        return bool(CODE_MEMBER_REFERENCE_PATTERN.fullmatch(normalized_value))
+        return bool(
+            CODE_IDENTIFIER_PATTERN.fullmatch(normalized_value)
+            or CODE_MEMBER_REFERENCE_PATTERN.fullmatch(normalized_value)
+        )
 
     def _looks_synthetic_low_signal_value(self, value: str, *, file_path: str | None) -> bool:
         """
@@ -999,13 +1230,42 @@ class SecretScanner:
         normalized_value = value.strip().strip("'\"").lower()
         if normalized_value.startswith(HIGH_SIGNAL_PREFIXES):
             return False
+        if self._looks_noncredential_local_url(normalized_value):
+            return True
         return bool(HUMAN_READABLE_SLUG_PATTERN.fullmatch(normalized_value))
+
+    def _looks_noncredential_local_url(self, value: str) -> bool:
+        """Recognize private fixture endpoints without hiding URLs that embed credentials."""
+
+        if not value.startswith(("http://", "https://")):
+            return False
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            return False
+        if parsed.username or parsed.password:
+            return False
+        if parsed.query and SECRET_CONTEXT_PATTERN.search(parsed.query):
+            return False
+        hostname = (parsed.hostname or "").lower()
+        if not hostname:
+            return False
+        if hostname == "localhost" or hostname.endswith(
+            (".example", ".internal", ".invalid", ".local", ".test")
+        ):
+            return True
+        try:
+            return ipaddress.ip_address(hostname).is_private
+        except ValueError:
+            return False
 
     def _looks_placeholder_secret(self, value: str) -> bool:
         """Filter obvious placeholders, examples, and environment references."""
 
         normalized_value = value.strip().strip("'\"").lower()
         if not normalized_value:
+            return True
+        if normalized_value in {"...", "…"}:
             return True
         if normalized_value.startswith("<") and normalized_value.endswith(">"):
             return True
@@ -1014,6 +1274,8 @@ class SecretScanner:
         if any(marker in normalized_value for marker in VARIABLE_REFERENCE_SUBSTRINGS):
             return True
         if any(token in normalized_value for token in PLACEHOLDER_SECRET_TOKENS):
+            return True
+        if re.search(r"(?:^|[^a-z0-9])(?:example|fake|test)[-_]", normalized_value):
             return True
         if "{" in normalized_value and "}" in normalized_value:
             return True

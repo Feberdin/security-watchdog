@@ -69,6 +69,130 @@ def test_skips_code_level_token_references(tmp_path):
     assert findings == []
 
 
+def test_skips_broker_source_metadata_and_runtime_references(tmp_path):
+    """Broker help maps, type hints, role labels, and UI member access are not credentials."""
+
+    samples = {
+        "src/broker/auth.py": (
+            'AUTOMATIC_READ_TOKENS = {\n'
+            '    "BROKER_DOCKER_CONSUMERS_TOKEN": "docker-consumers-read",\n'
+            '    "UNRAID_DEPLOY_BROKER_TOKEN": "deployment-broker-read",\n'
+            "}\n"
+        ),
+        "src/broker/config.py": (
+            '"""Example config:\n'
+            '  ntfy_topic: "my-private-topic"\n'
+            '"""\n'
+            "ntfy_topic: str | None = None\n"
+            'smtp_username: str = ""\n'
+            'smtp_password: str = ""\n'
+            "auth: AuthConfig = Field(default_factory=AuthConfig)\n"
+        ),
+        "src/broker/service.py": (
+            "def configure(bitwarden_server_url: str | None = None):\n"
+            "    reasons = {\n"
+            '        "BITWARDEN_CLIENT_SECRET": '
+            '"Vaultwarden client secret requested through the secure Broker flow.",\n'
+            "    }\n"
+        ),
+        "src/broker/client.py": "connect(client_secret=client_secret)\n",
+        "src/broker/static/admin.html": (
+            "const payload = {\n"
+            "  database_url_secret_name: item.name,\n"
+            "  approval_token: approval.approval_token,\n"
+            "};\n"
+        ),
+    }
+    for relative_path, content in samples.items():
+        sample = tmp_path / relative_path
+        sample.parent.mkdir(parents=True, exist_ok=True)
+        sample.write_text(content, encoding="utf-8")
+
+    findings = SecretScanner().scan_directory(tmp_path)
+
+    assert findings == []
+
+
+def test_skips_source_routes_identifiers_and_asset_paths_in_entropy_scan(tmp_path):
+    """Secret-related route names and code identifiers must not become entropy-only alerts."""
+
+    samples = {
+        "src/broker/api.py": (
+            '@app.post("/admin/api/security-gate/override", '
+            "dependencies=[Depends(auth.require_bearer)])\n"
+            'description = "Broker-Einmalplan-mit-Sicherheits-Pruefung"\n'
+        ),
+        "src/broker/backup.py": (
+            'warnings.append("BROKER_ASSET_DIR/default-background.png")\n'
+        ),
+        "src/broker/generator.py": (
+            'return Decision(True, "generated_secret_value_format", 32)\n'
+        ),
+        "src/broker/static/admin.html": (
+            "await copySecretFromExistingRequest(item, selector.value);\n"
+            "const count = duplicateSummary.same_value_group_count;\n"
+        ),
+    }
+    for relative_path, content in samples.items():
+        sample = tmp_path / relative_path
+        sample.parent.mkdir(parents=True, exist_ok=True)
+        sample.write_text(content, encoding="utf-8")
+
+    findings = SecretScanner().scan_directory(tmp_path)
+
+    assert findings == []
+
+
+def test_skips_explicit_test_tokens_and_local_fixture_urls(tmp_path):
+    """Reserved test endpoints and readable fixture credentials do not block deployments."""
+
+    tests_path = tmp_path / "tests"
+    tests_path.mkdir()
+    (tests_path / "test_auth.py").write_text(
+        'context = auth.authenticate("Bearer consumer-access-token")\n'
+        'url = "https://user:pass@broker.test/path"\n'
+        'bitwarden_server_url = "http://vaultwarden.internal:8080"\n',
+        encoding="utf-8",
+    )
+    workflow = tmp_path / ".github" / "workflows" / "ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("BROKER_MCP_TOKEN: test-token\n", encoding="utf-8")
+
+    findings = SecretScanner().scan_directory(tmp_path)
+
+    assert findings == []
+
+
+def test_detects_random_literal_in_source_secret_mapping(tmp_path):
+    """Source-code metadata filtering must not hide credential-shaped mapping values."""
+
+    sample = tmp_path / "src" / "broker" / "config.py"
+    sample.parent.mkdir(parents=True)
+    value = "".join(("Live", "Signal_", "1234", "Abcd", "5678", "Value"))
+    sample.write_text(
+        "CONFIG = {\n"
+        f'    "BROKER_MCP_TOKEN": "{value}",\n'
+        "}\n",
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert any(finding.detector == "broker_secret_assignment" for finding in findings)
+
+
+def test_detects_generic_secret_literal_in_documentation(tmp_path):
+    """README files are not fixtures; realistic literal credentials must remain actionable."""
+
+    sample = tmp_path / "README.md"
+    value = "".join(("Live", "Signal_", "1234", "Abcd", "5678", "Value"))
+    sample.write_text(f'API_KEY="{value}"\n', encoding="utf-8")
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert any(finding.detector == "generic_token_assignment" for finding in findings)
+
+
 def test_skips_business_key_values_and_code_expressions(tmp_path):
     """Business grouping keys and runtime expressions are not credential literals."""
 
@@ -139,7 +263,9 @@ def test_skips_angle_bracket_documentation_placeholders(tmp_path):
 
     sample = tmp_path / "README.md"
     sample.write_text(
-        "Paperless Token: <PAPERLESS_TOKEN>\nAI API Key: <OPENAI_API_KEY>\n",
+        "Paperless Token: <PAPERLESS_TOKEN>\n"
+        "AI API Key: <OPENAI_API_KEY>\n"
+        'BROKER_MCP_TOKEN="..."\n',
         encoding="utf-8",
     )
 

@@ -337,3 +337,27 @@ def test_skips_entropy_only_findings_in_git_history(monkeypatch, tmp_path):
     findings = scanner.scan_git_history(repo)
 
     assert findings == []
+
+
+def test_skips_git_history_findings_in_low_signal_paths(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+
+    scanner = SecretScanner()
+    monkeypatch.setattr(
+        scanner,
+        "_iter_git_history_lines",
+        lambda root_path: iter(
+            [
+                "__COMMIT__abc123def456\n",
+                "diff --git a/tests/test_secret_scanner.py b/tests/test_secret_scanner.py\n",
+                "+++ b/tests/test_secret_scanner.py\n",
+                "@@ -0,0 +1 @@\n",
+                '+BROKER_MCP_TOKEN="MYTOKENVALUE123"\n',
+            ]
+        ),
+    )
+
+    findings = scanner.scan_git_history(repo)
+
+    assert findings == []

@@ -414,6 +414,9 @@ class SecretScanner:
     ) -> list[SecretFinding]:
         """Run regex and entropy detectors against one logical source line."""
 
+        if content_source == "git_history" and not self._should_scan_git_history_path(file_path):
+            return []
+
         findings: list[SecretFinding] = []
         assignment = self._parse_assignment(line)
         assignment_finding = self._scan_assignment_for_secret(
@@ -798,6 +801,18 @@ class SecretScanner:
         strings. Regex-based detectors still run there, but raw entropy scanning creates too many
         false positives for operators to trust.
         """
+
+        path = Path(relative_path.lower())
+        if path.name in LOCKFILE_NAMES:
+            return False
+        if path.suffix in {".md", ".rst"} or any(
+            marker in path.name for marker in (".example", ".sample", ".template")
+        ):
+            return False
+        return not any(part in LOW_SIGNAL_PATH_PARTS for part in path.parts)
+
+    def _should_scan_git_history_path(self, relative_path: str) -> bool:
+        """Ignore noisy low-signal paths when scanning historical commits."""
 
         path = Path(relative_path.lower())
         if path.name in LOCKFILE_NAMES:

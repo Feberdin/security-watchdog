@@ -4,9 +4,9 @@
 # you explicitly want Unraid container discovery inside this stack.
 # Debugging: If scans fail inside Docker, check service health and volume mounts defined here.
 
-# Why this exists: production Compose pulls the default published image, while review or rollback
-# deployments can override SECURITY_WATCHDOG_IMAGE with a pinned tag or digest.
-x-watchdog-image: &watchdog-image ${SECURITY_WATCHDOG_IMAGE:-ghcr.io/feberdin/security-watchdog:latest}
+# Why this exists: production Compose defaults to the reviewed immutable image manifest, while
+# review or rollback deployments can override SECURITY_WATCHDOG_IMAGE with another pinned digest.
+x-watchdog-image: &watchdog-image ${SECURITY_WATCHDOG_IMAGE:-ghcr.io/feberdin/security-watchdog@sha256:52f1971e4ea5748557d16be6186683e21c2fc6839fe4d29738450900be84ba37}
 x-watchdog-logging: &watchdog-logging
   driver: json-file
   options:

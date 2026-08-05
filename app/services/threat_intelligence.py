@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import feedparser
 import httpx
-from dateutil import parser as date_parser
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -158,8 +158,21 @@ class ThreatIntelligenceService:
 
         if not value:
             return None
+
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+
         try:
-            parsed = date_parser.parse(value)
+            parsed = datetime.fromisoformat(text)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        except (ValueError, TypeError):
+            pass
+
+        try:
+            parsed = parsedate_to_datetime(text)
             return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
         except (ValueError, TypeError):
             return None

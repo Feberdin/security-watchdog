@@ -322,6 +322,7 @@ class ManualScanJob(Base):
     priority: Mapped[int] = mapped_column(Integer, default=0, index=True)
     purpose: Mapped[str] = mapped_column(String(50), default="manual", index=True)
     target_commit_sha: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    scanned_commit_sha: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     refresh_image_cache: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(
         String(20),

@@ -106,7 +106,8 @@ critical secret findings and must be moved into Broker-managed secrets.
 
 - `POST /scan`: Queue an immediate scan and return `202 Accepted` plus a status URL. Optional JSON fields: `repository_full_name` for one asset, `scan_sources` with `github`, `unraid`, and/or `homeassistant`, `force`, `include_archived`, `priority`, `pause_active`, `purpose`, `target_commit_sha`, and `refresh_image_cache`.
 - `GET /scan-jobs/latest`: Latest manual scan including lifecycle state, percentage, phase, and recent progress events.
-- `GET /scan-jobs/{job_id}`: One manual scan job with timestamps, counts, error details, and a bounded operator log.
+- `GET /scan-jobs/{job_id}`: One manual scan job with timestamps, counts, error details, the
+  measured `scanned_commit_sha` for commit-bound scans, and a bounded operator log.
 - `POST /scan-jobs/{job_id}/cancel`: Request cooperative cancellation for a queued or running scan. Running scans stop at the next safe checkpoint; already committed asset results stay stored.
 - `POST /scan-jobs/{job_id}/pause`: Request cooperative pause for a queued or running scan. Running scans pause at the next safe checkpoint; already committed asset results stay stored.
 - `POST /scan-jobs/{job_id}/resume`: Return a paused scan to the prioritized queue.

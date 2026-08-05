@@ -477,6 +477,19 @@ class ScanResponse(BaseModel):
     repository_count: int
     alert_count: int
     failed_system_count: int = 0
+    scanned_commit_sha: str | None = Field(default=None, min_length=40, max_length=40)
+
+    @field_validator("scanned_commit_sha")
+    @classmethod
+    def normalize_scanned_commit_sha(cls, value: str | None) -> str | None:
+        """Expose only full, normalized SHAs that were measured from a repository checkout."""
+
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if len(normalized) != 40 or any(character not in "0123456789abcdef" for character in normalized):
+            raise ValueError("scanned_commit_sha must be a full 40-character hexadecimal commit SHA")
+        return normalized
 
 
 class ScanAcceptedResponse(BaseModel):
@@ -531,6 +544,7 @@ class ManualScanJobOut(BaseModel):
     priority: int = 0
     purpose: ScanPurpose = "manual"
     target_commit_sha: str | None = None
+    scanned_commit_sha: str | None = None
     refresh_image_cache: bool = False
     requested_at: datetime
     started_at: datetime | None = None

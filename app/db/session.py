@@ -114,6 +114,13 @@ def _ensure_runtime_schema() -> None:
                 generic="ALTER TABLE manual_scan_jobs ADD COLUMN target_commit_sha VARCHAR(40)",
                 dialect_name=dialect_name,
             )
+        if "scanned_commit_sha" not in job_columns:
+            _execute_schema_ddl(
+                postgresql="ALTER TABLE manual_scan_jobs ADD COLUMN scanned_commit_sha VARCHAR(40)",
+                sqlite="ALTER TABLE manual_scan_jobs ADD COLUMN scanned_commit_sha VARCHAR(40)",
+                generic="ALTER TABLE manual_scan_jobs ADD COLUMN scanned_commit_sha VARCHAR(40)",
+                dialect_name=dialect_name,
+            )
         if "refresh_image_cache" not in job_columns:
             _execute_schema_ddl(
                 postgresql="ALTER TABLE manual_scan_jobs ADD COLUMN refresh_image_cache BOOLEAN NOT NULL DEFAULT FALSE",

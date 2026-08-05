@@ -355,6 +355,14 @@ def process_manual_scan_job(job_id: int | None = None) -> ManualScanJobOut | Non
             ),
             cancellation_check=lambda: _raise_if_manual_scan_stopped(claimed_job_id),
         )
+        if (
+            request.target_commit_sha is not None
+            and response.scanned_commit_sha != request.target_commit_sha
+        ):
+            raise RuntimeError(
+                "Commit-bound scan finished without exact checkout evidence. "
+                f"expected={request.target_commit_sha} actual={response.scanned_commit_sha or 'missing'}"
+            )
     except ScanCanceledError:
         work_session.rollback()
         LOGGER.info("Manual scan job was canceled by operator", extra={"job_id": claimed_job_id})
@@ -495,6 +503,7 @@ def serialize_manual_scan_job(
         priority=job.priority,
         purpose=job.purpose,
         target_commit_sha=job.target_commit_sha,
+        scanned_commit_sha=job.scanned_commit_sha,
         refresh_image_cache=job.refresh_image_cache,
         requested_at=job.requested_at,
         started_at=job.started_at,

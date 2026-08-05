@@ -102,6 +102,7 @@ class ScanOrchestrator:
                     session,
                     repository_full_name=request.repository_full_name,
                     include_archived=request.include_archived,
+                    target_commit_sha=request.target_commit_sha,
                 ),
             )
             repositories = [

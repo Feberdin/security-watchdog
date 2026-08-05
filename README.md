@@ -61,7 +61,7 @@ python3.12 -m venv .venv
 
 Key environment variables:
 
-- `SECURITY_WATCHDOG_IMAGE`: Image tag for Compose deployments. Production defaults to `ghcr.io/feberdin/security-watchdog:latest`; review, rollback, or reproducible deployments can override this with a pinned branch tag, release tag, or digest.
+- `SECURITY_WATCHDOG_IMAGE`: Immutable image reference for Compose deployments. Production defaults to the reviewed manifest digest in `docker-compose.yml`; review and rollback deployments can override it with another pinned digest.
 - `SECURITY_WATCHDOG_DATA_PATH`: Host path for `/app/data`. Local default is `./data`; Broker/Unraid default is `/mnt/user/appdata/security-watchdog`.
 - `LOG_MAX_SIZE`, `LOG_MAX_FILE`: Docker JSON log rotation limits used by the Compose stack.
 - `PUID`, `PGID`: Optional container runtime user/group mapping. On Unraid, `99`/`100` usually matches `nobody:users`.

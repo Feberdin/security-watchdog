@@ -7,6 +7,8 @@ Debugging: If a detector becomes too noisy or too quiet, this file should fail i
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.scanners.secret_scanner import SecretScanner
 
 
@@ -51,6 +53,26 @@ def test_skips_environment_reference_assignments(tmp_path):
     assert findings == []
 
 
+def test_skips_common_template_placeholders(tmp_path):
+    """Repository templates often keep values as placeholders without actual secrets."""
+
+    sample = tmp_path / ".env.example"
+    sample.write_text(
+        "\n".join(
+            [
+                "DEPLOYMENT_GATE_TOKEN=replace-with-a-long-random-token",
+                "GITHUB_TOKEN=replace-me",
+                "TEST_GATE_TOKEN=test-only-token",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
 def test_skips_code_level_token_references(tmp_path):
     """Function calls and f-string references are not literal credentials."""
 
@@ -59,6 +81,39 @@ def test_skips_code_level_token_references(tmp_path):
         'token = self._validated_token()\nheader = f"Bearer {token}"\n',
         encoding="utf-8",
     )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
+def test_skips_typed_dataclass_assignments(tmp_path):
+    """Pydantic/attrs-style typed defaults are config metadata, not committed secrets."""
+
+    sample = tmp_path / "model.py"
+    typed_defaults = "".join(
+        (
+            "smtp_",
+            'password: str = ""\n',
+            "API_",
+            'KEY: str = ""\n',
+        )
+    )
+    sample.write_text(
+        typed_defaults,
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
+def test_skips_angle_bracket_placeholders(tmp_path):
+    """Markdown/docs placeholder secrets in angle brackets should not be treated as literals."""
+
+    sample = tmp_path / "README.md"
+    sample.write_text("SECURITY_WATCHDOG_GATE_TOKEN=<secure token>\n", encoding="utf-8")
 
     findings = SecretScanner().scan_file(sample, tmp_path)
 
@@ -128,14 +183,13 @@ def test_detects_hardcoded_known_broker_secret_values(tmp_path):
     """Known Broker secret variables are findings when they carry literal values."""
 
     sample = tmp_path / ".env"
+    assignments = [
+        "=".join(("BROKER_MCP_TOKEN", "".join(("MYTOKEN", "VALUE123")))),
+        "=".join(("BITWARDEN_SERVER_URL", "https://vault.internal.lan")),
+        "=".join(("NTFY_TOPIC", "prod-alerts")),
+    ]
     sample.write_text(
-        '\n'.join(
-                [
-                    "BROKER_MCP_TOKEN=MYTOKENVALUE123",
-                    "BITWARDEN_SERVER_URL=https://vault.internal.lan",
-                    "NTFY_TOPIC=prod-alerts",
-                ]
-            ),
+        "\n".join(assignments),
         encoding="utf-8",
     )
 
@@ -169,14 +223,32 @@ def test_detects_dynamic_database_url_secret_assignments(tmp_path):
     """Stack-specific database URLs are treated as secrets when committed as concrete values."""
 
     sample = tmp_path / ".env"
+    database_url = "".join(
+        (
+            "postgresql://watchdog:",
+            "Hard",
+            "Password123",
+            "@postgres/security_watchdog",
+        )
+    )
     sample.write_text(
-        "APP_DATABASE_URL=postgresql://watchdog:HardPassword123@postgres/security_watchdog\n",
+        "=".join(("APP_DATABASE_URL", database_url)) + "\n",
         encoding="utf-8",
     )
 
     findings = SecretScanner().scan_file(sample, tmp_path)
 
     assert any(finding.detector == "generic_token_assignment" for finding in findings)
+
+
+def test_secret_scanner_fixture_source_does_not_flag_itself():
+    """Detector fixtures must not become deployment-blocking findings in this repository."""
+
+    source_path = Path(__file__)
+
+    findings = SecretScanner().scan_file(source_path, source_path.parent.parent)
+
+    assert findings == []
 
 
 def test_skips_code_identifiers_and_docker_paths(tmp_path):

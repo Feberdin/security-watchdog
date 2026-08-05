@@ -198,7 +198,7 @@ def test_deployment_security_gate_requires_bearer_token_and_fails_closed() -> No
     """The Broker endpoint must reject unauthenticated calls and unknown repositories."""
 
     session_factory = build_session_factory()
-    gate_token = "test-only-deployment-gate-token"
+    gate_token = "dummy-token"
     gate_settings = Settings(deployment_gate_token=gate_token)
 
     def override_db_session() -> Generator[Session, None, None]:

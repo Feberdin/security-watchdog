@@ -25,7 +25,7 @@ from app.api.routes import router as api_router
 from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.session import get_db_session
-from app.models.entities import Dependency, ManualScanJob, Repository
+from app.models.entities import Alert, Dependency, ManualScanJob, Repository
 from app.services.reporting import ReportingService
 
 
@@ -194,6 +194,70 @@ def test_latest_scan_and_repository_metadata_are_repository_scoped() -> None:
     assert repository_payload[0]["latest_scanned_commit_sha"] == "a" * 40
     assert repository_payload[0]["latest_scan_status"] == "succeeded"
     assert repository_payload[0]["latest_scan_completed_at"] is not None
+
+
+def test_alerts_return_recently_observed_findings_before_newer_stale_rows() -> None:
+    """A refreshed finding must remain visible to bounded Broker alert lookups."""
+
+    session_factory = build_session_factory()
+    now = datetime.now(UTC)
+    with session_factory() as session:
+        repository = Repository(
+            source_type="github",
+            owner="Feberdin",
+            name="AutoBroker",
+            full_name="Feberdin/AutoBroker",
+            local_path="/tmp/autobroker",
+        )
+        session.add(repository)
+        session.flush()
+        session.add_all(
+            [
+                Alert(
+                    repository_id=repository.id,
+                    title="Current scan finding",
+                    description="Observed again by the current deployment scan.",
+                    severity="high",
+                    risk_score=80.0,
+                    fingerprint="a" * 64,
+                    source_type="container",
+                    created_at=now - timedelta(days=30),
+                    updated_at=now,
+                ),
+                Alert(
+                    repository_id=repository.id,
+                    title="Older observation",
+                    description="Created later but not observed by the current scan.",
+                    severity="high",
+                    risk_score=80.0,
+                    fingerprint="b" * 64,
+                    source_type="container",
+                    created_at=now - timedelta(days=1),
+                    updated_at=now - timedelta(days=1),
+                ),
+            ]
+        )
+        session.commit()
+
+    def override_db_session() -> Generator[Session, None, None]:
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app = FastAPI()
+    app.include_router(api_router)
+    app.dependency_overrides[get_db_session] = override_db_session
+
+    response = TestClient(app).get("/alerts")
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert [item["title"] for item in payload] == [
+        "Current scan finding",
+        "Older observation",
+    ]
 
 
 def test_daily_security_check_endpoint_returns_codex_runbook() -> None:

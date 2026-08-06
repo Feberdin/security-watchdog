@@ -296,9 +296,13 @@ def get_sarif_report(
 
 @router.get("/alerts", response_model=list[AlertOut])
 def get_alerts(session: Session = Depends(get_db_session)) -> list[AlertOut]:
-    """Return the newest alerts first."""
+    """Return the most recently observed or changed alerts first."""
 
-    alerts = session.scalars(select(Alert).order_by(desc(Alert.created_at)).limit(100)).all()
+    alerts = session.scalars(
+        select(Alert)
+        .order_by(desc(Alert.updated_at), desc(Alert.created_at), desc(Alert.id))
+        .limit(100)
+    ).all()
     return [AlertOut.model_validate(alert) for alert in alerts]
 
 

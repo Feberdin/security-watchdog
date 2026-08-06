@@ -113,6 +113,12 @@ Decision handling:
 - Startup creates the idempotent partial index `ix_alerts_deployment_gate` for exact-commit,
   unresolved HIGH/CRITICAL lookups. This keeps the fail-closed gate inside its bounded Broker
   timeout even when the audit database contains a large historical alert set.
+- The bounded `/alerts` feed sorts by `updated_at` before `created_at`. Findings observed again by
+  the current scan therefore remain available to Broker diagnostics even when their row originated
+  in an older scan.
+- Secret scanning treats modern JavaScript module extensions as source code and Playwright
+  configuration files as fixtures. Provider-shaped credentials remain high-signal findings in
+  those files.
 - Treat `deny` and `indeterminate` as hard blocks.
 - Treat timeout, DNS/connect failure, TLS failure, `401`, `503`, non-JSON, schema errors, and unknown
   API versions as hard blocks.

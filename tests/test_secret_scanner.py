@@ -113,6 +113,64 @@ def test_skips_broker_source_metadata_and_runtime_references(tmp_path):
     assert findings == []
 
 
+def test_skips_readable_source_prefix_metadata_but_detects_random_secret(tmp_path):
+    """Protocol labels are metadata; a random session secret in the same source remains blocked."""
+
+    sample = tmp_path / "src" / "auth.py"
+    sample.parent.mkdir(parents=True)
+    random_secret = "".join(("Q7mP2xR9", "L4vN8cT1", "K6wD3sF5", "H2jB9zU4"))
+    sample.write_text(
+        'SEALED_SECRET_PREFIX = "sealed-v1"\n'
+        f'SESSION_SECRET = "{random_secret}"\n',
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert not any(finding.line_number == 1 for finding in findings)
+    assert any(
+        finding.line_number == 2 and finding.detector == "generic_token_assignment"
+        for finding in findings
+    )
+
+
+def test_playwright_config_suppresses_synthetic_credentials_not_provider_tokens(tmp_path):
+    """Root Playwright configs are fixtures, but provider-shaped tokens remain high signal."""
+
+    sample = tmp_path / "playwright.auth.config.ts"
+    provider_token = "".join(("ghp_", "AbCdEf123456", "GhIjKl789012"))
+    sample.write_text(
+        'const INITIAL_ADMIN_PASSWORD = "test-admin-password";\n'
+        'const SESSION_SECRET = "test-session-secret";\n'
+        f'const AUTH_TOKEN = "{provider_token}";\n',
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert not any(finding.line_number in {1, 2} for finding in findings)
+    assert any(
+        finding.line_number == 3 and finding.detector == "github_token"
+        for finding in findings
+    )
+
+
+def test_mjs_local_auth_paths_are_source_code_not_entropy_findings(tmp_path):
+    """Local storage-state paths in Node scripts must not look like credentials."""
+
+    sample = tmp_path / "scripts" / "capture-production-auth-state.mjs"
+    sample.parent.mkdir(parents=True)
+    sample.write_text(
+        'const storageStatePath = ".auth/autobroker-production.json";\n'
+        'const proofPath = ".auth/autobroker-production-proof.json";\n',
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
 def test_skips_annotation_only_secret_named_dataclass_fields(tmp_path):
     """Type declarations without assigned values must not become credential findings."""
 

@@ -201,6 +201,8 @@ SOURCE_CODE_EXTENSIONS = {
     ".cc",
     ".cpp",
     ".cs",
+    ".cjs",
+    ".cts",
     ".go",
     ".java",
     ".js",
@@ -209,6 +211,8 @@ SOURCE_CODE_EXTENSIONS = {
     ".html",
     ".kt",
     ".kts",
+    ".mjs",
+    ".mts",
     ".php",
     ".py",
     ".rb",
@@ -830,6 +834,15 @@ class SecretScanner:
         if self._contains_high_signal_literal_secret(value):
             return False
 
+        normalized_name = self._normalize_variable_name(assignment.name)
+        if (
+            normalized_name.endswith("_PREFIX")
+            and value == lowered_value
+            and len(value) <= 32
+            and re.fullmatch(r"[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)+", value)
+        ):
+            return True
+
         if not assignment.value_was_quoted:
             if self._looks_code_reference_expression(value, file_path=file_path):
                 return True
@@ -987,7 +1000,10 @@ class SecretScanner:
         """
 
         path = Path(file_path.lower())
-        return any(part in TEST_FIXTURE_PATH_PARTS for part in path.parts)
+        is_playwright_config = path.name.startswith("playwright.") and ".config." in path.name
+        return is_playwright_config or any(
+            part in TEST_FIXTURE_PATH_PARTS for part in path.parts
+        )
 
     def _looks_synthetic_regex_match(
         self,

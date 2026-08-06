@@ -113,6 +113,25 @@ def test_skips_broker_source_metadata_and_runtime_references(tmp_path):
     assert findings == []
 
 
+def test_skips_annotation_only_secret_named_dataclass_fields(tmp_path):
+    """Type declarations without assigned values must not become credential findings."""
+
+    sample = tmp_path / "app" / "tax_export.py"
+    sample.parent.mkdir(parents=True)
+    sample.write_text(
+        "from dataclasses import dataclass\n\n"
+        "@dataclass\n"
+        "class TaxExportConfig:\n"
+        "    smtp_username: str | None\n"
+        "    smtp_password: str | None\n",
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
 def test_skips_source_routes_identifiers_and_asset_paths_in_entropy_scan(tmp_path):
     """Secret-related route names and code identifiers must not become entropy-only alerts."""
 

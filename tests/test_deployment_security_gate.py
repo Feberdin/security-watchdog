@@ -2,7 +2,7 @@
 Purpose: Verify exact-commit deployment decisions and secret-safe blocker responses.
 Input/Output: Builds in-memory repositories, aggregate scans, and alerts for the gate service.
 Important invariants: Missing/stale/mismatched evidence fails closed; unresolved HIGH/CRITICAL
-findings deny deployment; secret excerpts never leave the service.
+findings confirmed for the requested commit deny deployment; secret excerpts never leave the service.
 Debugging: Inspect reason codes first, then the aggregate `repository_asset_scan` fixture.
 """
 
@@ -123,6 +123,7 @@ def test_unresolved_critical_secret_denies_without_returning_excerpt() -> None:
                 "line_number": 12,
                 "excerpt": "must-not-leave-the-service",
                 "detector": "generic-api-key",
+                "scanned_commit_sha": COMMIT_SHA,
             },
         )
     )
@@ -138,6 +139,82 @@ def test_unresolved_critical_secret_denies_without_returning_excerpt() -> None:
     assert response.blockers[0].context["file_path"] == "src/settings.py"
     assert "must-not-leave-the-service" not in serialized_response
     assert "sensitive matched content" not in serialized_response
+
+
+def test_alerts_from_prior_commits_do_not_block_fresh_exact_scan() -> None:
+    """A stale open alert must not be attributed to a different deployment candidate."""
+
+    session = build_test_session()
+    repository = add_repository_with_scan(session)
+    session.add(
+        Alert(
+            repository_id=repository.id,
+            title="Historical scanner finding",
+            description="finding from a prior checkout",
+            severity="critical",
+            risk_score=95.0,
+            fingerprint="b" * 64,
+            status="open",
+            source_type="secret_scanner",
+            metadata_json={
+                "file_path": "src/removed.py",
+                "scanned_commit_sha": "b2" * 20,
+            },
+        )
+    )
+    session.commit()
+
+    response = DeploymentSecurityGateService(build_settings()).evaluate(session, gate_request())
+
+    assert response.decision == "allow"
+    assert response.deploy_allowed is True
+    assert response.summary.critical_count == 0
+    assert response.summary.high_count == 0
+    assert response.blockers == []
+
+
+def test_gate_returns_only_blockers_confirmed_for_requested_commit() -> None:
+    """Counts and blocker details must use the same exact-commit provenance filter."""
+
+    session = build_test_session()
+    repository = add_repository_with_scan(session)
+    prior_alert = Alert(
+        repository_id=repository.id,
+        title="Historical critical finding",
+        description="finding from a prior checkout",
+        severity="critical",
+        risk_score=99.0,
+        fingerprint="c" * 64,
+        status="open",
+        source_type="secret_scanner",
+        metadata_json={"scanned_commit_sha": "c3" * 20},
+    )
+    current_alert = Alert(
+        repository_id=repository.id,
+        title="Current high finding",
+        description="finding confirmed by the requested scan",
+        severity="high",
+        risk_score=80.0,
+        fingerprint="d" * 64,
+        status="acknowledged",
+        source_type="container_scanner",
+        metadata_json={
+            "target": "example:current",
+            "scanned_commit_sha": COMMIT_SHA,
+        },
+    )
+    session.add_all([prior_alert, current_alert])
+    session.commit()
+
+    response = DeploymentSecurityGateService(build_settings()).evaluate(session, gate_request())
+
+    assert response.decision == "deny"
+    assert response.summary.blocker_count == 1
+    assert response.summary.critical_count == 0
+    assert response.summary.high_count == 1
+    assert [blocker.finding_id for blocker in response.blockers] == [
+        f"alert:{current_alert.id}"
+    ]
 
 
 def test_stale_mismatched_scan_is_indeterminate_even_without_alerts() -> None:

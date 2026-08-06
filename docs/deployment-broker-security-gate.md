@@ -106,6 +106,10 @@ Decision handling:
 
 - Continue only when HTTP is `200`, `api_version` is supported, `decision` is `allow`,
   `deploy_allowed` is `true`, and every echoed candidate field exactly matches the deployment plan.
+- Count only unresolved HIGH/CRITICAL alerts whose `scanned_commit_sha` provenance matches the
+  requested commit. Findings from older checkouts do not block a different candidate. A finding
+  still present in the working tree or reachable Git history is confirmed and rebound by the fresh
+  exact-commit scan, so it remains blocking.
 - Treat `deny` and `indeterminate` as hard blocks.
 - Treat timeout, DNS/connect failure, TLS failure, `401`, `503`, non-JSON, schema errors, and unknown
   API versions as hard blocks.

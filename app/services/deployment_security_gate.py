@@ -3,7 +3,8 @@ Purpose: Decide whether one exact Git deployment candidate has sufficient securi
 Input/Output: Reads persisted aggregate scans and unresolved alerts, then returns a fail-closed API
 decision with actionable blockers for the Deployment Broker.
 Important invariants: Only a fresh successful scan of the exact 40-character commit can allow a
-deployment; HIGH/CRITICAL alerts remain blocking until resolved; secret excerpts are never returned.
+deployment; HIGH/CRITICAL alerts confirmed by that scan remain blocking; secret excerpts are never
+returned.
 Debugging: Use the response request ID, reason codes, and `scan_results` row ID to inspect a denial.
 """
 
@@ -125,7 +126,11 @@ class DeploymentSecurityGateService:
                 checked_at=checked_at,
             )
             evidence_blockers.extend(scan_blockers)
-            security_counts = self._count_security_blockers(session, repository.id)
+            security_counts = self._count_security_blockers(
+                session,
+                repository.id,
+                requested_commit_sha=request.commit_sha,
+            )
             remaining_slots = max(
                 self.settings.deployment_gate_max_blockers - len(evidence_blockers),
                 0,
@@ -133,6 +138,7 @@ class DeploymentSecurityGateService:
             security_blockers = self._load_security_blockers(
                 session,
                 repository.id,
+                requested_commit_sha=request.commit_sha,
                 limit=remaining_slots,
             )
 
@@ -280,8 +286,14 @@ class DeploymentSecurityGateService:
 
         return evidence, blockers
 
-    def _count_security_blockers(self, session: Session, repository_id: int) -> dict[str, int]:
-        """Count every unresolved HIGH/CRITICAL alert without loading large result sets."""
+    def _count_security_blockers(
+        self,
+        session: Session,
+        repository_id: int,
+        *,
+        requested_commit_sha: str,
+    ) -> dict[str, int]:
+        """Count unresolved blockers that the exact-commit scan confirmed."""
 
         rows = session.execute(
             select(func.lower(Alert.severity), func.count(Alert.id))
@@ -289,6 +301,7 @@ class DeploymentSecurityGateService:
                 Alert.repository_id == repository_id,
                 Alert.status.in_(UNRESOLVED_STATUSES),
                 func.lower(Alert.severity).in_(BLOCKED_SEVERITIES),
+                Alert.metadata_json["scanned_commit_sha"].as_string() == requested_commit_sha,
             )
             .group_by(func.lower(Alert.severity))
         ).all()
@@ -303,9 +316,10 @@ class DeploymentSecurityGateService:
         session: Session,
         repository_id: int,
         *,
+        requested_commit_sha: str,
         limit: int,
     ) -> list[DeploymentSecurityGateBlockerOut]:
-        """Load a bounded, secret-safe list of actionable security findings."""
+        """Load exact-commit blockers without leaking findings from prior scans."""
 
         if limit <= 0:
             return []
@@ -315,6 +329,7 @@ class DeploymentSecurityGateService:
                 Alert.repository_id == repository_id,
                 Alert.status.in_(UNRESOLVED_STATUSES),
                 func.lower(Alert.severity).in_(BLOCKED_SEVERITIES),
+                Alert.metadata_json["scanned_commit_sha"].as_string() == requested_commit_sha,
             )
             .order_by(
                 desc(func.lower(Alert.severity) == "critical"),

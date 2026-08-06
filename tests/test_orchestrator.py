@@ -18,8 +18,20 @@ from sqlalchemy.orm import Session
 
 import app.models.entities  # noqa: F401
 from app.db.base import Base
-from app.models.entities import ContainerImageScanCache, ManualScanJob, ManualScanJobStatus, Repository, ScanResult
-from app.models.schemas import ContainerFinding, ScanProgressUpdate, ScanRequest
+from app.models.entities import (
+    Alert,
+    ContainerImageScanCache,
+    ManualScanJob,
+    ManualScanJobStatus,
+    Repository,
+    ScanResult,
+)
+from app.models.schemas import (
+    ContainerFinding,
+    ScanProgressUpdate,
+    ScanRequest,
+    SecretFinding,
+)
 from app.services.orchestrator import ScanOrchestrator
 
 
@@ -100,6 +112,54 @@ def test_manual_scan_continues_when_one_repository_asset_fails() -> None:
     assert progress_updates[-1].percent == 98
     assert any(update.level == "warning" for update in progress_updates)
     assert all(current.percent <= following.percent for current, following in pairwise(progress_updates))
+
+
+def test_repository_scan_attaches_exact_commit_and_job_to_active_alerts(tmp_path) -> None:
+    """Alerts confirmed by a commit-bound run must carry auditable scan provenance."""
+
+    session = build_test_session()
+    repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="SecondBrain",
+        full_name="Feberdin/SecondBrain",
+        local_path=str(tmp_path),
+    )
+    session.add(repository)
+    session.commit()
+
+    orchestrator = ScanOrchestrator()
+    orchestrator.repository_scanner.get_checkout_commit_sha = lambda *_args: "a" * 40
+    orchestrator.dependency_extractor.extract_from_repository = lambda *_args: []
+    orchestrator.secret_scanner.scan_directory = lambda *_args, **_kwargs: [
+        SecretFinding(
+            file_path="synthetic.py",
+            line_number=4,
+            detector="broker_secret_assignment",
+            excerpt="[REDACTED]",
+        )
+    ]
+    orchestrator.sbom_service.generate = lambda *_args, **_kwargs: None
+
+    alerts_created, failed, scanned_commit_sha = orchestrator._run_guarded_asset_scan(
+        session,
+        repository=repository,
+        scanner_name="repository_asset_scan",
+        details={"full_name": repository.full_name},
+        scan_callable=lambda: orchestrator._scan_repository_asset(session, repository),
+        expected_commit_sha="a" * 40,
+        scan_job_id=195,
+    )
+
+    alert = session.scalar(select(Alert).where(Alert.repository_id == repository.id))
+    session.refresh(repository)
+    assert alerts_created == 1
+    assert failed == 0
+    assert scanned_commit_sha == "a" * 40
+    assert alert is not None
+    assert alert.metadata_json["scanned_commit_sha"] == "a" * 40
+    assert alert.metadata_json["scan_job_id"] == 195
+    assert repository.metadata_json["checked_out_commit_sha"] == "a" * 40
 
 
 def test_manual_scan_targets_specific_commit_during_inventory_sync() -> None:

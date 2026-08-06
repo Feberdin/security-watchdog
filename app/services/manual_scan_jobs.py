@@ -207,10 +207,16 @@ def get_manual_scan_job_out(session: Session, job_id: int) -> ManualScanJobOut |
     return serialize_manual_scan_job(job, events)
 
 
-def get_latest_manual_scan_job_out(session: Session) -> ManualScanJobOut | None:
-    """Return the newest manual scan job or `None` when the queue is still empty."""
+def get_latest_manual_scan_job_out(
+    session: Session,
+    repository_full_name: str | None = None,
+) -> ManualScanJobOut | None:
+    """Return the newest global or repository-scoped scan job."""
 
-    job = get_latest_manual_scan_job(session)
+    job = get_latest_manual_scan_job(
+        session,
+        repository_full_name=repository_full_name,
+    )
     if job is None:
         return None
     events = list_manual_scan_progress_events(session, job_id=job.id)

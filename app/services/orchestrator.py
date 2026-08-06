@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.models.entities import AIExtractedThreat, Alert, Dependency, ManualScanJob, Repository, ScanResult
 from app.models.schemas import ContainerFinding, DependencyRecord, ScanRequest, ScanResponse, VulnerabilityRecord
 from app.repositories.store import (
+    annotate_active_alert_provenance,
     build_alert_fingerprint,
     get_container_image_scan_cache,
     link_dependency_to_vulnerability,
@@ -224,6 +225,7 @@ class ScanOrchestrator:
                     cancellation_check=cancellation_check,
                 ),
                 expected_commit_sha=request.target_commit_sha,
+                scan_job_id=job_id,
             )
             if request.target_commit_sha is not None and observed_commit_sha is not None:
                 scanned_commit_sha = observed_commit_sha
@@ -576,11 +578,22 @@ class ScanOrchestrator:
                 alerts_created += 1 if alert else 0
 
         self._check_cancellation(cancellation_check)
+        active_fingerprints = self._merge_active_alert_fingerprints(
+            active_alerts_by_source
+        )
         resolve_stale_alerts(
             session,
             repository_id=repository.id,
             source_types=list(active_alerts_by_source),
-            active_fingerprints=self._merge_active_alert_fingerprints(active_alerts_by_source),
+            active_fingerprints=active_fingerprints,
+        )
+        provenance = session.info.get("security_watchdog_scan_provenance", {})
+        annotate_active_alert_provenance(
+            session,
+            repository_id=repository.id,
+            active_fingerprints=active_fingerprints,
+            scanned_commit_sha=provenance.get("scanned_commit_sha"),
+            scan_job_id=provenance.get("scan_job_id"),
         )
         if progress:
             progress.asset_step(
@@ -1245,6 +1258,7 @@ class ScanOrchestrator:
         details: dict[str, str],
         scan_callable,
         expected_commit_sha: str | None = None,
+        scan_job_id: int | None = None,
     ) -> tuple[int, int, str | None]:
         """
         Run one asset scan without letting a single failure abort the whole manual scan.
@@ -1257,6 +1271,7 @@ class ScanOrchestrator:
 
         effective_details = dict(details)
         scanned_commit_sha: str | None = None
+        previous_provenance = session.info.get("security_watchdog_scan_provenance")
         try:
             if scanner_name == "repository_asset_scan":
                 scanned_commit_sha = self.repository_scanner.get_checkout_commit_sha(
@@ -1269,6 +1284,13 @@ class ScanOrchestrator:
                         f"repository={repository.full_name} expected={expected_commit_sha} "
                         f"actual={scanned_commit_sha}"
                     )
+                repository_metadata = dict(repository.metadata_json or {})
+                repository_metadata["checked_out_commit_sha"] = scanned_commit_sha
+                repository.metadata_json = repository_metadata
+                session.info["security_watchdog_scan_provenance"] = {
+                    "scanned_commit_sha": scanned_commit_sha,
+                    "scan_job_id": scan_job_id,
+                }
             alerts_created = scan_callable()
             record_scan_result(
                 session,
@@ -1302,6 +1324,11 @@ class ScanOrchestrator:
             )
             session.commit()
             return 0, 1, None
+        finally:
+            if previous_provenance is None:
+                session.info.pop("security_watchdog_scan_provenance", None)
+            else:
+                session.info["security_watchdog_scan_provenance"] = previous_provenance
 
     def _calculate_repository_risk(self, session: Session, repository_id: int) -> float:
         """Set repository risk to the current highest open alert score."""

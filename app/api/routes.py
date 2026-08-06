@@ -12,13 +12,22 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app import __version__
 from app.api.dependencies import require_deployment_gate_token
 from app.core.config import Settings, get_settings
 from app.db.session import get_db_session
-from app.models.entities import AIExtractedThreat, Alert, Dependency, Repository, ThreatArticle
+from app.models.entities import (
+    AIExtractedThreat,
+    Alert,
+    Dependency,
+    ManualScanJob,
+    Repository,
+    ThreatArticle,
+)
 from app.models.schemas import (
     AlertOut,
     CodexPromptOut,
@@ -38,7 +47,10 @@ from app.models.schemas import (
     SystemInventoryOut,
 )
 from app.repositories.store import set_repositories_scan_enabled_bulk, set_repository_scan_enabled
-from app.services.deployment_security_gate import DeploymentSecurityGateService
+from app.services.deployment_security_gate import (
+    DEPLOYMENT_GATE_API_VERSION,
+    DeploymentSecurityGateService,
+)
 from app.services.manual_scan_jobs import (
     cancel_manual_scan_job,
     enqueue_manual_scan,
@@ -54,11 +66,95 @@ router = APIRouter()
 LOGGER = logging.getLogger(__name__)
 
 
-@router.get("/health")
-def healthcheck() -> dict[str, str]:
-    """Simple liveness endpoint for Docker health checks and reverse proxies."""
+def _latest_jobs_by_repository(
+    session: Session,
+    repositories: list[Repository],
+) -> dict[str, ManualScanJob]:
+    """Load the newest persisted scan job for each requested repository in one bounded query."""
 
-    return {"status": "ok"}
+    repository_names = [repository.full_name for repository in repositories]
+    if not repository_names:
+        return {}
+
+    newest_job_ids = (
+        select(func.max(ManualScanJob.id))
+        .where(ManualScanJob.repository_full_name.in_(repository_names))
+        .group_by(ManualScanJob.repository_full_name)
+    )
+    jobs = session.scalars(
+        select(ManualScanJob).where(ManualScanJob.id.in_(newest_job_ids))
+    ).all()
+    latest_jobs: dict[str, ManualScanJob] = {}
+    for job in jobs:
+        if job.repository_full_name is not None:
+            latest_jobs.setdefault(job.repository_full_name, job)
+    return latest_jobs
+
+
+def _latest_job_for_repository(
+    session: Session,
+    repository_full_name: str,
+) -> ManualScanJob | None:
+    """Return the newest scan job used to enrich one repository response."""
+
+    return session.scalar(
+        select(ManualScanJob)
+        .where(ManualScanJob.repository_full_name == repository_full_name)
+        .order_by(desc(ManualScanJob.requested_at), desc(ManualScanJob.id))
+        .limit(1)
+    )
+
+
+def _repository_out(
+    repository: Repository,
+    latest_job: ManualScanJob | None,
+) -> RepositoryOut:
+    """Build safe repository metadata used by the Broker without exposing clone credentials."""
+
+    metadata = repository.metadata_json or {}
+    checked_out_commit_sha = metadata.get("checked_out_commit_sha")
+    if not isinstance(checked_out_commit_sha, str):
+        checked_out_commit_sha = None
+    return RepositoryOut.model_validate(repository).model_copy(
+        update={
+            "checked_out_commit_sha": checked_out_commit_sha,
+            "latest_scanned_commit_sha": (
+                latest_job.scanned_commit_sha if latest_job is not None else None
+            ),
+            "latest_scan_status": latest_job.status if latest_job is not None else None,
+            "latest_scan_completed_at": (
+                latest_job.completed_at if latest_job is not None else None
+            ),
+        }
+    )
+
+
+@router.get("/health")
+def healthcheck(session: Session = Depends(get_db_session)) -> dict[str, str]:
+    """Return bounded runtime readiness metadata without exposing configuration or secrets."""
+
+    try:
+        latest_job = get_latest_manual_scan_job_out(session)
+    except SQLAlchemyError:
+        LOGGER.warning("Health check could not query the database")
+        return {
+            "status": "degraded",
+            "application_version": __version__,
+            "gate_api_version": DEPLOYMENT_GATE_API_VERSION,
+            "worker_status": "unknown",
+            "database_status": "unavailable",
+            "queue_status": "unavailable",
+        }
+
+    latest_status = latest_job.status if latest_job is not None else "idle"
+    return {
+        "status": "ok",
+        "application_version": __version__,
+        "gate_api_version": DEPLOYMENT_GATE_API_VERSION,
+        "worker_status": "running" if latest_status == "running" else "ready",
+        "database_status": "ready",
+        "queue_status": latest_status,
+    }
 
 
 @router.post("/scan", response_model=ScanAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -97,10 +193,16 @@ def trigger_scan(
 
 
 @router.get("/scan-jobs/latest", response_model=ManualScanJobOut | None)
-def get_latest_scan_job(session: Session = Depends(get_db_session)) -> ManualScanJobOut | None:
-    """Return the newest manual scan job so the dashboard can restore visible progress state."""
+def get_latest_scan_job(
+    repository_full_name: str | None = Query(default=None, min_length=3, max_length=255),
+    session: Session = Depends(get_db_session),
+) -> ManualScanJobOut | None:
+    """Return the newest global or repository-scoped scan job."""
 
-    return get_latest_manual_scan_job_out(session)
+    return get_latest_manual_scan_job_out(
+        session,
+        repository_full_name=repository_full_name,
+    )
 
 
 @router.get("/scan-jobs/{job_id}", response_model=ManualScanJobOut)
@@ -255,11 +357,23 @@ def get_threats(session: Session = Depends(get_db_session)) -> dict[str, list[di
 
 
 @router.get("/repositories", response_model=list[RepositoryOut])
-def get_repositories(session: Session = Depends(get_db_session)) -> list[RepositoryOut]:
+def get_repositories(
+    repository_full_name: str | None = Query(default=None, min_length=3, max_length=255),
+    session: Session = Depends(get_db_session),
+) -> list[RepositoryOut]:
     """Expose repository-like assets for dashboards and API consumers."""
 
-    repositories = session.scalars(select(Repository).order_by(desc(Repository.updated_at)).limit(500)).all()
-    return [RepositoryOut.model_validate(repository) for repository in repositories]
+    statement = select(Repository)
+    if repository_full_name is not None:
+        statement = statement.where(Repository.full_name == repository_full_name)
+    repositories = session.scalars(
+        statement.order_by(desc(Repository.updated_at)).limit(500)
+    ).all()
+    latest_jobs = _latest_jobs_by_repository(session, repositories)
+    return [
+        _repository_out(repository, latest_jobs.get(repository.full_name))
+        for repository in repositories
+    ]
 
 
 @router.patch("/repositories/{repository_id}/scan-settings", response_model=RepositoryOut)
@@ -279,7 +393,10 @@ def update_repository_scan_settings(
         session.rollback()
         raise HTTPException(status_code=404, detail=f"Repository/system {repository_id} was not found.")
     session.commit()
-    return RepositoryOut.model_validate(repository)
+    return _repository_out(
+        repository,
+        _latest_job_for_repository(session, repository.full_name),
+    )
 
 
 @router.patch("/repositories/scan-settings/bulk", response_model=list[RepositoryOut])
@@ -302,7 +419,11 @@ def update_repository_scan_settings_bulk(
             detail=f"Repository/system IDs not found: {sorted(missing_ids)}",
         )
     session.commit()
-    return [RepositoryOut.model_validate(repository) for repository in repositories]
+    latest_jobs = _latest_jobs_by_repository(session, repositories)
+    return [
+        _repository_out(repository, latest_jobs.get(repository.full_name))
+        for repository in repositories
+    ]
 
 
 @router.get("/systems", response_model=list[SystemInventoryOut])

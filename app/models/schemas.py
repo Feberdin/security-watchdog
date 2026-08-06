@@ -35,6 +35,10 @@ class RepositoryOut(BaseModel):
     local_path: str
     last_scanned_at: datetime | None
     risk_score: float
+    checked_out_commit_sha: str | None = None
+    latest_scanned_commit_sha: str | None = None
+    latest_scan_status: str | None = None
+    latest_scan_completed_at: datetime | None = None
 
 
 class DependencyRecord(BaseModel):
@@ -138,8 +142,10 @@ class AlertOut(BaseModel):
     risk_score: float
     status: str
     source_type: str
+    fingerprint: str
     metadata_json: dict[str, Any]
     created_at: datetime
+    updated_at: datetime
 
 
 class DependencyInsightOut(BaseModel):

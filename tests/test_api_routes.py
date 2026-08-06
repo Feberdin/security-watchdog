@@ -11,6 +11,7 @@ route tests and `app/api/routes.py`.
 from __future__ import annotations
 
 from collections.abc import Generator
+from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -24,7 +25,7 @@ from app.api.routes import router as api_router
 from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.session import get_db_session
-from app.models.entities import Dependency, Repository
+from app.models.entities import Dependency, ManualScanJob, Repository
 from app.services.reporting import ReportingService
 
 
@@ -39,6 +40,37 @@ def build_session_factory() -> sessionmaker[Session]:
     )
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine, autocommit=False, autoflush=False, future=True)
+
+
+def test_health_returns_safe_runtime_and_dependency_metadata() -> None:
+    """Broker health checks need versions and bounded component states, never configuration."""
+
+    session_factory = build_session_factory()
+
+    def override_db_session() -> Generator[Session, None, None]:
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app = FastAPI()
+    app.include_router(api_router)
+    app.dependency_overrides[get_db_session] = override_db_session
+
+    response = TestClient(app).get("/health")
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload == {
+        "status": "ok",
+        "application_version": "0.1.0",
+        "gate_api_version": "2026-08-03",
+        "worker_status": "ready",
+        "database_status": "ready",
+        "queue_status": "idle",
+    }
+    assert not {"token", "password", "secret", "cookie"} & set(payload)
 
 
 def test_post_scan_returns_accepted_and_leaves_job_queued_for_worker() -> None:
@@ -80,6 +112,88 @@ def test_post_scan_returns_accepted_and_leaves_job_queued_for_worker() -> None:
     assert latest_job["progress"]["phase"] == "queued"
     assert latest_job["progress"]["percent"] == 0
     assert latest_job["progress"]["events"][0]["message"].startswith("Scan wurde eingereiht")
+
+
+def test_latest_scan_and_repository_metadata_are_repository_scoped() -> None:
+    """A repository query must never return a newer job belonging to another repository."""
+
+    session_factory = build_session_factory()
+    requested_at = datetime.now(UTC)
+    session = session_factory()
+    first_repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="SecondBrain",
+        full_name="Feberdin/SecondBrain",
+        default_branch="main",
+        local_path="/tmp/secondbrain",
+        metadata_json={"checked_out_commit_sha": "a" * 40},
+    )
+    other_repository = Repository(
+        source_type="github",
+        owner="Feberdin",
+        name="other",
+        full_name="Feberdin/other",
+        default_branch="main",
+        local_path="/tmp/other",
+    )
+    session.add_all([first_repository, other_repository])
+    session.flush()
+    first_repository_id = first_repository.id
+    session.add_all(
+        [
+            ManualScanJob(
+                repository_full_name=first_repository.full_name,
+                status="succeeded",
+                requested_at=requested_at,
+                completed_at=requested_at,
+                scanned_commit_sha="a" * 40,
+            ),
+            ManualScanJob(
+                repository_full_name=other_repository.full_name,
+                status="succeeded",
+                requested_at=requested_at + timedelta(minutes=1),
+                completed_at=requested_at + timedelta(minutes=1),
+                scanned_commit_sha="b" * 40,
+            ),
+        ]
+    )
+    session.commit()
+    session.close()
+
+    def override_db_session() -> Generator[Session, None, None]:
+        scoped_session = session_factory()
+        try:
+            yield scoped_session
+        finally:
+            scoped_session.close()
+
+    app = FastAPI()
+    app.include_router(api_router)
+    app.dependency_overrides[get_db_session] = override_db_session
+    client = TestClient(app)
+
+    latest_response = client.get(
+        "/scan-jobs/latest",
+        params={"repository_full_name": "Feberdin/SecondBrain"},
+    )
+    repositories_response = client.get(
+        "/repositories",
+        params={"repository_full_name": "Feberdin/SecondBrain"},
+    )
+
+    assert latest_response.status_code == 200
+    assert latest_response.json()["repository_full_name"] == "Feberdin/SecondBrain"
+    assert latest_response.json()["scanned_commit_sha"] == "a" * 40
+    assert repositories_response.status_code == 200
+    repository_payload = repositories_response.json()
+    assert len(repository_payload) == 1
+    assert repository_payload[0]["id"] == first_repository_id
+    assert repository_payload[0]["full_name"] == "Feberdin/SecondBrain"
+    assert repository_payload[0]["checked_out_commit_sha"] == "a" * 40
+    assert repository_payload[0]["latest_scanned_commit_sha"] == "a" * 40
+    assert repository_payload[0]["latest_scan_status"] == "succeeded"
+    assert repository_payload[0]["latest_scan_completed_at"] is not None
 
 
 def test_daily_security_check_endpoint_returns_codex_runbook() -> None:

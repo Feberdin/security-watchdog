@@ -193,7 +193,7 @@ CODE_KEYWORD_ARGUMENT_PATTERN = re.compile(
 )
 CODE_TYPE_ANNOTATION_PATTERN = re.compile(
     r"[A-Za-z_$][A-Za-z0-9_$.]*(?:\s*\|\s*[A-Za-z_$][A-Za-z0-9_$.]*)*"
-    r"\s*=\s*(?:None|null|undefined)?"
+    r"(?:\s*=\s*(?:None|null|undefined)?)?"
 )
 HUMAN_READABLE_SLUG_PATTERN = re.compile(r"[a-z]+(?:[-_](?:[a-z]+|\d+))+")
 SOURCE_CODE_EXTENSIONS = {

@@ -217,11 +217,22 @@ def get_manual_scan_job(session: Session, job_id: int) -> ManualScanJob | None:
     return session.get(ManualScanJob, job_id)
 
 
-def get_latest_manual_scan_job(session: Session) -> ManualScanJob | None:
-    """Return the newest manual scan job so the dashboard can restore visible scan state."""
+def get_latest_manual_scan_job(
+    session: Session,
+    repository_full_name: str | None = None,
+) -> ManualScanJob | None:
+    """Return the newest global or repository-scoped manual scan job."""
 
+    statement = select(ManualScanJob)
+    if repository_full_name is not None:
+        statement = statement.where(
+            ManualScanJob.repository_full_name == repository_full_name
+        )
     return session.scalar(
-        select(ManualScanJob).order_by(desc(ManualScanJob.requested_at), desc(ManualScanJob.id))
+        statement.order_by(
+            desc(ManualScanJob.requested_at),
+            desc(ManualScanJob.id),
+        )
     )
 
 
@@ -981,6 +992,43 @@ def resolve_stale_alerts(
         resolved_count += 1
     session.flush()
     return resolved_count
+
+
+def annotate_active_alert_provenance(
+    session: Session,
+    *,
+    repository_id: int,
+    active_fingerprints: set[str],
+    scanned_commit_sha: str | None,
+    scan_job_id: int | None,
+) -> int:
+    """
+    Attach bounded scan provenance to findings confirmed by the current repository scan.
+
+    Why this exists:
+    Deployment gates must be able to prove that an alert belongs to the exact commit they asked
+    Security Watchdog to inspect. The provenance is deliberately excluded from alert identity, so
+    repeated scans update the same finding instead of creating one alert per commit.
+    """
+
+    if not active_fingerprints or (scanned_commit_sha is None and scan_job_id is None):
+        return 0
+
+    alerts = session.scalars(
+        select(Alert).where(
+            Alert.repository_id == repository_id,
+            Alert.fingerprint.in_(active_fingerprints),
+        )
+    ).all()
+    for alert in alerts:
+        metadata = dict(alert.metadata_json or {})
+        if scanned_commit_sha is not None:
+            metadata["scanned_commit_sha"] = scanned_commit_sha
+        if scan_job_id is not None:
+            metadata["scan_job_id"] = scan_job_id
+        alert.metadata_json = metadata
+    session.flush()
+    return len(alerts)
 
 
 def report_counts(session: Session) -> dict[str, int]:

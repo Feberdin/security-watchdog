@@ -110,6 +110,9 @@ Decision handling:
   requested commit. Findings from older checkouts do not block a different candidate. A finding
   still present in the working tree or reachable Git history is confirmed and rebound by the fresh
   exact-commit scan, so it remains blocking.
+- Startup creates the idempotent partial index `ix_alerts_deployment_gate` for exact-commit,
+  unresolved HIGH/CRITICAL lookups. This keeps the fail-closed gate inside its bounded Broker
+  timeout even when the audit database contains a large historical alert set.
 - Treat `deny` and `indeterminate` as hard blocks.
 - Treat timeout, DNS/connect failure, TLS failure, `401`, `503`, non-JSON, schema errors, and unknown
   API versions as hard blocks.

@@ -39,12 +39,12 @@ def initialize_database() -> None:
 
 def _ensure_runtime_schema() -> None:
     """
-    Add narrow post-`create_all` columns that existing installations need after upgrades.
+    Add narrow post-`create_all` columns and indexes that existing installations need after upgrades.
 
     Why this exists:
     The project intentionally avoids a full migration stack for now. SQLAlchemy `create_all()` only
     creates missing tables; it will not alter existing tables. These DDL statements are therefore
-    small, guarded by column existence checks, and safe to run at every API or worker startup.
+    small, idempotent, and safe to run at every API or worker startup.
     """
 
     inspector = inspect(engine)
@@ -128,6 +128,33 @@ def _ensure_runtime_schema() -> None:
                 generic="ALTER TABLE manual_scan_jobs ADD COLUMN refresh_image_cache BOOLEAN NOT NULL DEFAULT FALSE",
                 dialect_name=dialect_name,
             )
+
+    if "alerts" in table_names:
+        # The deployment gate has a strict timeout. Keep its exact-commit lookup bounded even when
+        # years of resolved or lower-severity findings remain in the audit database.
+        _execute_schema_ddl(
+            postgresql=(
+                "CREATE INDEX IF NOT EXISTS ix_alerts_deployment_gate "
+                "ON alerts (repository_id, "
+                "((CAST((\"metadata\" ->> 'scanned_commit_sha') AS VARCHAR))), "
+                "(lower(severity))) "
+                "WHERE status IN ('open', 'acknowledged') "
+                "AND lower(severity) IN ('critical', 'high')"
+            ),
+            sqlite=(
+                "CREATE INDEX IF NOT EXISTS ix_alerts_deployment_gate "
+                "ON alerts (repository_id, "
+                "json_extract(\"metadata\", '$.\"scanned_commit_sha\"'), "
+                "lower(severity)) "
+                "WHERE status IN ('open', 'acknowledged') "
+                "AND lower(severity) IN ('critical', 'high')"
+            ),
+            generic=(
+                "CREATE INDEX IF NOT EXISTS ix_alerts_deployment_gate "
+                "ON alerts (repository_id, status, severity)"
+            ),
+            dialect_name=dialect_name,
+        )
 
 
 def _execute_schema_ddl(

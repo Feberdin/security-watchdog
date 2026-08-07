@@ -538,6 +538,57 @@ def test_skips_high_entropy_noise_in_docs_paths(tmp_path):
     assert not any(finding.detector == "high_entropy" for finding in findings)
 
 
+def test_skips_credential_field_labels_in_home_assistant_translations(tmp_path):
+    """Visible form labels are not configured SMTP credential values."""
+
+    integration = tmp_path / "custom_components" / "example"
+    translations = integration / "translations"
+    translations.mkdir(parents=True)
+    (integration / "strings.json").write_text(
+        '{"smtp_username": "SMTP username", "smtp_password": "SMTP password"}\n',
+        encoding="utf-8",
+    )
+    (translations / "de.json").write_text(
+        '{"smtp_username": "SMTP-Benutzername", "smtp_password": "SMTP-Passwort"}\n',
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_directory(tmp_path)
+
+    assert findings == []
+
+
+def test_translation_file_still_detects_random_credential_literal(tmp_path):
+    """Translation-path suppression must not hide random credential-shaped values."""
+
+    translations = tmp_path / "translations"
+    translations.mkdir()
+    sample = translations / "en.json"
+    value = "".join(("Aq7Z", "pL2m", "R9xV", "c4Tn", "B8wK"))
+    sample.write_text(f'{{\n  "smtp_password": "{value}"\n}}\n', encoding="utf-8")
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert any(finding.detector == "broker_secret_assignment" for finding in findings)
+
+
+def test_skips_key_file_names_and_xml_url_or_boolean_metadata(tmp_path):
+    """Paths, public URLs, and feature flags are configuration metadata, not secrets."""
+
+    source = tmp_path / "service.py"
+    source.write_text('PRIVATE_KEY_FILE_NAME = "private-key.pem"\n', encoding="utf-8")
+    template = tmp_path / "template.xml"
+    template.write_text(
+        "<WebUI>https://tesla.example.test/oauth/send</WebUI>\n"
+        '<Config Name="OAuth enabled" Default="ENABLE_GOOGLE_OAUTH=true"/>\n',
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_directory(tmp_path)
+
+    assert findings == []
+
+
 def test_skips_binary_media_files(tmp_path):
     sample = tmp_path / "default-background.jpg"
     sample.write_bytes(b"\xff\xd8\xff\xe0binary-image-content")

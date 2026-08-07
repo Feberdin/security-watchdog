@@ -642,6 +642,11 @@ class SecretScanner:
 
         normalized_name = self._normalize_variable_name(assignment.name)
         value = assignment.value
+        if self._looks_structured_ui_label_assignment(
+            assignment,
+            file_path=file_path,
+        ):
+            return None
         if self._looks_non_literal_source_assignment(
             assignment,
             file_path=file_path,
@@ -752,6 +757,11 @@ class SecretScanner:
         """Return true when an assignment is intentionally a reference or non-secret config."""
 
         normalized_name = self._normalize_variable_name(assignment.name)
+        if self._looks_structured_ui_label_assignment(
+            assignment,
+            file_path=file_path,
+        ):
+            return True
         if self._looks_non_literal_source_assignment(
             assignment,
             file_path=file_path,
@@ -810,6 +820,46 @@ class SecretScanner:
             or normalized_name.startswith("INTERNET_WATCHER_COMPLAINT_SMTP_")
         )
 
+    def _looks_structured_ui_label_assignment(
+        self,
+        assignment: ParsedAssignment,
+        *,
+        file_path: str,
+    ) -> bool:
+        """
+        Recognize translated UI labels whose JSON key happens to name a credential field.
+
+        Home Assistant `strings.json` and `translations/*.json` files map keys such as
+        `smtp_password` to visible labels such as `SMTP password`. The label is not a
+        configured value. We require quoted key/value syntax, a matching field prefix,
+        and readable text so random or provider-shaped values still alert.
+        """
+
+        path = Path(file_path.lower())
+        is_translation_file = (
+            path.name in {"strings.json", "strings.yaml", "strings.yml"}
+            or "translations" in path.parts
+        )
+        if (
+            not is_translation_file
+            or not assignment.name_was_quoted
+            or not assignment.value_was_quoted
+        ):
+            return False
+
+        value = assignment.value.strip()
+        if self._contains_high_signal_literal_secret(value) or self._looks_high_entropy_literal(value):
+            return False
+
+        normalized_name = self._normalize_variable_name(assignment.name)
+        field_prefix = normalized_name.split("_", maxsplit=1)[0].lower()
+        readable_value = value.lower().replace("-", " ").replace("_", " ")
+        return bool(
+            field_prefix
+            and readable_value.startswith(f"{field_prefix} ")
+            and re.fullmatch(r"[\wÀ-ÿ][\wÀ-ÿ .,:;()/'-]{2,120}", value)
+        )
+
     def _looks_non_literal_source_assignment(
         self,
         assignment: ParsedAssignment,
@@ -835,6 +885,11 @@ class SecretScanner:
             return False
 
         normalized_name = self._normalize_variable_name(assignment.name)
+        if normalized_name.endswith(("_FILE_NAME", "_PATH")) and (
+            "/" in value
+            or re.fullmatch(r"[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,12}", value)
+        ):
+            return True
         if (
             normalized_name.endswith("_PREFIX")
             and value == lowered_value
@@ -1113,7 +1168,9 @@ class SecretScanner:
         """Filter out common noisy tokens before we compute entropy."""
 
         lowered = candidate.lower()
-        if lowered.startswith(("http://", "https://")):
+        if lowered.startswith(("http://", "https://", "//", "www.")):
+            return False
+        if re.fullmatch(r"[A-Z][A-Z0-9_]{3,}=(?:true|false|\d+)", candidate):
             return False
         if re.fullmatch(r"[0-9a-f]{20,}", lowered):
             return False

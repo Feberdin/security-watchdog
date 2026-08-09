@@ -189,7 +189,8 @@ CODE_MEMBER_REFERENCE_PATTERN = re.compile(
 )
 CODE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 CODE_KEYWORD_ARGUMENT_PATTERN = re.compile(
-    r"[A-Za-z_$][A-Za-z0-9_$]*=[A-Za-z_$][A-Za-z0-9_$]*"
+    r"[A-Za-z_$][A-Za-z0-9_$]*="
+    r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*"
 )
 CODE_TYPE_ANNOTATION_PATTERN = re.compile(
     r"[A-Za-z_$][A-Za-z0-9_$.]*(?:\s*\|\s*[A-Za-z_$][A-Za-z0-9_$.]*)*"
@@ -699,7 +700,10 @@ class SecretScanner:
             return None
 
         is_credential_name = self._is_heuristic_secret_name(normalized_name)
-        is_generic_key_name = normalized_name.endswith("_KEY")
+        is_generic_key_name = normalized_name.endswith("_KEY") or self._is_esphome_secret_key_name(
+            normalized_name,
+            file_path=file_path,
+        )
         if not is_credential_name and not is_generic_key_name:
             return None
 
@@ -818,6 +822,16 @@ class SecretScanner:
             normalized_name in BROKER_SECRET_NAMES
             or normalized_name in BROKER_TEMPLATE_SECRET_NAMES
             or normalized_name.startswith("INTERNET_WATCHER_COMPLAINT_SMTP_")
+        )
+
+    def _is_esphome_secret_key_name(self, normalized_name: str, *, file_path: str) -> bool:
+        """Treat a literal generic `key` in ESPHome YAML as credential material."""
+
+        path = Path(file_path.lower())
+        return (
+            normalized_name == "KEY"
+            and path.suffix in {".yaml", ".yml"}
+            and "esphome" in path.parts
         )
 
     def _looks_structured_ui_label_assignment(
@@ -1279,7 +1293,7 @@ class SecretScanner:
         it is not a committed credential literal.
         """
 
-        normalized_value = value.strip().strip("'\"").rstrip(",;)]}")
+        normalized_value = value.strip().strip("'\"").lstrip("(").rstrip(",;)]}")
         if CODE_REFERENCE_EXPRESSION_PATTERN.match(normalized_value):
             return True
         if file_path is None or Path(file_path).suffix.lower() not in SOURCE_CODE_EXTENSIONS:

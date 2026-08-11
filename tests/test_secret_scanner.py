@@ -351,6 +351,32 @@ def test_skips_angle_bracket_documentation_placeholders(tmp_path):
     assert findings == []
 
 
+def test_markdown_placeholder_punctuation_does_not_hide_or_invent_secrets(tmp_path):
+    """
+    Inline-code punctuation must not turn an uppercase placeholder into a finding.
+
+    The second line is a negative control: a plausible mixed-class literal remains detectable
+    after the same Markdown wrapper is removed.
+    """
+
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    sample = docs_path / "jellyfin-setup.md"
+    sample.write_text(
+        "Set URL to `http://WATCHLOG_HOST:8111/api/webhooks/jellyfin?secret=WEBHOOK_SECRET`.\n"
+        "Unsafe example: `http://watchlog.local/api/webhooks/jellyfin?secret=LiveSignal_1234Abcd5678Value`.\n",
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert not any(finding.line_number == 1 for finding in findings)
+    assert any(
+        finding.line_number == 2 and finding.detector == "generic_token_assignment"
+        for finding in findings
+    )
+
+
 def test_skips_readable_token_slugs_only_in_low_signal_paths(tmp_path):
     """Human-readable fixture values should not block deploys, but production literals should."""
 

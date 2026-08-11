@@ -9,6 +9,7 @@ together before changing the deployment gate policy.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -49,3 +50,16 @@ def test_entrypoint_drops_privileges_after_unraid_bootstrap() -> None:
     assert "chown -R \"${PUID}:${PGID}\" /app/data" in entrypoint
     assert "usermod -aG \"${EXISTING_DOCKER_GROUP}\" \"${WATCHDOG_USER}\"" in entrypoint
     assert 'exec gosu "${WATCHDOG_USER}" "$@"' in entrypoint
+
+
+def test_production_compose_pins_every_published_image_by_digest() -> None:
+    """Recovery plans must resolve the same reviewed image bytes on every pull."""
+
+    compose = (REPOSITORY_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert re.search(
+        r"ghcr\.io/feberdin/security-watchdog@sha256:[0-9a-f]{64}",
+        compose,
+    )
+    assert re.search(r"image: postgres:16-alpine@sha256:[0-9a-f]{64}", compose)
+    assert re.search(r"image: redis:7-alpine@sha256:[0-9a-f]{64}", compose)

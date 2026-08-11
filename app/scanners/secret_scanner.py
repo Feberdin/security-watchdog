@@ -30,11 +30,13 @@ SKIPPED_DIRECTORIES = {
     ".pytest_cache",
     ".ruff_cache",
     ".venv",
+    ".vite",
     "__pycache__",
     "build",
     "coverage",
     "dist",
     "node_modules",
+    "target",
 }
 LOW_SIGNAL_PATH_PARTS = {
     "doc",
@@ -146,6 +148,8 @@ PLACEHOLDER_SECRET_TOKENS = (
     "change-me",
     "demo",
     "dummy",
+    "dry-run",
+    "ed25519",
     "example",
     "fake",
     "fresh-token",
@@ -154,9 +158,11 @@ PLACEHOLDER_SECRET_TOKENS = (
     "not_configured",
     "not-configured",
     "placeholder",
+    "private_key",
     "sample",
     "todo",
     "your_",
+    "your-",
 )
 VARIABLE_REFERENCE_PREFIXES = (
     "$",
@@ -182,10 +188,11 @@ VARIABLE_REFERENCE_SUBSTRINGS = (
 GENERIC_SECRET_VALUE_PATTERN = re.compile(r"[^\s'\"#]{8,}")
 SECRET_REFERENCE_PATTERN = re.compile(r"secret://[A-Za-z0-9_.-]+")
 CODE_REFERENCE_EXPRESSION_PATTERN = re.compile(
-    r"^(?:await\s+)?[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*\s*(?:\(|\[)"
+    r"^(?:await\s+)?[A-Za-z_$][A-Za-z0-9_$]*"
+    r"(?:(?:\.|::)[A-Za-z_$][A-Za-z0-9_$]*)*\s*(?:\(|\[)"
 )
 CODE_MEMBER_REFERENCE_PATTERN = re.compile(
-    r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+"
+    r"[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\.|::)[A-Za-z_$][A-Za-z0-9_$]*)+"
 )
 CODE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 CODE_KEYWORD_ARGUMENT_PATTERN = re.compile(
@@ -196,6 +203,9 @@ CODE_TYPE_ANNOTATION_PATTERN = re.compile(
     r"(?:\s*=\s*(?:None|null|undefined)?)?"
 )
 HUMAN_READABLE_SLUG_PATTERN = re.compile(r"[a-z]+(?:[-_](?:[a-z]+|\d+))+")
+HUMAN_READABLE_SEPARATED_VALUE_PATTERN = re.compile(
+    r"[a-z]+(?:[-_.:](?:[a-z]+|\d+))+"
+)
 SOURCE_CODE_EXTENSIONS = {
     ".c",
     ".cc",
@@ -204,6 +214,7 @@ SOURCE_CODE_EXTENSIONS = {
     ".cjs",
     ".cts",
     ".go",
+    ".hcl",
     ".java",
     ".js",
     ".jsx",
@@ -219,10 +230,15 @@ SOURCE_CODE_EXTENSIONS = {
     ".rs",
     ".svelte",
     ".swift",
+    ".tf",
     ".ts",
     ".tsx",
     ".vue",
 }
+CODE_GENERIC_TYPE_PATTERN = re.compile(
+    r"(?:&\s*)?[A-Za-z_$][A-Za-z0-9_$]*(?:::[A-Za-z_$][A-Za-z0-9_$]*)*"
+    r"(?:\s*<[^=;{}]+>)?(?:\s*\|\s*[A-Za-z_$][A-Za-z0-9_$]*)?"
+)
 ASSIGNMENT_PATTERN = re.compile(
     r"""^\s*(?:-\s*)?(?:export\s+)?(?P<name>["']?[A-Za-z_][A-Za-z0-9_.-]*["']?)\s*(?::|=)\s*(?P<value>.+?)\s*,?\s*$"""
 )
@@ -293,7 +309,8 @@ SECRET_PATTERNS: dict[str, re.Pattern[str]] = {
     "private_key": re.compile(r"-----BEGIN (?:RSA|EC|OPENSSH|PRIVATE) KEY-----"),
     "openai_key": re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
     "generic_password": re.compile(
-        r"(?i)\b(password|passwd|pwd)\b\s*[:=]\s*['\"]?(?P<secret_value>[^'\"\s#]{8,})['\"]?"
+        r"(?i)\b(password|passwd|pwd)\b\s*(?::(?!:)|=)\s*['\"]?"
+        r"(?P<secret_value>[^'\"\s#]{8,})['\"]?"
     ),
     "generic_token_assignment": re.compile(
         r"(?i)\b("
@@ -305,7 +322,7 @@ SECRET_PATTERNS: dict[str, re.Pattern[str]] = {
         r"refresh[_-]?token|"
         r"secret|"
         r"token"
-        r")\b\s*[:=]\s*['\"]?(?P<secret_value>[^'\"\s#]{8,})['\"]?"
+        r")\b\s*(?::(?!:)|=)\s*['\"]?(?P<secret_value>[^'\"\s#]{8,})['\"]?"
     ),
     "credential_in_url": re.compile(r"\bhttps?://[^/\s:@]+:[^/\s:@]+@[^/\s]+\b"),
     "bearer_token": re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._-]{20,}\b"),
@@ -404,7 +421,14 @@ class SecretScanner:
                 current_file = None
                 continue
             if line.startswith("+++ b/"):
-                current_file = line.removeprefix("+++ b/")
+                candidate_file = line.removeprefix("+++ b/")
+                # Why this exists:
+                # Generated build trees may have existed in old commits even when they are now
+                # ignored. Scanning those historical artifacts creates thousands of duplicate
+                # pseudo-secrets and makes a real credential harder to see.
+                current_file = (
+                    None if self._should_skip_relative_path(candidate_file) else candidate_file
+                )
                 continue
             if line.startswith("@@"):
                 current_line_number = self._extract_added_hunk_line_number(line)
@@ -1073,6 +1097,14 @@ class SecretScanner:
 
         return file_path.suffix.lower() in SKIPPED_BINARY_EXTENSIONS
 
+    def _should_skip_relative_path(self, file_path: str) -> bool:
+        """Apply the same generated/binary exclusions to a path found in Git history."""
+
+        path = Path(file_path)
+        return any(part in SKIPPED_DIRECTORIES for part in path.parts) or self._should_skip_file(
+            path
+        )
+
     def _looks_binary(self, file_path: Path) -> bool:
         """Detect binary content even when the extension looks inconclusive."""
 
@@ -1114,6 +1146,12 @@ class SecretScanner:
 
         lowered = candidate.lower()
         if lowered.startswith(("http://", "https://")):
+            return False
+        if lowered.startswith("/"):
+            return False
+        if HUMAN_READABLE_SEPARATED_VALUE_PATTERN.fullmatch(lowered.lstrip("-")):
+            return False
+        if re.fullmatch(r"--?[a-z][a-z0-9-]+=[A-Z][A-Z0-9_]+", candidate):
             return False
         if re.fullmatch(r"[0-9a-f]{20,}", lowered):
             return False
@@ -1243,6 +1281,7 @@ class SecretScanner:
         return bool(
             CODE_IDENTIFIER_PATTERN.fullmatch(normalized_value)
             or CODE_MEMBER_REFERENCE_PATTERN.fullmatch(normalized_value)
+            or CODE_GENERIC_TYPE_PATTERN.fullmatch(normalized_value)
         )
 
     def _looks_synthetic_low_signal_value(self, value: str, *, file_path: str | None) -> bool:
@@ -1261,7 +1300,7 @@ class SecretScanner:
             return False
         if self._looks_noncredential_local_url(normalized_value):
             return True
-        return bool(HUMAN_READABLE_SLUG_PATTERN.fullmatch(normalized_value))
+        return bool(HUMAN_READABLE_SEPARATED_VALUE_PATTERN.fullmatch(normalized_value))
 
     def _looks_noncredential_local_url(self, value: str) -> bool:
         """Recognize private fixture endpoints without hiding URLs that embed credentials."""
@@ -1296,7 +1335,18 @@ class SecretScanner:
             return True
         if normalized_value in {"...", "…"}:
             return True
+        if normalized_value.endswith(("...", "…")):
+            return True
         if normalized_value.startswith("<") and normalized_value.endswith(">"):
+            return True
+        provider_placeholder = re.sub(
+            r"^(?:sk-|xox[baprs]-)",
+            "",
+            normalized_value,
+        )
+        if provider_placeholder != normalized_value and re.fullmatch(
+            r"[x*._-]{8,}", provider_placeholder
+        ):
             return True
         if normalized_value.startswith(VARIABLE_REFERENCE_PREFIXES):
             return True

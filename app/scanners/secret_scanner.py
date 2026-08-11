@@ -8,6 +8,7 @@ Debugging: If a secret is missed, add a detector or inspect the entropy threshol
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import logging
 import math
@@ -49,9 +50,11 @@ LOW_SIGNAL_PATH_PARTS = {
     "tests",
 }
 TEST_FIXTURE_PATH_PARTS = {
+    "__tests__",
     "fixture",
     "fixtures",
     "test",
+    "test_data",
     "tests",
 }
 LOCKFILE_NAMES = {
@@ -228,6 +231,7 @@ SOURCE_CODE_EXTENSIONS = {
     ".py",
     ".rb",
     ".rs",
+    ".sh",
     ".svelte",
     ".swift",
     ".tf",
@@ -552,6 +556,7 @@ class SecretScanner:
                 detector_name,
                 secret_preview_source,
                 file_path=file_path,
+                line=line,
             ):
                 continue
             if detector_name in {"generic_password", "generic_token_assignment"}:
@@ -1035,9 +1040,20 @@ class SecretScanner:
         value: str,
         *,
         file_path: str,
+        line: str,
     ) -> bool:
         """Suppress readable test fixtures while retaining provider-shaped credentials."""
 
+        path = Path(file_path.lower())
+        if detector_name == "private_key":
+            return (
+                path.suffix in SOURCE_CODE_EXTENSIONS
+                and any(
+                    part in {"example", "examples", "test", "tests", "validation"}
+                    for part in path.parts
+                )
+                and ('"' in line or "'" in line)
+            )
         if self._allow_entropy_scan(file_path):
             return False
 
@@ -1045,8 +1061,20 @@ class SecretScanner:
         if normalized_value.lower().startswith(HIGH_SIGNAL_PREFIXES):
             return False
         if detector_name == "bearer_token":
-            token = re.sub(r"(?i)^bearer\s+", "", normalized_value).lower()
-            return bool(HUMAN_READABLE_SLUG_PATTERN.fullmatch(token))
+            token = re.sub(r"(?i)^bearer\s+", "", normalized_value)
+            if HUMAN_READABLE_SLUG_PATTERN.fullmatch(token.lower()):
+                return True
+            if any(part in {"example", "examples"} for part in Path(file_path.lower()).parts):
+                try:
+                    decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+                    decoded_text = decoded.decode("utf-8")
+                except (ValueError, UnicodeDecodeError):
+                    return False
+                return len(decoded_text) >= 8 and all(
+                    character.isprintable() or character.isspace()
+                    for character in decoded_text
+                )
+            return False
         if detector_name == "credential_in_url":
             try:
                 parsed = urlsplit(normalized_value)
@@ -1135,9 +1163,9 @@ class SecretScanner:
         path = Path(relative_path.lower())
         if path.name in LOCKFILE_NAMES:
             return False
-        if path.suffix in {".md", ".rst"} or any(
-            marker in path.name for marker in (".example", ".sample", ".template")
-        ):
+        if path.suffix in {".md", ".rst"} or path.name.startswith(
+            ("example.", "sample.", "template.")
+        ) or any(marker in path.name for marker in (".example", ".sample", ".template")):
             return False
         return not any(part in LOW_SIGNAL_PATH_PARTS for part in path.parts)
 
@@ -1153,6 +1181,13 @@ class SecretScanner:
             return False
         if re.fullmatch(r"--?[a-z][a-z0-9-]+=[A-Z][A-Z0-9_]+", candidate):
             return False
+        if re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*=[A-Za-z_][A-Za-z0-9_.-]*",
+            candidate,
+        ):
+            return False
+        if self._looks_path_reference(candidate):
+            return False
         if re.fullmatch(r"[0-9a-f]{20,}", lowered):
             return False
         if "_" in candidate and re.fullmatch(r"[A-Z][A-Z0-9_]{19,}", candidate):
@@ -1166,6 +1201,25 @@ class SecretScanner:
         has_symbol = any(character in "/+_=.-" for character in candidate)
         signal_classes = sum((has_lower, has_upper, has_digit, has_symbol))
         return signal_classes >= 2
+
+    def _looks_path_reference(self, value: str) -> bool:
+        """
+        Recognize file references that entropy scanning would otherwise mistake for credentials.
+
+        Why this exists:
+        JSON reports and maintenance scripts often put words such as `token` or `secret` next to
+        a generated source path. Requiring a slash plus a normal file suffix keeps random Base64
+        values detectable while filtering paths such as `docs/integration/example.md`.
+        """
+
+        normalized_value = value.strip().strip("'\"")
+        if "/" not in normalized_value or normalized_value.startswith(("http://", "https://")):
+            return False
+        suffix = Path(normalized_value).suffix.lower()
+        return bool(suffix) and 1 < len(suffix) <= 10 and re.fullmatch(
+            r"[a-z0-9.]+",
+            suffix,
+        ) is not None
 
     def _is_secret_like_entropy_context(
         self,
@@ -1300,7 +1354,45 @@ class SecretScanner:
             return False
         if self._looks_noncredential_local_url(normalized_value):
             return True
+        if self._looks_fixture_credential_url(normalized_value):
+            return True
+        if re.fullmatch(
+            r"(?:admin|demo|example|password|securepass|test|user)[a-z0-9_!@#$%^&*.-]{3,31}",
+            normalized_value,
+        ):
+            return True
         return bool(HUMAN_READABLE_SEPARATED_VALUE_PATTERN.fullmatch(normalized_value))
+
+    def _looks_fixture_credential_url(self, value: str) -> bool:
+        """Recognize documentation-only URLs with readable local fixture credentials."""
+
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            return False
+        base_scheme = parsed.scheme.split("+", maxsplit=1)[0]
+        if base_scheme not in {"http", "https", "postgres", "postgresql"}:
+            return False
+        credential_parts = [part for part in (parsed.username, parsed.password) if part]
+        hostname = (parsed.hostname or "").lower()
+        if not credential_parts or not hostname:
+            return False
+        local_fixture_host = (
+            hostname == "localhost"
+            or "." not in hostname
+            or hostname.endswith((".example", ".internal", ".invalid", ".local", ".test"))
+        )
+        if not local_fixture_host:
+            try:
+                local_fixture_host = ipaddress.ip_address(hostname).is_private
+            except ValueError:
+                local_fixture_host = False
+        return local_fixture_host and all(
+            len(part) <= 12
+            or self._looks_placeholder_secret(part)
+            or HUMAN_READABLE_SLUG_PATTERN.fullmatch(part.lower())
+            for part in credential_parts
+        )
 
     def _looks_noncredential_local_url(self, value: str) -> bool:
         """Recognize private fixture endpoints without hiding URLs that embed credentials."""
@@ -1356,6 +1448,13 @@ class SecretScanner:
             r"[x*._-]{8,}", provider_placeholder
         ):
             return True
+        if provider_placeholder != normalized_value:
+            alphabet = "abcdefghijklmnopqrstuvwxyz"
+            if any(
+                alphabet[index : index + 16] in provider_placeholder
+                for index in range(len(alphabet) - 15)
+            ):
+                return True
         if normalized_value.startswith(VARIABLE_REFERENCE_PREFIXES):
             return True
         if any(marker in normalized_value for marker in VARIABLE_REFERENCE_SUBSTRINGS):

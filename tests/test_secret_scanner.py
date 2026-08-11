@@ -7,6 +7,8 @@ Debugging: If a detector becomes too noisy or too quiet, this file should fail i
 
 from __future__ import annotations
 
+import base64
+
 from app.scanners.secret_scanner import SecretScanner
 
 
@@ -218,6 +220,55 @@ def test_skips_source_routes_identifiers_and_asset_paths_in_entropy_scan(tmp_pat
     findings = SecretScanner().scan_directory(tmp_path)
 
     assert findings == []
+
+
+def test_skips_paths_and_config_key_prefixes_in_non_source_entropy_scan(tmp_path):
+    """Generated metadata may mention secret words next to paths and config key prefixes."""
+
+    samples = {
+        "example.env": (
+            "DATABASE_URL=postgresql://app:password@postgres:5432/app\n"
+        ),
+        "scripts/fix-markers.json": (
+            '{"token_source": "docs/integration/example.md"}\n'
+        ),
+        ".claude-flow/metrics/security-audit.json": (
+            '{"secret_scanner": ".claude/helpers/validate.js"}\n'
+        ),
+        "scripts/homecore-seed.sh": (
+            'printf "%s" "$HOMECORE_BEARER_TOKEN"\n'
+        ),
+    }
+    for relative_path, content in samples.items():
+        sample = tmp_path / relative_path
+        sample.parent.mkdir(parents=True, exist_ok=True)
+        sample.write_text(content, encoding="utf-8")
+
+    findings = SecretScanner().scan_directory(tmp_path)
+
+    assert findings == []
+
+
+def test_skips_obvious_documentation_credentials_but_keeps_random_literals(tmp_path):
+    """Readable docs examples are safe; a random literal in the same file remains actionable."""
+
+    sample = tmp_path / "archive" / "v1" / "docs" / "integration" / "README.md"
+    sample.parent.mkdir(parents=True)
+    random_value = "".join(("Live", "Signal_", "1234", "Abcd", "5678", "Value"))
+    sample.write_text(
+        "PASSWORD=SecurePass123!\n"
+        "DATABASE_URL=postgresql+asyncpg://app:password@postgres:5432/app\n"
+        f'API_KEY="{random_value}"\n',
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert not any(finding.line_number in {1, 2} for finding in findings)
+    assert any(
+        finding.line_number == 3 and finding.detector == "generic_token_assignment"
+        for finding in findings
+    )
 
 
 def test_skips_explicit_test_tokens_and_local_fixture_urls(tmp_path):
@@ -436,6 +487,41 @@ def test_detects_high_signal_token_in_test_path(tmp_path):
     findings = SecretScanner().scan_file(sample, tmp_path)
 
     assert any(finding.detector == "github_token" for finding in findings)
+
+
+def test_skips_structural_provider_placeholders_in_low_signal_paths(tmp_path):
+    """Alphabet keys, printable example bearer values, and key markers are fixtures, not leaks."""
+
+    openai_placeholder = "".join(("sk-", "abcdefghijklmnop", "qrstuv12"))
+    bearer_placeholder = base64.urlsafe_b64encode(b"example bearer credential").decode("ascii")
+    samples = {
+        "examples/client.py": f'api_key = "{openai_placeholder}"\n',
+        "examples/http_server.rs": f'let header = "Bearer {bearer_placeholder}";\n',
+        "validation/security_validation.rs": (
+            'let marker = "' + "-----BEGIN " + 'PRIVATE KEY-----";\n'
+        ),
+    }
+    for relative_path, content in samples.items():
+        sample = tmp_path / relative_path
+        sample.parent.mkdir(parents=True, exist_ok=True)
+        sample.write_text(content, encoding="utf-8")
+
+    findings = SecretScanner().scan_directory(tmp_path)
+
+    assert findings == []
+
+
+def test_keeps_random_openai_signature_in_low_signal_path(tmp_path):
+    """Alphabet placeholders are ignored, but a random provider-shaped key still blocks."""
+
+    sample = tmp_path / "examples" / "client.py"
+    sample.parent.mkdir(parents=True)
+    random_provider_value = "".join(("sk-", "Z7mP2xR9", "L4vN8cT1", "K6wD3sF5"))
+    sample.write_text(f'api_key = "{random_provider_value}"\n', encoding="utf-8")
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert any(finding.detector == "openai_key" for finding in findings)
 
 
 def test_skips_broker_secret_references(tmp_path):

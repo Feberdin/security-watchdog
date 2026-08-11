@@ -110,6 +110,13 @@ production values remain findings. To debug a suspected false positive, use the
 redacted alert metadata (`file_path`, `line_number`, and `detector`) and add a
 positive and negative regression test before changing a detector.
 
+All current-tree secret findings remain critical deployment blockers. In public
+Git history, strong signatures such as provider tokens, credential-bearing URLs,
+private-key markers, and Broker-secret literals also remain critical. Ambiguous
+generic assignments found only in deleted history stay visible as medium-severity
+review items; this prevents generated API types and old documentation examples
+from silently becoming either false deployment blockers or hidden evidence.
+
 ## API Overview
 
 - `POST /scan`: Queue an immediate scan and return `202 Accepted` plus a status URL. Optional JSON fields: `repository_full_name` for one asset, `scan_sources` with `github`, `unraid`, and/or `homeassistant`, `force`, `include_archived`, `priority`, `pause_active`, `purpose`, `target_commit_sha`, and `refresh_image_cache`.

@@ -6,7 +6,7 @@
 
 # Why this exists: production Compose defaults to the reviewed immutable image manifest, while
 # review or rollback deployments can override SECURITY_WATCHDOG_IMAGE with another pinned digest.
-x-watchdog-image: &watchdog-image ${SECURITY_WATCHDOG_IMAGE:-ghcr.io/feberdin/security-watchdog@sha256:4970eb24a23568e2c8358574e8294434cc3927eefa48e6c1f6cdfd7e5b2d8ce7}
+x-watchdog-image: &watchdog-image ${SECURITY_WATCHDOG_IMAGE:-ghcr.io/feberdin/security-watchdog@sha256:8f41df887558be5ba1d08e15b60be04b9b8d0d1234d511f4dbd7e0d99729bc48}
 x-watchdog-logging: &watchdog-logging
   driver: json-file
   options:

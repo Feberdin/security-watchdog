@@ -1185,7 +1185,7 @@ class SecretScanner:
     ) -> bool:
         """Ignore placeholders and references while still catching realistic assigned secrets."""
 
-        normalized_value = value.strip().strip("'\"")
+        normalized_value = self._normalize_assigned_secret_candidate(value, file_path=file_path)
         if not GENERIC_SECRET_VALUE_PATTERN.fullmatch(normalized_value):
             return False
         if self._looks_placeholder_secret(normalized_value):
@@ -1211,6 +1211,22 @@ class SecretScanner:
         has_symbol = any(character in "/+_=.@:-" for character in normalized_value)
         signal_classes = sum((has_lower, has_upper, has_digit, has_symbol))
         return signal_classes >= 2
+
+    def _normalize_assigned_secret_candidate(self, value: str, *, file_path: str | None) -> str:
+        """
+        Remove Markdown presentation characters that are not part of an assigned value.
+
+        Why this exists:
+        A history line such as ``?secret=WEBHOOK_SECRET`.`` includes the closing code backtick and
+        sentence period in the regex capture. Without normalization, those characters make a plain
+        uppercase placeholder look like a complex literal credential. Real mixed-class values stay
+        detectable after their Markdown wrapper is removed.
+        """
+
+        normalized_value = value.strip().strip("'\"")
+        if file_path is None or Path(file_path).suffix.lower() not in {".md", ".mdx"}:
+            return normalized_value
+        return normalized_value.lstrip("`([{").rstrip("`.,;:)]}")
 
     def _looks_code_reference_expression(self, value: str, *, file_path: str | None) -> bool:
         """

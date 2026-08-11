@@ -377,6 +377,21 @@ def test_markdown_placeholder_punctuation_does_not_hide_or_invent_secrets(tmp_pa
     )
 
 
+def test_markdown_placeholder_in_source_docstring_is_not_a_secret(tmp_path):
+    """The same presentation punctuation is harmless inside source documentation."""
+
+    sample = tmp_path / "runtime_config.py"
+    sample.write_text(
+        '"""Use an uppercase query-string placeholder followed by inline-code punctuation."""\n'
+        'EXAMPLE = "?secret=WEBHOOK_SECRET`."\n',
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
 def test_skips_readable_token_slugs_only_in_low_signal_paths(tmp_path):
     """Human-readable fixture values should not block deploys, but production literals should."""
 

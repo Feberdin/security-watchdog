@@ -1217,15 +1217,12 @@ class SecretScanner:
         Remove Markdown presentation characters that are not part of an assigned value.
 
         Why this exists:
-        A history line such as ``?secret=WEBHOOK_SECRET`.`` includes the closing code backtick and
-        sentence period in the regex capture. Without normalization, those characters make a plain
-        uppercase placeholder look like a complex literal credential. Real mixed-class values stay
-        detectable after their Markdown wrapper is removed.
+        Markdown examples also occur inside source-code comments and docstrings, so normalization
+        cannot depend on a Markdown filename. Only presentation characters at the candidate
+        boundary are removed; real mixed-class values remain detectable after that trimming.
         """
 
         normalized_value = value.strip().strip("'\"")
-        if file_path is None or Path(file_path).suffix.lower() not in {".md", ".mdx"}:
-            return normalized_value
         return normalized_value.lstrip("`([{").rstrip("`.,;:)]}")
 
     def _looks_code_reference_expression(self, value: str, *, file_path: str | None) -> bool:

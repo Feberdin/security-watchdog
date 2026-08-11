@@ -6,7 +6,7 @@
 
 # Why this exists: production Compose defaults to the reviewed immutable image manifest, while
 # review or rollback deployments can override SECURITY_WATCHDOG_IMAGE with another pinned digest.
-x-watchdog-image: &watchdog-image ${SECURITY_WATCHDOG_IMAGE:-ghcr.io/feberdin/security-watchdog@sha256:5c8ad66a05993670930f8cca44a33ae5a34928a85642fff01883c62ef437e86f}
+x-watchdog-image: &watchdog-image ${SECURITY_WATCHDOG_IMAGE:-ghcr.io/feberdin/security-watchdog@sha256:6d992ba71ae194857e629f9771630b860acf2a76b3c40505f3361cb0ae06177d}
 x-watchdog-logging: &watchdog-logging
   driver: json-file
   options:
@@ -54,7 +54,7 @@ x-watchdog-environment: &watchdog-environment
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     restart: unless-stopped
     logging: *watchdog-logging
     environment:
@@ -70,7 +70,7 @@ services:
       retries: 5
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     restart: unless-stopped
     logging: *watchdog-logging
     command: ["redis-server", "--appendonly", "yes"]

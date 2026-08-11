@@ -1344,6 +1344,14 @@ class SecretScanner:
             "",
             normalized_value,
         )
+        # Source-code tests often store an example env line with a literal escaped newline. Strip
+        # only presentation/escape suffixes before checking the repeated-x provider placeholder;
+        # mixed or random provider values remain untouched and continue to alert.
+        provider_placeholder = re.sub(
+            r"(?:\\[nrt]|[`'\".,;:)\]}])+$",
+            "",
+            provider_placeholder,
+        )
         if provider_placeholder != normalized_value and re.fullmatch(
             r"[x*._-]{8,}", provider_placeholder
         ):

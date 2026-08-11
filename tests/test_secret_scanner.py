@@ -755,10 +755,12 @@ def test_generated_provider_placeholders_do_not_hide_real_provider_tokens(tmp_pa
     """Repeated-x examples are harmless, while realistic provider-shaped values still alert."""
 
     sample = tmp_path / ".env.example"
+    openai_placeholder = "".join(("sk-", "x" * 21))
+    slack_placeholder = "".join(("xoxb-", "x" * 21))
     real_token = "".join(("xoxb-", "AbCdEf123456", "GhIjKl789012"))
     sample.write_text(
-        "OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxx\n"
-        "SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxxxxxxxxxxx\n"
+        f"OPENAI_API_KEY={openai_placeholder}\n"
+        f"SLACK_BOT_TOKEN={slack_placeholder}\n"
         f"LEAKED_SLACK_TOKEN={real_token}\n",
         encoding="utf-8",
     )
@@ -770,6 +772,20 @@ def test_generated_provider_placeholders_do_not_hide_real_provider_tokens(tmp_pa
         finding.line_number == 3 and finding.detector == "slack_token"
         for finding in findings
     )
+
+
+def test_provider_placeholder_inside_source_string_is_not_a_history_leak(tmp_path):
+    """An escaped newline after a repeated-x example must not turn it into a provider leak."""
+
+    source = tmp_path / "tests" / "test_docs.py"
+    source.parent.mkdir()
+    openai_placeholder = "".join(("sk-", "x" * 21))
+    source.write_text(
+        f'EXAMPLE = "OPENAI_API_KEY={openai_placeholder}\\n"\n',
+        encoding="utf-8",
+    )
+
+    assert SecretScanner().scan_file(source, tmp_path) == []
 
 
 def test_readable_dotted_placeholder_is_low_signal_only(tmp_path):

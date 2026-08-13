@@ -641,6 +641,43 @@ def test_skips_source_member_keyword_arguments_and_wrapped_env_calls(tmp_path):
     assert findings == []
 
 
+def test_skips_generic_credentials_in_named_typescript_test_files(tmp_path):
+    """Readable fixture values in `*.test.ts` files are not deployed credentials."""
+
+    sample = tmp_path / "email.test.ts"
+    sample.write_text("const draft = { edit_token: 'fixture-edit-token' }\n", encoding="utf-8")
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
+def test_named_test_file_still_detects_provider_shaped_secret(tmp_path):
+    """A test filename must not hide provider-shaped credentials."""
+
+    sample = tmp_path / "client.test.ts"
+    value = "".join(("sk-", "Prod", "Q7mP2xR9L4vN8cT1K6wD3sF5"))
+    sample.write_text(f"const token = '{value}'\n", encoding="utf-8")
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert any(finding.detector == "openai_key" for finding in findings)
+
+
+def test_skips_literal_free_typescript_function_signature(tmp_path):
+    """A typed credential parameter declares an API; it does not assign a secret."""
+
+    sample = tmp_path / "readiness.ts"
+    sample.write_text(
+        "function isStrongJwtSecret(secret: string): boolean {\n",
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
 def test_skips_binary_media_files(tmp_path):
     sample = tmp_path / "default-background.jpg"
     sample.write_bytes(b"\xff\xd8\xff\xe0binary-image-content")

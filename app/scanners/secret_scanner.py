@@ -196,6 +196,10 @@ CODE_TYPE_ANNOTATION_PATTERN = re.compile(
     r"[A-Za-z_$][A-Za-z0-9_$.]*(?:\s*\|\s*[A-Za-z_$][A-Za-z0-9_$.]*)*"
     r"(?:\s*=\s*(?:None|null|undefined)?)?"
 )
+SOURCE_FUNCTION_SIGNATURE_PATTERN = re.compile(
+    r"^\s*(?:export\s+)?(?:async\s+)?function\s+[A-Za-z_$][A-Za-z0-9_$]*"
+    r"\([^)]*\)\s*(?::\s*[^={]+)?\s*[{;]?\s*$"
+)
 HUMAN_READABLE_SLUG_PATTERN = re.compile(r"[a-z]+(?:[-_](?:[a-z]+|\d+))+")
 SOURCE_CODE_EXTENSIONS = {
     ".c",
@@ -486,6 +490,8 @@ class SecretScanner:
         """Run regex and entropy detectors against one logical source line."""
 
         findings: list[SecretFinding] = []
+        if self._looks_literal_free_source_function_signature(line, file_path=file_path):
+            return findings
         assignment = self._parse_assignment(line)
         assignment_finding = self._scan_assignment_for_secret(
             assignment=assignment,
@@ -578,6 +584,15 @@ class SecretScanner:
                     )
                 )
         return findings
+
+    def _looks_literal_free_source_function_signature(self, line: str, *, file_path: str) -> bool:
+        """Skip typed source signatures that name secret parameters but contain no values."""
+
+        if Path(file_path).suffix.lower() not in SOURCE_CODE_EXTENSIONS:
+            return False
+        if any(quote in line for quote in ("'", '"', "`")):
+            return False
+        return bool(SOURCE_FUNCTION_SIGNATURE_PATTERN.fullmatch(line))
 
     def _parse_assignment(self, line: str) -> ParsedAssignment | None:
         """
@@ -1070,7 +1085,8 @@ class SecretScanner:
 
         path = Path(file_path.lower())
         is_playwright_config = path.name.startswith("playwright.") and ".config." in path.name
-        return is_playwright_config or any(
+        is_named_test_file = any(marker in path.name for marker in (".spec.", ".test."))
+        return is_playwright_config or is_named_test_file or any(
             part in TEST_FIXTURE_PATH_PARTS for part in path.parts
         )
 

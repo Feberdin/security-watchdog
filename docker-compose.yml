@@ -1,12 +1,12 @@
 # Purpose: Run the full self-hosted stack with API, worker, PostgreSQL, and Redis.
 # Input/Output: Docker Compose reads this file and starts the required services and volumes.
-# Important invariants: Mount Home Assistant config read-only and only expose the Docker socket if
-# you explicitly want Unraid container discovery inside this stack.
+# Important invariants: Production images are digest-pinned, Home Assistant mounts stay read-only,
+# and the Docker socket is exposed only for explicit Unraid container discovery.
 # Debugging: If scans fail inside Docker, check service health and volume mounts defined here.
 
 # Why this exists: production Compose defaults to the reviewed immutable image manifest, while
 # review or rollback deployments can override SECURITY_WATCHDOG_IMAGE with another pinned digest.
-x-watchdog-image: &watchdog-image ${SECURITY_WATCHDOG_IMAGE:-ghcr.io/feberdin/security-watchdog@sha256:5c8ad66a05993670930f8cca44a33ae5a34928a85642fff01883c62ef437e86f}
+x-watchdog-image: &watchdog-image ${SECURITY_WATCHDOG_IMAGE:-ghcr.io/feberdin/security-watchdog@sha256:8f41df887558be5ba1d08e15b60be04b9b8d0d1234d511f4dbd7e0d99729bc48}
 x-watchdog-logging: &watchdog-logging
   driver: json-file
   options:
@@ -54,7 +54,7 @@ x-watchdog-environment: &watchdog-environment
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:7a396fd264a2067788b6551122b50f162bf6136312c7fc9d74381cb92c648382
     restart: unless-stopped
     logging: *watchdog-logging
     environment:
@@ -70,7 +70,7 @@ services:
       retries: 5
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
     restart: unless-stopped
     logging: *watchdog-logging
     command: ["redis-server", "--appendonly", "yes"]

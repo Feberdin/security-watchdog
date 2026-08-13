@@ -7,6 +7,8 @@ Debugging: If a detector becomes too noisy or too quiet, this file should fail i
 
 from __future__ import annotations
 
+import base64
+
 from app.scanners.secret_scanner import SecretScanner
 
 
@@ -220,6 +222,55 @@ def test_skips_source_routes_identifiers_and_asset_paths_in_entropy_scan(tmp_pat
     assert findings == []
 
 
+def test_skips_paths_and_config_key_prefixes_in_non_source_entropy_scan(tmp_path):
+    """Generated metadata may mention secret words next to paths and config key prefixes."""
+
+    samples = {
+        "example.env": (
+            "DATABASE_URL=postgresql://app:password@postgres:5432/app\n"
+        ),
+        "scripts/fix-markers.json": (
+            '{"token_source": "docs/integration/example.md"}\n'
+        ),
+        ".claude-flow/metrics/security-audit.json": (
+            '{"secret_scanner": ".claude/helpers/validate.js"}\n'
+        ),
+        "scripts/homecore-seed.sh": (
+            'printf "%s" "$HOMECORE_BEARER_TOKEN"\n'
+        ),
+    }
+    for relative_path, content in samples.items():
+        sample = tmp_path / relative_path
+        sample.parent.mkdir(parents=True, exist_ok=True)
+        sample.write_text(content, encoding="utf-8")
+
+    findings = SecretScanner().scan_directory(tmp_path)
+
+    assert findings == []
+
+
+def test_skips_obvious_documentation_credentials_but_keeps_random_literals(tmp_path):
+    """Readable docs examples are safe; a random literal in the same file remains actionable."""
+
+    sample = tmp_path / "archive" / "v1" / "docs" / "integration" / "README.md"
+    sample.parent.mkdir(parents=True)
+    random_value = "".join(("Live", "Signal_", "1234", "Abcd", "5678", "Value"))
+    sample.write_text(
+        "PASSWORD=SecurePass123!\n"
+        "DATABASE_URL=postgresql+asyncpg://app:password@postgres:5432/app\n"
+        f'API_KEY="{random_value}"\n',
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert not any(finding.line_number in {1, 2} for finding in findings)
+    assert any(
+        finding.line_number == 3 and finding.detector == "generic_token_assignment"
+        for finding in findings
+    )
+
+
 def test_skips_explicit_test_tokens_and_local_fixture_urls(tmp_path):
     """Reserved test endpoints and readable fixture credentials do not block deployments."""
 
@@ -377,6 +428,21 @@ def test_markdown_placeholder_punctuation_does_not_hide_or_invent_secrets(tmp_pa
     )
 
 
+def test_markdown_placeholder_in_source_docstring_is_not_a_secret(tmp_path):
+    """The same presentation punctuation is harmless inside source documentation."""
+
+    sample = tmp_path / "runtime_config.py"
+    sample.write_text(
+        '"""Use an uppercase query-string placeholder followed by inline-code punctuation."""\n'
+        'EXAMPLE = "?secret=WEBHOOK_SECRET`."\n',
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
 def test_skips_readable_token_slugs_only_in_low_signal_paths(tmp_path):
     """Human-readable fixture values should not block deploys, but production literals should."""
 
@@ -421,6 +487,41 @@ def test_detects_high_signal_token_in_test_path(tmp_path):
     findings = SecretScanner().scan_file(sample, tmp_path)
 
     assert any(finding.detector == "github_token" for finding in findings)
+
+
+def test_skips_structural_provider_placeholders_in_low_signal_paths(tmp_path):
+    """Alphabet keys, printable example bearer values, and key markers are fixtures, not leaks."""
+
+    openai_placeholder = "".join(("sk-", "abcdefghijklmnop", "qrstuv12"))
+    bearer_placeholder = base64.urlsafe_b64encode(b"example bearer credential").decode("ascii")
+    samples = {
+        "examples/client.py": f'api_key = "{openai_placeholder}"\n',
+        "examples/http_server.rs": f'let header = "Bearer {bearer_placeholder}";\n',
+        "validation/security_validation.rs": (
+            'let marker = "' + "-----BEGIN " + 'PRIVATE KEY-----";\n'
+        ),
+    }
+    for relative_path, content in samples.items():
+        sample = tmp_path / relative_path
+        sample.parent.mkdir(parents=True, exist_ok=True)
+        sample.write_text(content, encoding="utf-8")
+
+    findings = SecretScanner().scan_directory(tmp_path)
+
+    assert findings == []
+
+
+def test_keeps_random_openai_signature_in_low_signal_path(tmp_path):
+    """Alphabet placeholders are ignored, but a random provider-shaped key still blocks."""
+
+    sample = tmp_path / "examples" / "client.py"
+    sample.parent.mkdir(parents=True)
+    random_provider_value = "".join(("sk-", "Z7mP2xR9", "L4vN8cT1", "K6wD3sF5"))
+    sample.write_text(f'api_key = "{random_provider_value}"\n', encoding="utf-8")
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert any(finding.detector == "openai_key" for finding in findings)
 
 
 def test_skips_broker_secret_references(tmp_path):
@@ -658,3 +759,175 @@ def test_skips_business_key_values_and_code_expressions_in_git_history(monkeypat
     findings = scanner.scan_git_history(repo)
 
     assert findings == []
+
+
+def test_skips_generated_rust_and_vite_trees(tmp_path):
+    """Generated dependency metadata must not drown out actionable repository findings."""
+
+    target_file = tmp_path / "v2" / "target" / "debug" / "deps" / "crate.d"
+    vite_file = tmp_path / "ui" / ".vite" / "deps" / "bundle.js.map"
+    for path in (target_file, vite_file):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('api_key="LiveSignal_1234Abcd5678Value"\n', encoding="utf-8")
+
+    assert SecretScanner().scan_directory(tmp_path) == []
+
+
+def test_skips_generated_paths_in_git_history(monkeypatch, tmp_path):
+    """The generated-directory exclusion also applies to files that only exist in history."""
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    scanner = SecretScanner()
+    monkeypatch.setattr(
+        scanner,
+        "_iter_git_history_lines",
+        lambda root_path: iter(
+            [
+                "__COMMIT__abc123def456\n",
+                "diff --git a/v2/target/debug/deps/crate.d b/v2/target/debug/deps/crate.d\n",
+                "+++ b/v2/target/debug/deps/crate.d\n",
+                "@@ -0,0 +1 @@\n",
+                '+API_KEY="LiveSignal_1234Abcd5678Value"\n',
+                "diff --git a/ui/.vite/deps/bundle.js.map b/ui/.vite/deps/bundle.js.map\n",
+                "+++ b/ui/.vite/deps/bundle.js.map\n",
+                "@@ -0,0 +1 @@\n",
+                '+API_KEY="LiveSignal_1234Abcd5678Value"\n',
+            ]
+        ),
+    )
+
+    assert scanner.scan_git_history(repo) == []
+
+
+def test_skips_unquoted_terraform_and_rust_references(tmp_path):
+    """Typed fields and runtime references name value sources; they are not literal credentials."""
+
+    terraform = tmp_path / "terraform" / "main.tf"
+    terraform.parent.mkdir()
+    terraform.write_text(
+        "password = random_password.database.result\n"
+        "auth_token = module.identity.auth_token\n",
+        encoding="utf-8",
+    )
+    rust = tmp_path / "src" / "config.rs"
+    rust.parent.mkdir()
+    rust.write_text(
+        "    pub token: Option<String>,\n"
+        "    let password = HeaderValue::from_str(config.password.as_str());\n",
+        encoding="utf-8",
+    )
+
+    assert SecretScanner().scan_directory(tmp_path) == []
+
+
+def test_rust_scoped_token_variants_are_not_assignments(tmp_path):
+    """The first colon in Rust's `Type::Variant` syntax is not a key/value separator."""
+
+    rust = tmp_path / "src" / "parser.rs"
+    rust.parent.mkdir()
+    rust.write_text(
+        "match input {\n"
+        "    'x' => Ok(Token::Identifier),\n"
+        "    _ => Ok(Password::Missing),\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    assert SecretScanner().scan_file(rust, tmp_path) == []
+
+
+def test_generated_provider_placeholders_do_not_hide_real_provider_tokens(tmp_path):
+    """Repeated-x examples are harmless, while realistic provider-shaped values still alert."""
+
+    sample = tmp_path / ".env.example"
+    openai_placeholder = "".join(("sk-", "x" * 21))
+    slack_placeholder = "".join(("xoxb-", "x" * 21))
+    real_token = "".join(("xoxb-", "AbCdEf123456", "GhIjKl789012"))
+    sample.write_text(
+        f"OPENAI_API_KEY={openai_placeholder}\n"
+        f"SLACK_BOT_TOKEN={slack_placeholder}\n"
+        f"LEAKED_SLACK_TOKEN={real_token}\n",
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert not any(finding.line_number in {1, 2} for finding in findings)
+    assert any(
+        finding.line_number == 3 and finding.detector == "slack_token"
+        for finding in findings
+    )
+
+
+def test_provider_placeholder_inside_source_string_is_not_a_history_leak(tmp_path):
+    """An escaped newline after a repeated-x example must not turn it into a provider leak."""
+
+    source = tmp_path / "tests" / "test_docs.py"
+    source.parent.mkdir()
+    openai_placeholder = "".join(("sk-", "x" * 21))
+    source.write_text(
+        f'EXAMPLE = "OPENAI_API_KEY={openai_placeholder}\\n"\n',
+        encoding="utf-8",
+    )
+
+    assert SecretScanner().scan_file(source, tmp_path) == []
+
+
+def test_readable_dotted_placeholder_is_low_signal_only(tmp_path):
+    """Dotted prose placeholders are safe in docs but the same literal is suspicious in config."""
+
+    docs = tmp_path / "docs" / "api.md"
+    docs.parent.mkdir()
+    docs.write_text("token=replace.with.credential\n", encoding="utf-8")
+    production = tmp_path / ".env"
+    production.write_text("TOKEN=replace.with.credential\n", encoding="utf-8")
+
+    assert SecretScanner().scan_file(docs, tmp_path) == []
+    assert SecretScanner().scan_file(production, tmp_path)
+
+
+def test_skips_truncated_tokens_and_named_key_placeholders(tmp_path):
+    """Documentation truncation and key-type labels do not contain usable credentials."""
+
+    docs = tmp_path / "docs" / "api.md"
+    docs.parent.mkdir()
+    docs.write_text(
+        'access_token: "eyJhbGciOiJIUzI1NiJ9..."\n'
+        'private_key_hex: "ed25519_private_key"\n'
+        'signing_key_id: "ed25519:ruv-signing-v1"\n',
+        encoding="utf-8",
+    )
+
+    assert SecretScanner().scan_file(docs, tmp_path) == []
+
+
+def test_dry_run_token_is_safe_but_production_slug_stays_actionable(tmp_path):
+    """An explicit dry-run sentinel is harmless; production config keeps the stricter policy."""
+
+    script = tmp_path / "publish.py"
+    script.write_text('token = "dry-run-no-token-needed"\n', encoding="utf-8")
+    production = tmp_path / ".env"
+    production.write_text("TOKEN=worker-review-token\n", encoding="utf-8")
+
+    assert SecretScanner().scan_file(script, tmp_path) == []
+    assert SecretScanner().scan_file(production, tmp_path)
+
+
+def test_entropy_filter_skips_paths_and_cli_secret_names(tmp_path):
+    """Paths and secret-name arguments are identifiers, while random literals still alert."""
+
+    docs = tmp_path / "audit.json"
+    docs.write_text('"route": "/broker/security/alerts/list"\n', encoding="utf-8")
+    makefile = tmp_path / "Makefile"
+    makefile.write_text(
+        "command --secret=COGNITUM_OWNER_SIGNING_KEY\n",
+        encoding="utf-8",
+    )
+    production = tmp_path / ".env"
+    random_value = "".join(("Q7mP2xR9", "L4vN8cT1", "K6wD3sF5", "H2jB9zU4"))
+    production.write_text(f"UNRELATED_SECRET={random_value}\n", encoding="utf-8")
+
+    assert SecretScanner(entropy_threshold=3.5).scan_file(docs, tmp_path) == []
+    assert SecretScanner(entropy_threshold=3.5).scan_file(makefile, tmp_path) == []
+    assert SecretScanner(entropy_threshold=3.5).scan_file(production, tmp_path)

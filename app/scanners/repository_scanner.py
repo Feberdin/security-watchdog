@@ -383,7 +383,14 @@ class RepositoryScanner:
             return False
         if repository_data.get("archived") and not include_archived:
             return False
-        if repository_data.get("fork") and not self.settings.github_include_forks:
+        # Why this exception exists: broad inventory scans omit forks by default to avoid
+        # duplicating upstream findings. A named pre-deploy request is different: the caller has
+        # explicitly selected the fork and needs exact-commit evidence for that deployable repo.
+        if (
+            repository_data.get("fork")
+            and not self.settings.github_include_forks
+            and repository_full_name is None
+        ):
             LOGGER.debug("Skipping forked GitHub repository", extra={"repository": full_name})
             return False
         return True

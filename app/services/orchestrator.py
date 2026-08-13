@@ -51,6 +51,23 @@ from app.services.vulnerability_service import VulnerabilityService
 LOGGER = logging.getLogger(__name__)
 ScanCancellationCheck = Callable[[], None]
 
+# Why this exists:
+# Current-tree literals are always deployment blockers. Public Git history is also scanned, but
+# generic assignment heuristics in deleted source and documentation are inherently ambiguous.
+# Keep those visible for review at medium severity; provider signatures, embedded credentials,
+# private-key markers, and Broker-secret assignments remain critical even in history.
+HIGH_CONFIDENCE_HISTORY_SECRET_DETECTORS = {
+    "aws_access_key",
+    "bearer_token",
+    "broker_secret_assignment",
+    "credential_in_url",
+    "github_token",
+    "openai_key",
+    "private_key",
+    "secret_name_field_unusual_value",
+    "slack_token",
+}
+
 
 class ScanOrchestrator:
     """Single orchestrator that ties together all scanners and correlation stages."""
@@ -513,6 +530,7 @@ class ScanOrchestrator:
         )
         for finding in secrets:
             metadata = finding.model_dump()
+            severity, risk_score = self._secret_finding_alert_risk(finding)
             active_alerts_by_source["secret_scanner"].add(
                 build_alert_fingerprint(
                     repository_id=repository.id,
@@ -529,8 +547,8 @@ class ScanOrchestrator:
                     finding,
                     git_history_is_public=include_git_history,
                 ),
-                severity="critical",
-                risk_score=95.0,
+                severity=severity,
+                risk_score=risk_score,
                 source_type="secret_scanner",
                 metadata=metadata,
             )
@@ -928,6 +946,23 @@ class ScanOrchestrator:
         """Only scan git history when the repository is public and therefore historically exposed."""
 
         return repository.source_type == "github" and not repository.metadata_json.get("private", False)
+
+    def _secret_finding_alert_risk(self, finding) -> tuple[str, float]:
+        """
+        Calibrate ambiguous historical heuristics without hiding them from operators.
+
+        Current working-tree findings and strong historical signatures remain critical. Generic
+        assignments found only in deleted public history stay open and visible at medium severity,
+        so deployment gates do not become unusable on large repositories full of generated API
+        types, examples, and documentation while a human can still review their redacted metadata.
+        """
+
+        if (
+            finding.content_source == "git_history"
+            and finding.detector not in HIGH_CONFIDENCE_HISTORY_SECRET_DETECTORS
+        ):
+            return "medium", 55.0
+        return "critical", 95.0
 
     def _describe_secret_finding(
         self,

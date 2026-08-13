@@ -162,6 +162,38 @@ def test_repository_scan_attaches_exact_commit_and_job_to_active_alerts(tmp_path
     assert repository.metadata_json["checked_out_commit_sha"] == "a" * 40
 
 
+def test_historical_generic_secret_stays_visible_without_becoming_critical() -> None:
+    """Ambiguous deleted assignments are medium; strong and current findings stay critical."""
+
+    orchestrator = ScanOrchestrator()
+    historical_generic = SecretFinding(
+        file_path="docs/example.md",
+        line_number=8,
+        detector="generic_token_assignment",
+        excerpt="[REDACTED]",
+        content_source="git_history",
+        commit_sha="a" * 40,
+    )
+    historical_provider = SecretFinding(
+        file_path="src/client.py",
+        line_number=9,
+        detector="github_token",
+        excerpt="[REDACTED]",
+        content_source="git_history",
+        commit_sha="b" * 40,
+    )
+    current_generic = SecretFinding(
+        file_path=".env",
+        line_number=1,
+        detector="generic_password",
+        excerpt="[REDACTED]",
+    )
+
+    assert orchestrator._secret_finding_alert_risk(historical_generic) == ("medium", 55.0)
+    assert orchestrator._secret_finding_alert_risk(historical_provider) == ("critical", 95.0)
+    assert orchestrator._secret_finding_alert_risk(current_generic) == ("critical", 95.0)
+
+
 def test_manual_scan_targets_specific_commit_during_inventory_sync() -> None:
     """Pre-deploy scans should pass the target commit to repository sync."""
 

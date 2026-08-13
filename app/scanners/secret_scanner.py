@@ -8,6 +8,7 @@ Debugging: If a secret is missed, add a detector or inspect the entropy threshol
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import logging
 import math
@@ -30,11 +31,13 @@ SKIPPED_DIRECTORIES = {
     ".pytest_cache",
     ".ruff_cache",
     ".venv",
+    ".vite",
     "__pycache__",
     "build",
     "coverage",
     "dist",
     "node_modules",
+    "target",
 }
 LOW_SIGNAL_PATH_PARTS = {
     "doc",
@@ -47,9 +50,11 @@ LOW_SIGNAL_PATH_PARTS = {
     "tests",
 }
 TEST_FIXTURE_PATH_PARTS = {
+    "__tests__",
     "fixture",
     "fixtures",
     "test",
+    "test_data",
     "tests",
 }
 LOCKFILE_NAMES = {
@@ -146,6 +151,8 @@ PLACEHOLDER_SECRET_TOKENS = (
     "change-me",
     "demo",
     "dummy",
+    "dry-run",
+    "ed25519",
     "example",
     "fake",
     "fresh-token",
@@ -154,9 +161,11 @@ PLACEHOLDER_SECRET_TOKENS = (
     "not_configured",
     "not-configured",
     "placeholder",
+    "private_key",
     "sample",
     "todo",
     "your_",
+    "your-",
 )
 VARIABLE_REFERENCE_PREFIXES = (
     "$",
@@ -182,10 +191,11 @@ VARIABLE_REFERENCE_SUBSTRINGS = (
 GENERIC_SECRET_VALUE_PATTERN = re.compile(r"[^\s'\"#]{8,}")
 SECRET_REFERENCE_PATTERN = re.compile(r"secret://[A-Za-z0-9_.-]+")
 CODE_REFERENCE_EXPRESSION_PATTERN = re.compile(
-    r"^(?:await\s+)?[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*\s*(?:\(|\[)"
+    r"^(?:await\s+)?[A-Za-z_$][A-Za-z0-9_$]*"
+    r"(?:(?:\.|::)[A-Za-z_$][A-Za-z0-9_$]*)*\s*(?:\(|\[)"
 )
 CODE_MEMBER_REFERENCE_PATTERN = re.compile(
-    r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+"
+    r"[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\.|::)[A-Za-z_$][A-Za-z0-9_$]*)+"
 )
 CODE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 CODE_KEYWORD_ARGUMENT_PATTERN = re.compile(
@@ -196,6 +206,9 @@ CODE_TYPE_ANNOTATION_PATTERN = re.compile(
     r"(?:\s*=\s*(?:None|null|undefined)?)?"
 )
 HUMAN_READABLE_SLUG_PATTERN = re.compile(r"[a-z]+(?:[-_](?:[a-z]+|\d+))+")
+HUMAN_READABLE_SEPARATED_VALUE_PATTERN = re.compile(
+    r"[a-z]+(?:[-_.:](?:[a-z]+|\d+))+"
+)
 SOURCE_CODE_EXTENSIONS = {
     ".c",
     ".cc",
@@ -204,6 +217,7 @@ SOURCE_CODE_EXTENSIONS = {
     ".cjs",
     ".cts",
     ".go",
+    ".hcl",
     ".java",
     ".js",
     ".jsx",
@@ -217,12 +231,18 @@ SOURCE_CODE_EXTENSIONS = {
     ".py",
     ".rb",
     ".rs",
+    ".sh",
     ".svelte",
     ".swift",
+    ".tf",
     ".ts",
     ".tsx",
     ".vue",
 }
+CODE_GENERIC_TYPE_PATTERN = re.compile(
+    r"(?:&\s*)?[A-Za-z_$][A-Za-z0-9_$]*(?:::[A-Za-z_$][A-Za-z0-9_$]*)*"
+    r"(?:\s*<[^=;{}]+>)?(?:\s*\|\s*[A-Za-z_$][A-Za-z0-9_$]*)?"
+)
 ASSIGNMENT_PATTERN = re.compile(
     r"""^\s*(?:-\s*)?(?:export\s+)?(?P<name>["']?[A-Za-z_][A-Za-z0-9_.-]*["']?)\s*(?::|=)\s*(?P<value>.+?)\s*,?\s*$"""
 )
@@ -293,7 +313,8 @@ SECRET_PATTERNS: dict[str, re.Pattern[str]] = {
     "private_key": re.compile(r"-----BEGIN (?:RSA|EC|OPENSSH|PRIVATE) KEY-----"),
     "openai_key": re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
     "generic_password": re.compile(
-        r"(?i)\b(password|passwd|pwd)\b\s*[:=]\s*['\"]?(?P<secret_value>[^'\"\s#]{8,})['\"]?"
+        r"(?i)\b(password|passwd|pwd)\b\s*(?::(?!:)|=)\s*['\"]?"
+        r"(?P<secret_value>[^'\"\s#]{8,})['\"]?"
     ),
     "generic_token_assignment": re.compile(
         r"(?i)\b("
@@ -305,7 +326,7 @@ SECRET_PATTERNS: dict[str, re.Pattern[str]] = {
         r"refresh[_-]?token|"
         r"secret|"
         r"token"
-        r")\b\s*[:=]\s*['\"]?(?P<secret_value>[^'\"\s#]{8,})['\"]?"
+        r")\b\s*(?::(?!:)|=)\s*['\"]?(?P<secret_value>[^'\"\s#]{8,})['\"]?"
     ),
     "credential_in_url": re.compile(r"\bhttps?://[^/\s:@]+:[^/\s:@]+@[^/\s]+\b"),
     "bearer_token": re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._-]{20,}\b"),
@@ -404,7 +425,14 @@ class SecretScanner:
                 current_file = None
                 continue
             if line.startswith("+++ b/"):
-                current_file = line.removeprefix("+++ b/")
+                candidate_file = line.removeprefix("+++ b/")
+                # Why this exists:
+                # Generated build trees may have existed in old commits even when they are now
+                # ignored. Scanning those historical artifacts creates thousands of duplicate
+                # pseudo-secrets and makes a real credential harder to see.
+                current_file = (
+                    None if self._should_skip_relative_path(candidate_file) else candidate_file
+                )
                 continue
             if line.startswith("@@"):
                 current_line_number = self._extract_added_hunk_line_number(line)
@@ -528,6 +556,7 @@ class SecretScanner:
                 detector_name,
                 secret_preview_source,
                 file_path=file_path,
+                line=line,
             ):
                 continue
             if detector_name in {"generic_password", "generic_token_assignment"}:
@@ -1011,9 +1040,20 @@ class SecretScanner:
         value: str,
         *,
         file_path: str,
+        line: str,
     ) -> bool:
         """Suppress readable test fixtures while retaining provider-shaped credentials."""
 
+        path = Path(file_path.lower())
+        if detector_name == "private_key":
+            return (
+                path.suffix in SOURCE_CODE_EXTENSIONS
+                and any(
+                    part in {"example", "examples", "test", "tests", "validation"}
+                    for part in path.parts
+                )
+                and ('"' in line or "'" in line)
+            )
         if self._allow_entropy_scan(file_path):
             return False
 
@@ -1021,8 +1061,20 @@ class SecretScanner:
         if normalized_value.lower().startswith(HIGH_SIGNAL_PREFIXES):
             return False
         if detector_name == "bearer_token":
-            token = re.sub(r"(?i)^bearer\s+", "", normalized_value).lower()
-            return bool(HUMAN_READABLE_SLUG_PATTERN.fullmatch(token))
+            token = re.sub(r"(?i)^bearer\s+", "", normalized_value)
+            if HUMAN_READABLE_SLUG_PATTERN.fullmatch(token.lower()):
+                return True
+            if any(part in {"example", "examples"} for part in Path(file_path.lower()).parts):
+                try:
+                    decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+                    decoded_text = decoded.decode("utf-8")
+                except (ValueError, UnicodeDecodeError):
+                    return False
+                return len(decoded_text) >= 8 and all(
+                    character.isprintable() or character.isspace()
+                    for character in decoded_text
+                )
+            return False
         if detector_name == "credential_in_url":
             try:
                 parsed = urlsplit(normalized_value)
@@ -1073,6 +1125,14 @@ class SecretScanner:
 
         return file_path.suffix.lower() in SKIPPED_BINARY_EXTENSIONS
 
+    def _should_skip_relative_path(self, file_path: str) -> bool:
+        """Apply the same generated/binary exclusions to a path found in Git history."""
+
+        path = Path(file_path)
+        return any(part in SKIPPED_DIRECTORIES for part in path.parts) or self._should_skip_file(
+            path
+        )
+
     def _looks_binary(self, file_path: Path) -> bool:
         """Detect binary content even when the extension looks inconclusive."""
 
@@ -1103,9 +1163,9 @@ class SecretScanner:
         path = Path(relative_path.lower())
         if path.name in LOCKFILE_NAMES:
             return False
-        if path.suffix in {".md", ".rst"} or any(
-            marker in path.name for marker in (".example", ".sample", ".template")
-        ):
+        if path.suffix in {".md", ".rst"} or path.name.startswith(
+            ("example.", "sample.", "template.")
+        ) or any(marker in path.name for marker in (".example", ".sample", ".template")):
             return False
         return not any(part in LOW_SIGNAL_PATH_PARTS for part in path.parts)
 
@@ -1114,6 +1174,19 @@ class SecretScanner:
 
         lowered = candidate.lower()
         if lowered.startswith(("http://", "https://")):
+            return False
+        if lowered.startswith("/"):
+            return False
+        if HUMAN_READABLE_SEPARATED_VALUE_PATTERN.fullmatch(lowered.lstrip("-")):
+            return False
+        if re.fullmatch(r"--?[a-z][a-z0-9-]+=[A-Z][A-Z0-9_]+", candidate):
+            return False
+        if re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*=[A-Za-z_][A-Za-z0-9_.-]*",
+            candidate,
+        ):
+            return False
+        if self._looks_path_reference(candidate):
             return False
         if re.fullmatch(r"[0-9a-f]{20,}", lowered):
             return False
@@ -1128,6 +1201,25 @@ class SecretScanner:
         has_symbol = any(character in "/+_=.-" for character in candidate)
         signal_classes = sum((has_lower, has_upper, has_digit, has_symbol))
         return signal_classes >= 2
+
+    def _looks_path_reference(self, value: str) -> bool:
+        """
+        Recognize file references that entropy scanning would otherwise mistake for credentials.
+
+        Why this exists:
+        JSON reports and maintenance scripts often put words such as `token` or `secret` next to
+        a generated source path. Requiring a slash plus a normal file suffix keeps random Base64
+        values detectable while filtering paths such as `docs/integration/example.md`.
+        """
+
+        normalized_value = value.strip().strip("'\"")
+        if "/" not in normalized_value or normalized_value.startswith(("http://", "https://")):
+            return False
+        suffix = Path(normalized_value).suffix.lower()
+        return bool(suffix) and 1 < len(suffix) <= 10 and re.fullmatch(
+            r"[a-z0-9.]+",
+            suffix,
+        ) is not None
 
     def _is_secret_like_entropy_context(
         self,
@@ -1217,15 +1309,12 @@ class SecretScanner:
         Remove Markdown presentation characters that are not part of an assigned value.
 
         Why this exists:
-        A history line such as ``?secret=WEBHOOK_SECRET`.`` includes the closing code backtick and
-        sentence period in the regex capture. Without normalization, those characters make a plain
-        uppercase placeholder look like a complex literal credential. Real mixed-class values stay
-        detectable after their Markdown wrapper is removed.
+        Markdown examples also occur inside source-code comments and docstrings, so normalization
+        cannot depend on a Markdown filename. Only presentation characters at the candidate
+        boundary are removed; real mixed-class values remain detectable after that trimming.
         """
 
         normalized_value = value.strip().strip("'\"")
-        if file_path is None or Path(file_path).suffix.lower() not in {".md", ".mdx"}:
-            return normalized_value
         return normalized_value.lstrip("`([{").rstrip("`.,;:)]}")
 
     def _looks_code_reference_expression(self, value: str, *, file_path: str | None) -> bool:
@@ -1246,6 +1335,7 @@ class SecretScanner:
         return bool(
             CODE_IDENTIFIER_PATTERN.fullmatch(normalized_value)
             or CODE_MEMBER_REFERENCE_PATTERN.fullmatch(normalized_value)
+            or CODE_GENERIC_TYPE_PATTERN.fullmatch(normalized_value)
         )
 
     def _looks_synthetic_low_signal_value(self, value: str, *, file_path: str | None) -> bool:
@@ -1264,7 +1354,45 @@ class SecretScanner:
             return False
         if self._looks_noncredential_local_url(normalized_value):
             return True
-        return bool(HUMAN_READABLE_SLUG_PATTERN.fullmatch(normalized_value))
+        if self._looks_fixture_credential_url(normalized_value):
+            return True
+        if re.fullmatch(
+            r"(?:admin|demo|example|password|securepass|test|user)[a-z0-9_!@#$%^&*.-]{3,31}",
+            normalized_value,
+        ):
+            return True
+        return bool(HUMAN_READABLE_SEPARATED_VALUE_PATTERN.fullmatch(normalized_value))
+
+    def _looks_fixture_credential_url(self, value: str) -> bool:
+        """Recognize documentation-only URLs with readable local fixture credentials."""
+
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            return False
+        base_scheme = parsed.scheme.split("+", maxsplit=1)[0]
+        if base_scheme not in {"http", "https", "postgres", "postgresql"}:
+            return False
+        credential_parts = [part for part in (parsed.username, parsed.password) if part]
+        hostname = (parsed.hostname or "").lower()
+        if not credential_parts or not hostname:
+            return False
+        local_fixture_host = (
+            hostname == "localhost"
+            or "." not in hostname
+            or hostname.endswith((".example", ".internal", ".invalid", ".local", ".test"))
+        )
+        if not local_fixture_host:
+            try:
+                local_fixture_host = ipaddress.ip_address(hostname).is_private
+            except ValueError:
+                local_fixture_host = False
+        return local_fixture_host and all(
+            len(part) <= 12
+            or self._looks_placeholder_secret(part)
+            or HUMAN_READABLE_SLUG_PATTERN.fullmatch(part.lower())
+            for part in credential_parts
+        )
 
     def _looks_noncredential_local_url(self, value: str) -> bool:
         """Recognize private fixture endpoints without hiding URLs that embed credentials."""
@@ -1299,8 +1427,34 @@ class SecretScanner:
             return True
         if normalized_value in {"...", "…"}:
             return True
+        if normalized_value.endswith(("...", "…")):
+            return True
         if normalized_value.startswith("<") and normalized_value.endswith(">"):
             return True
+        provider_placeholder = re.sub(
+            r"^(?:sk-|xox[baprs]-)",
+            "",
+            normalized_value,
+        )
+        # Source-code tests often store an example env line with a literal escaped newline. Strip
+        # only presentation/escape suffixes before checking the repeated-x provider placeholder;
+        # mixed or random provider values remain untouched and continue to alert.
+        provider_placeholder = re.sub(
+            r"(?:\\[nrt]|[`'\".,;:)\]}])+$",
+            "",
+            provider_placeholder,
+        )
+        if provider_placeholder != normalized_value and re.fullmatch(
+            r"[x*._-]{8,}", provider_placeholder
+        ):
+            return True
+        if provider_placeholder != normalized_value:
+            alphabet = "abcdefghijklmnopqrstuvwxyz"
+            if any(
+                alphabet[index : index + 16] in provider_placeholder
+                for index in range(len(alphabet) - 15)
+            ):
+                return True
         if normalized_value.startswith(VARIABLE_REFERENCE_PREFIXES):
             return True
         if any(marker in normalized_value for marker in VARIABLE_REFERENCE_SUBSTRINGS):

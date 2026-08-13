@@ -131,6 +131,55 @@ def test_sync_repositories_can_include_forks_when_configured() -> None:
     assert [repository.full_name for repository in repositories] == ["Feberdin/core"]
 
 
+def test_sync_repositories_includes_explicitly_targeted_fork() -> None:
+    """A named pre-deploy scan must inspect its fork even when broad fork scans are disabled."""
+
+    session = build_test_session()
+    scanner = RepositoryScanner()
+    original_include_forks = scanner.settings.github_include_forks
+    scanner.settings.github_include_forks = False
+    scanner.github_client.list_repositories = lambda: [
+        {
+            "id": 1,
+            "name": "RuView",
+            "full_name": "Feberdin/RuView",
+            "clone_url": "https://github.com/Feberdin/RuView.git",
+            "default_branch": "main",
+            "archived": False,
+            "fork": True,
+            "owner": {"login": "Feberdin"},
+        }
+    ]
+    requested_commit_sha = "a1" * 20
+    requested_calls: list[tuple[str, str | None]] = []
+
+    def fake_sync_local_checkout(
+        clone_url: str,
+        local_path,
+        default_branch: str,
+        *,
+        fetch_full_history: bool,
+        target_commit_sha: str | None = None,
+    ) -> None:
+        requested_calls.append((clone_url, target_commit_sha))
+
+    scanner._sync_local_checkout = fake_sync_local_checkout
+
+    try:
+        repositories = scanner.sync_repositories(
+            session,
+            repository_full_name="Feberdin/RuView",
+            target_commit_sha=requested_commit_sha,
+        )
+    finally:
+        scanner.settings.github_include_forks = original_include_forks
+
+    assert [repository.full_name for repository in repositories] == ["Feberdin/RuView"]
+    assert requested_calls == [
+        ("https://github.com/Feberdin/RuView.git", requested_commit_sha)
+    ]
+
+
 def test_public_repository_clone_uses_full_history(tmp_path, monkeypatch) -> None:
     """Public repositories should be cloned without `--depth 1` so history scans can run."""
 

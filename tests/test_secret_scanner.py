@@ -665,6 +665,146 @@ def test_skips_high_entropy_noise_in_docs_paths(tmp_path):
     assert not any(finding.detector == "high_entropy" for finding in findings)
 
 
+def test_skips_credential_field_labels_in_home_assistant_translations(tmp_path):
+    """Visible form labels are not configured SMTP credential values."""
+
+    integration = tmp_path / "custom_components" / "example"
+    translations = integration / "translations"
+    translations.mkdir(parents=True)
+    (integration / "strings.json").write_text(
+        '{"smtp_username": "SMTP username", "smtp_password": "SMTP password"}\n',
+        encoding="utf-8",
+    )
+    (translations / "de.json").write_text(
+        '{"smtp_username": "SMTP-Benutzername", "smtp_password": "SMTP-Passwort"}\n',
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_directory(tmp_path)
+
+    assert findings == []
+
+
+def test_translation_file_still_detects_random_credential_literal(tmp_path):
+    """Translation-path suppression must not hide random credential-shaped values."""
+
+    translations = tmp_path / "translations"
+    translations.mkdir()
+    sample = translations / "en.json"
+    value = "".join(("Aq7Z", "pL2m", "R9xV", "c4Tn", "B8wK"))
+    sample.write_text(f'{{\n  "smtp_password": "{value}"\n}}\n', encoding="utf-8")
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert any(finding.detector == "broker_secret_assignment" for finding in findings)
+
+
+def test_skips_key_file_names_and_xml_url_or_boolean_metadata(tmp_path):
+    """Paths, public URLs, and feature flags are configuration metadata, not secrets."""
+
+    source = tmp_path / "service.py"
+    source.write_text('PRIVATE_KEY_FILE_NAME = "private-key.pem"\n', encoding="utf-8")
+    template = tmp_path / "template.xml"
+    template.write_text(
+        "<WebUI>https://tesla.example.test/oauth/send</WebUI>\n"
+        '<Config Name="OAuth enabled" Default="ENABLE_GOOGLE_OAUTH=true"/>\n',
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_directory(tmp_path)
+
+    assert findings == []
+
+
+def test_detects_literal_esphome_api_encryption_key(tmp_path):
+    """ESPHome uses a generic `key` field for sensitive API encryption material."""
+
+    esphome = tmp_path / "esphome"
+    esphome.mkdir()
+    sample = esphome / "wallbox.yaml"
+    value = "".join(("Ab3dE5fG", "h7JkLm9N", "pQrStUvW", "xYz01234", "56789+/A", "BCD="))
+    sample.write_text(
+        f'api:\n  encryption:\n    key: "{value}"\n',
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert any(finding.detector == "generic_token_assignment" for finding in findings)
+
+
+def test_skips_esphome_secret_references(tmp_path):
+    """Local ESPHome secret references are names, not committed credential values."""
+
+    esphome = tmp_path / "esphome"
+    esphome.mkdir()
+    sample = esphome / "wallbox.yaml"
+    sample.write_text(
+        "api:\n"
+        "  encryption:\n"
+        "    key: !secret api_encryption_key\n"
+        "ota:\n"
+        "  password: !secret ota_password\n",
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
+def test_skips_source_member_keyword_arguments_and_wrapped_env_calls(tmp_path):
+    """UI selector constants and runtime env expressions are executable code, not literals."""
+
+    sample = tmp_path / "config.py"
+    sample.write_text(
+        'unifi_username = (env.get("UNIFI_USERNAME", "") or "").strip() or None\n'
+        "selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)\n",
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
+def test_skips_generic_credentials_in_named_typescript_test_files(tmp_path):
+    """Readable fixture values in `*.test.ts` files are not deployed credentials."""
+
+    sample = tmp_path / "email.test.ts"
+    sample.write_text("const draft = { edit_token: 'fixture-edit-token' }\n", encoding="utf-8")
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
+def test_named_test_file_still_detects_provider_shaped_secret(tmp_path):
+    """A test filename must not hide provider-shaped credentials."""
+
+    sample = tmp_path / "client.test.ts"
+    value = "".join(("sk-", "Prod", "Q7mP2xR9L4vN8cT1K6wD3sF5"))
+    sample.write_text(f"const token = '{value}'\n", encoding="utf-8")
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert any(finding.detector == "openai_key" for finding in findings)
+
+
+def test_skips_literal_free_typescript_function_signature(tmp_path):
+    """A typed credential parameter declares an API; it does not assign a secret."""
+
+    sample = tmp_path / "readiness.ts"
+    sample.write_text(
+        "function isStrongJwtSecret(secret: string): boolean {\n",
+        encoding="utf-8",
+    )
+
+    findings = SecretScanner().scan_file(sample, tmp_path)
+
+    assert findings == []
+
+
 def test_skips_binary_media_files(tmp_path):
     sample = tmp_path / "default-background.jpg"
     sample.write_bytes(b"\xff\xd8\xff\xe0binary-image-content")

@@ -199,11 +199,16 @@ CODE_MEMBER_REFERENCE_PATTERN = re.compile(
 )
 CODE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 CODE_KEYWORD_ARGUMENT_PATTERN = re.compile(
-    r"[A-Za-z_$][A-Za-z0-9_$]*=[A-Za-z_$][A-Za-z0-9_$]*"
+    r"[A-Za-z_$][A-Za-z0-9_$]*="
+    r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*"
 )
 CODE_TYPE_ANNOTATION_PATTERN = re.compile(
     r"[A-Za-z_$][A-Za-z0-9_$.]*(?:\s*\|\s*[A-Za-z_$][A-Za-z0-9_$.]*)*"
     r"(?:\s*=\s*(?:None|null|undefined)?)?"
+)
+SOURCE_FUNCTION_SIGNATURE_PATTERN = re.compile(
+    r"^\s*(?:export\s+)?(?:async\s+)?function\s+[A-Za-z_$][A-Za-z0-9_$]*"
+    r"\([^)]*\)\s*(?::\s*[^={]+)?\s*[{;]?\s*$"
 )
 HUMAN_READABLE_SLUG_PATTERN = re.compile(r"[a-z]+(?:[-_](?:[a-z]+|\d+))+")
 HUMAN_READABLE_SEPARATED_VALUE_PATTERN = re.compile(
@@ -513,6 +518,8 @@ class SecretScanner:
         """Run regex and entropy detectors against one logical source line."""
 
         findings: list[SecretFinding] = []
+        if self._looks_literal_free_source_function_signature(line, file_path=file_path):
+            return findings
         assignment = self._parse_assignment(line)
         assignment_finding = self._scan_assignment_for_secret(
             assignment=assignment,
@@ -607,6 +614,15 @@ class SecretScanner:
                 )
         return findings
 
+    def _looks_literal_free_source_function_signature(self, line: str, *, file_path: str) -> bool:
+        """Skip typed source signatures that name secret parameters but contain no values."""
+
+        if Path(file_path).suffix.lower() not in SOURCE_CODE_EXTENSIONS:
+            return False
+        if any(quote in line for quote in ("'", '"', "`")):
+            return False
+        return bool(SOURCE_FUNCTION_SIGNATURE_PATTERN.fullmatch(line))
+
     def _parse_assignment(self, line: str) -> ParsedAssignment | None:
         """
         Parse simple config assignments without attempting to parse whole files.
@@ -671,6 +687,11 @@ class SecretScanner:
 
         normalized_name = self._normalize_variable_name(assignment.name)
         value = assignment.value
+        if self._looks_structured_ui_label_assignment(
+            assignment,
+            file_path=file_path,
+        ):
+            return None
         if self._looks_non_literal_source_assignment(
             assignment,
             file_path=file_path,
@@ -723,7 +744,10 @@ class SecretScanner:
             return None
 
         is_credential_name = self._is_heuristic_secret_name(normalized_name)
-        is_generic_key_name = normalized_name.endswith("_KEY")
+        is_generic_key_name = normalized_name.endswith("_KEY") or self._is_esphome_secret_key_name(
+            normalized_name,
+            file_path=file_path,
+        )
         if not is_credential_name and not is_generic_key_name:
             return None
 
@@ -781,6 +805,11 @@ class SecretScanner:
         """Return true when an assignment is intentionally a reference or non-secret config."""
 
         normalized_name = self._normalize_variable_name(assignment.name)
+        if self._looks_structured_ui_label_assignment(
+            assignment,
+            file_path=file_path,
+        ):
+            return True
         if self._looks_non_literal_source_assignment(
             assignment,
             file_path=file_path,
@@ -839,6 +868,56 @@ class SecretScanner:
             or normalized_name.startswith("INTERNET_WATCHER_COMPLAINT_SMTP_")
         )
 
+    def _is_esphome_secret_key_name(self, normalized_name: str, *, file_path: str) -> bool:
+        """Treat a literal generic `key` in ESPHome YAML as credential material."""
+
+        path = Path(file_path.lower())
+        return (
+            normalized_name == "KEY"
+            and path.suffix in {".yaml", ".yml"}
+            and "esphome" in path.parts
+        )
+
+    def _looks_structured_ui_label_assignment(
+        self,
+        assignment: ParsedAssignment,
+        *,
+        file_path: str,
+    ) -> bool:
+        """
+        Recognize translated UI labels whose JSON key happens to name a credential field.
+
+        Home Assistant `strings.json` and `translations/*.json` files map keys such as
+        `smtp_password` to visible labels such as `SMTP password`. The label is not a
+        configured value. We require quoted key/value syntax, a matching field prefix,
+        and readable text so random or provider-shaped values still alert.
+        """
+
+        path = Path(file_path.lower())
+        is_translation_file = (
+            path.name in {"strings.json", "strings.yaml", "strings.yml"}
+            or "translations" in path.parts
+        )
+        if (
+            not is_translation_file
+            or not assignment.name_was_quoted
+            or not assignment.value_was_quoted
+        ):
+            return False
+
+        value = assignment.value.strip()
+        if self._contains_high_signal_literal_secret(value) or self._looks_high_entropy_literal(value):
+            return False
+
+        normalized_name = self._normalize_variable_name(assignment.name)
+        field_prefix = normalized_name.split("_", maxsplit=1)[0].lower()
+        readable_value = value.lower().replace("-", " ").replace("_", " ")
+        return bool(
+            field_prefix
+            and readable_value.startswith(f"{field_prefix} ")
+            and re.fullmatch(r"[\wÀ-ÿ][\wÀ-ÿ .,:;()/'-]{2,120}", value)
+        )
+
     def _looks_non_literal_source_assignment(
         self,
         assignment: ParsedAssignment,
@@ -864,6 +943,11 @@ class SecretScanner:
             return False
 
         normalized_name = self._normalize_variable_name(assignment.name)
+        if normalized_name.endswith(("_FILE_NAME", "_PATH")) and (
+            "/" in value
+            or re.fullmatch(r"[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,12}", value)
+        ):
+            return True
         if (
             normalized_name.endswith("_PREFIX")
             and value == lowered_value
@@ -1030,7 +1114,8 @@ class SecretScanner:
 
         path = Path(file_path.lower())
         is_playwright_config = path.name.startswith("playwright.") and ".config." in path.name
-        return is_playwright_config or any(
+        is_named_test_file = any(marker in path.name for marker in (".spec.", ".test."))
+        return is_playwright_config or is_named_test_file or any(
             part in TEST_FIXTURE_PATH_PARTS for part in path.parts
         )
 
@@ -1173,7 +1258,9 @@ class SecretScanner:
         """Filter out common noisy tokens before we compute entropy."""
 
         lowered = candidate.lower()
-        if lowered.startswith(("http://", "https://")):
+        if lowered.startswith(("http://", "https://", "//", "www.")):
+            return False
+        if re.fullmatch(r"[A-Z][A-Z0-9_]{3,}=(?:true|false|\d+)", candidate):
             return False
         if lowered.startswith("/"):
             return False
@@ -1327,7 +1414,7 @@ class SecretScanner:
         it is not a committed credential literal.
         """
 
-        normalized_value = value.strip().strip("'\"").rstrip(",;)]}")
+        normalized_value = value.strip().strip("'\"").lstrip("(").rstrip(",;)]}")
         if CODE_REFERENCE_EXPRESSION_PATTERN.match(normalized_value):
             return True
         if file_path is None or Path(file_path).suffix.lower() not in SOURCE_CODE_EXTENSIONS:

@@ -6,7 +6,7 @@
 # Debugging: If builds fail, verify the pinned release URLs for Trivy and Grype first. If runtime
 # fails on Unraid, inspect entrypoint logs for UID/GID or docker socket group setup errors.
 
-FROM python:3.12.13-slim-trixie
+FROM python:3.14.7-slim-trixie
 
 ARG TRIVY_VERSION=0.73.0
 ARG TRIVY_SHA256=2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b

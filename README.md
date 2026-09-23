@@ -198,6 +198,7 @@ For Home Assistant coverage:
 - `Container findings empty`: confirm `trivy` is installed inside the image and the worker can reach image registries. If you enabled the optional Grype pass, verify `grype` separately.
 - `Container image scan repeats too often`: verify the Unraid inventory exposes `image_identity` in repository metadata. Set `refresh_image_cache=true` on `POST /scan` only when you intentionally want to refresh digest-level image findings.
 - `Repository sync failed` with `Not possible to fast-forward`: the scanner treats `data/repos/...` as disposable cache and resets the checkout to `origin/<default_branch>` on the next scan. If it keeps failing, delete the cached checkout path shown in the logs and rerun the scan.
+- `index.lock` in a background-scan cache: commit-bound pre-deploy scans now use a separate temporary checkout for the entire scan. They verify the requested full SHA and do not remove locks or modify the existing cache. Regular completion, errors, pause, and cancellation clean up the temporary directory. A forced container kill can leave a `.predeploy-*` directory behind; inspect it during maintenance only when no scan is using it. Normal background scans still require their cache to be healthy.
 - `AI extraction not running`: set `AI_ENABLED=true`, provide `OPENAI_API_KEY`, and inspect worker logs.
 - `Manual scan remains queued`: verify the `worker` is healthy, or enable
   `RUN_EMBEDDED_SCHEDULER=true` for a supported single-container installation.

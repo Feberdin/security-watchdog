@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -86,6 +87,33 @@ class ScanOrchestrator:
         self.alert_dispatcher = AlertDispatcher()
 
     def run_manual_scan(
+        self,
+        session: Session,
+        request: ScanRequest,
+        *,
+        job_id: int | None = None,
+        resume_started_at: datetime | None = None,
+        progress_callback: ScanProgressCallback | None = None,
+        cancellation_check: ScanCancellationCheck | None = None,
+    ) -> ScanResponse:
+        """Bind a commit scan to private files for its complete inventory/scan lifetime."""
+
+        checkout_scope = (
+            self.repository_scanner.isolated_checkouts()
+            if request.target_commit_sha is not None
+            else nullcontext()
+        )
+        with checkout_scope:
+            return self._run_manual_scan(
+                session,
+                request,
+                job_id=job_id,
+                resume_started_at=resume_started_at,
+                progress_callback=progress_callback,
+                cancellation_check=cancellation_check,
+            )
+
+    def _run_manual_scan(
         self,
         session: Session,
         request: ScanRequest,
@@ -461,7 +489,7 @@ class ScanOrchestrator:
         """Run dependency, secret, container, and SBOM stages for a GitHub repository."""
 
         self._check_cancellation(cancellation_check)
-        local_path = Path(repository.local_path)
+        local_path = self.repository_scanner.get_scan_path(repository)
         if progress:
             progress.asset_step(
                 phase="dependencies",
@@ -1310,7 +1338,7 @@ class ScanOrchestrator:
         try:
             if scanner_name == "repository_asset_scan":
                 scanned_commit_sha = self.repository_scanner.get_checkout_commit_sha(
-                    Path(repository.local_path)
+                    self.repository_scanner.get_scan_path(repository)
                 )
                 effective_details["commit_sha"] = scanned_commit_sha
                 if expected_commit_sha and scanned_commit_sha != expected_commit_sha:

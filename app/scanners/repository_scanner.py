@@ -4,18 +4,23 @@ Input/Output: Uses the GitHub API plus local `git` commands and returns reposito
 Important invariants: Clone paths are stable, but cached checkouts are disposable scanner state. If
 the local branch diverges from GitHub, the scanner must recover by resetting it to the remote default
 branch instead of silently dropping that repository from a full scan.
+Commit-bound scans use private temporary checkouts, leaving shared cache locks untouched.
 Debugging: If a repository does not update, inspect the logged git command and local checkout path.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.utils import run_command, safe_slug
+from app.models.entities import Repository
 from app.repositories.store import get_repository_by_full_name, upsert_repository
 from app.services.github_client import GitHubClient
 
@@ -28,6 +33,33 @@ class RepositoryScanner:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.github_client = GitHubClient()
+        self._isolated_root: Path | None = None
+        self._scan_paths: dict[str, Path] = {}
+
+    @contextmanager
+    def isolated_checkouts(self) -> Iterator[None]:
+        """Keep one pre-deploy scan independent of mutable background-scan caches.
+
+        A cache may retain index.lock after an interrupted Git operation. Never
+        delete that lock: its owner may still be working. A fresh checkout lets
+        the existing exact-commit verification run without changing that cache.
+        Temporary files are removed on success, failure, pause, and cancellation.
+        """
+
+        self.settings.repo_storage_path.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(prefix=".predeploy-", dir=self.settings.repo_storage_path) as workspace:
+            previous_root, previous_paths = self._isolated_root, self._scan_paths
+            self._isolated_root = Path(workspace)
+            self._scan_paths = {}
+            try:
+                yield
+            finally:
+                self._isolated_root, self._scan_paths = previous_root, previous_paths
+
+    def get_scan_path(self, repository: Repository) -> Path:
+        """Resolve scan files without persisting temporary paths in repository metadata."""
+
+        return self._scan_paths.get(repository.full_name, Path(repository.local_path))
 
     def sync_repositories(
         self,
@@ -63,6 +95,9 @@ class RepositoryScanner:
 
             try:
                 local_path = self._local_checkout_path(repository_data["full_name"])
+                scan_path = local_path
+                if self._isolated_root is not None:
+                    scan_path = self._isolated_root / local_path.relative_to(self.settings.repo_storage_path)
                 repository = upsert_repository(
                     session,
                     source_type="github",
@@ -78,7 +113,7 @@ class RepositoryScanner:
                 )
                 self._sync_local_checkout(
                     repository.clone_url or "",
-                    local_path,
+                    scan_path,
                     repository.default_branch,
                     fetch_full_history=self._should_fetch_full_history(repository_data),
                     target_commit_sha=(
@@ -87,6 +122,8 @@ class RepositoryScanner:
                         else None
                     ),
                 )
+                if self._isolated_root is not None:
+                    self._scan_paths[repository.full_name] = scan_path
                 synced.append(repository)
             except Exception as error:
                 LOGGER.warning(
